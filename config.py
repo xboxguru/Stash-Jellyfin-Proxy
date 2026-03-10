@@ -10,6 +10,7 @@ CONFIG_FILE = os.getenv("CONFIG_FILE", os.path.join(SCRIPT_DIR, "stash_jellyfin_
 STASH_URL = "https://stash:9999"
 STASH_API_KEY = ""
 PROXY_API_KEY = ""  # NEW: Configurable Proxy API Key for ErsatzTV
+SYNC_LEVEL = "Everything"  # Options: Everything, Organized, Tagged
 PROXY_BIND = "0.0.0.0"
 PROXY_PORT = 8096
 UI_PORT = 8097
@@ -108,6 +109,7 @@ _config, config_defined_keys = load_config_file(CONFIG_FILE)
 if _config:
     STASH_URL = _config.get("STASH_URL", STASH_URL)
     STASH_API_KEY = _config.get("STASH_API_KEY", STASH_API_KEY)
+    SYNC_LEVEL = _config.get("SYNC_LEVEL", SYNC_LEVEL)
     PROXY_API_KEY = _config.get("PROXY_API_KEY", PROXY_API_KEY)
     PROXY_BIND = _config.get("PROXY_BIND", PROXY_BIND)
     PROXY_PORT = int(_config.get("PROXY_PORT", PROXY_PORT))
@@ -151,7 +153,7 @@ env_overrides = []
 env_map = {
     "STASH_URL": "STASH_URL", "STASH_API_KEY": "STASH_API_KEY", "PROXY_API_KEY": "PROXY_API_KEY",
     "PROXY_BIND": "PROXY_BIND", "SJS_USER": "SJS_USER", "SJS_PASSWORD": "SJS_PASSWORD",
-    "SERVER_ID": "SERVER_ID", "LOG_DIR": "LOG_DIR"
+    "SERVER_ID": "SERVER_ID", "LOG_DIR": "LOG_DIR", "SYNC_LEVEL": "SYNC_LEVEL"
 }
 
 for env_key, var_name in env_map.items():

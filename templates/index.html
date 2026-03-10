@@ -373,6 +373,29 @@
         select.form-input {
             cursor: pointer;
         }
+        .form-row.three-col {
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        }
+        .checkbox-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 12px;
+            background: rgba(0,0,0,0.15);
+            padding: 16px;
+            border-radius: 6px;
+            margin-bottom: 16px;
+        }
+        .badge-warning {
+            background: rgba(255, 152, 0, 0.15);
+            color: var(--warning);
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 10px;
+            margin-left: 8px;
+            vertical-align: middle;
+            text-transform: none;
+            letter-spacing: normal;
+        }
     </style>
 </head>
 <body>
@@ -483,184 +506,196 @@
             <div id="page-config" class="page hidden">
                 <h2 class="page-title">Configuration</h2>
                 <form id="config-form" autocomplete="off">
+                    
                     <div class="card">
                         <h3 class="card-title">Stash Connection</h3>
-                        <div class="form-hint" style="margin-bottom: 1rem; padding: 0.5rem; background: rgba(255,193,7,0.1); border-radius: 4px;">⚠️ All settings in this section require a server restart to take effect.</div>
-                        <div class="form-group">
-                            <label class="form-label">Stash URL</label>
-                            <input type="text" class="form-input" name="STASH_URL" placeholder="https://stash:9999">
-                            <div class="form-hint">Full URL including port (e.g., http://localhost:9999 or https://stash.example.com)</div>
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label">API Key</label>
-                            <input type="password" class="form-input" name="STASH_API_KEY" placeholder="Enter API key" autocomplete="off" data-1p-ignore data-lpignore="true">
-                            <div class="form-hint">Found in Stash: Settings → Security → API Key</div>
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label">GraphQL Path</label>
-                            <input type="text" class="form-input" name="STASH_GRAPHQL_PATH" placeholder="/graphql">
-                            <div class="form-hint">Usually /graphql but can be overridden for advanced proxy configurations</div>
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label" style="display: flex; align-items: center; gap: 0.5rem;">
-                                <input type="checkbox" name="STASH_VERIFY_TLS" checked style="width: auto;">
-                                Verify TLS Certificate
-                            </label>
-                            <div class="form-hint">Disable for self-signed certificates (not recommended for production)</div>
-                        </div>
                         <div class="form-row">
                             <div class="form-group">
-                                <label class="form-label">Timeout (seconds)</label>
+                                <label class="form-label">Stash URL</label>
+                                <input type="text" class="form-input" name="STASH_URL" placeholder="http://localhost:9999">
+                                <div class="form-hint">Full URL including port</div>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Stash API Key</label>
+                                <input type="password" class="form-input" name="STASH_API_KEY" placeholder="Enter API key" autocomplete="off" data-1p-ignore data-lpignore="true">
+                                <div class="form-hint">Found in Stash: Settings → Security</div>
+                            </div>
+                        </div>
+                        <div class="form-row three-col">
+                            <div class="form-group">
+                                <label class="form-label">GraphQL Path</label>
+                                <input type="text" class="form-input" name="STASH_GRAPHQL_PATH" placeholder="/graphql">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Timeout (sec)</label>
                                 <input type="number" class="form-input" name="STASH_TIMEOUT" placeholder="30">
-                                <div class="form-hint">API request timeout</div>
                             </div>
                             <div class="form-group">
                                 <label class="form-label">Retries</label>
                                 <input type="number" class="form-input" name="STASH_RETRIES" placeholder="3">
-                                <div class="form-hint">Retry count on failure</div>
+                            </div>
+                        </div>
+                        <div class="form-group" style="margin-bottom: 0;">
+                            <label class="form-label" style="display: flex; align-items: center; gap: 0.5rem;">
+                                <input type="checkbox" name="STASH_VERIFY_TLS" checked style="width: auto;">
+                                Verify TLS Certificate (Disable for self-signed certs)
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <h3 class="card-title">Proxy Server & Identity</h3>
+                        <div class="form-row three-col">
+                            <div class="form-group">
+                                <label class="form-label">Bind Address <span class="badge-warning">Restart</span></label>
+                                <input type="text" class="form-input" name="PROXY_BIND" placeholder="0.0.0.0">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">API Port <span class="badge-warning">Restart</span></label>
+                                <input type="number" class="form-input" name="PROXY_PORT" placeholder="8096">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">UI Port <span class="badge-warning">Restart</span></label>
+                                <input type="number" class="form-input" name="UI_PORT" placeholder="8097">
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">Server Name</label>
+                                <input type="text" class="form-input" name="SERVER_NAME" placeholder="Stash Media Server">
+                                <div class="form-hint">Display name shown in clients</div>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Server ID <span class="badge-warning">Changing breaks client pairings</span></label>
+                                <input type="text" class="form-input" name="SERVER_ID">
+                            </div>
+                        </div>
+                        <div class="form-group" style="margin-bottom: 0;">
+                            <label class="form-label">Proxy API Key (For ErsatzTV / Clients)</label>
+                            <div style="display: flex; gap: 10px; align-items: center;">
+                                <input type="text" class="form-input" id="PROXY_API_KEY" name="PROXY_API_KEY" placeholder="Auto-generated if blank">
+                                <button type="button" id="btn-rotate-key" class="btn btn-secondary" style="padding: 10px 12px; font-size: 12px; white-space: nowrap;">
+                                    <svg style="width: 14px; height: 14px; display: inline-block; vertical-align: text-bottom; margin-right: 4px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                                    Rotate Key
+                                </button>
+                            </div>
+                            <div class="form-hint">Use this key as your Token/Password in ErsatzTV.</div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <h3 class="card-title">Library Sync & Organization <span style="color:var(--success); font-size:10px; margin-left:8px; text-transform:none;">(Live Update)</span></h3>
+                        <div class="form-row three-col">
+                            <div class="form-group">
+                                <label class="form-label">Sync Level</label>
+                                <select class="form-input" name="SYNC_LEVEL">
+                                    <option value="Everything">Everything (Default)</option>
+                                    <option value="Organized">Organized Only</option>
+                                    <option value="Tagged">Tagged Only</option>
+                                </select>
+                                <div class="form-hint">Controls imported scenes</div>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Default Page Size</label>
+                                <input type="number" class="form-input" name="DEFAULT_PAGE_SIZE" placeholder="50">
+                                <div class="form-hint">Default query limit</div>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Max Page Size</label>
+                                <input type="number" class="form-input" name="MAX_PAGE_SIZE" placeholder="200">
+                                <div class="form-hint">Hard query limit</div>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label class="form-label">Tag Groups</label>
+                                <input type="text" class="form-input" name="TAG_GROUPS" placeholder="e.g. Favorites, VR, 4K">
+                                <div class="form-hint">Stash tags to create as library folders</div>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Latest Groups</label>
+                                <input type="text" class="form-input" name="LATEST_GROUPS" placeholder="Scenes">
+                                <div class="form-hint">Libraries for the home screen</div>
                             </div>
                         </div>
                     </div>
+
                     <div class="card">
-                        <h3 class="card-title">Proxy Settings</h3>
-                        <div class="form-hint" style="margin-bottom: 1rem; padding: 0.5rem; background: rgba(255,193,7,0.1); border-radius: 4px;">⚠️ All settings in this section require a server restart to take effect.</div>
-                        <div class="form-row">
-                            <div class="form-group">
-                                <label class="form-label">Bind Address</label>
-                                <input type="text" class="form-input" name="PROXY_BIND" placeholder="0.0.0.0">
-                                <div class="form-hint">Use 0.0.0.0 for all interfaces, or 127.0.0.1 for local only</div>
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">Proxy Port</label>
-                                <input type="number" class="form-input" name="PROXY_PORT" placeholder="8096">
-                                <div class="form-hint">Port for Jellyfin API (default 8096)</div>
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">UI Port</label>
-                                <input type="number" class="form-input" name="UI_PORT" placeholder="8097">
-                                <div class="form-hint">Port for this Web UI (0 to disable)</div>
-                            </div>
+                        <h3 class="card-title">Features & Caching</h3>
+                        <div class="checkbox-grid">
+                            <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                                <input type="checkbox" name="ENABLE_FILTERS" checked>
+                                Show Saved Filters Folder
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                                <input type="checkbox" name="ENABLE_TAG_FILTERS">
+                                Show Tags Folder
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                                <input type="checkbox" name="ENABLE_ALL_TAGS">
+                                Enable 'All Tags' Subfolder
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                                <input type="checkbox" name="ENABLE_IMAGE_RESIZE" checked>
+                                Auto-Resize Studio Logos
+                            </label>
                         </div>
                         
-                        <div class="form-group" style="margin-top: 16px;">
-                            <label class="form-label">Proxy API Key (For ErsatzTV / Infuse)</label>
-                            <input type="text" class="form-input" id="PROXY_API_KEY" name="PROXY_API_KEY" placeholder="Auto-generated if blank">
-                            <div class="form-hint">Use this key in your Jellyfin client settings to authenticate.</div>
-                        </div>
-                    </div>
-                    <div class="card">
-                        <h3 class="card-title">Authentication</h3>
-                        <div class="form-hint" style="margin-bottom: 1rem; padding: 0.5rem; background: rgba(255,193,7,0.1); border-radius: 4px;">⚠️ Username and Password changes require a server restart.</div>
-                        <div class="form-row">
-                            <div class="form-group">
-                                <label class="form-label">Username</label>
-                                <input type="text" class="form-input" name="SJS_USER" placeholder="e.g. admin" autocomplete="off" data-1p-ignore data-lpignore="true">
-                                <div class="form-hint">Username for connecting from Infuse</div>
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">Password</label>
-                                <input type="password" class="form-input" name="SJS_PASSWORD" placeholder="Enter password" autocomplete="new-password" data-1p-ignore data-lpignore="true">
-                                <div class="form-hint">Password for connecting from Infuse</div>
-                            </div>
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label" style="display: flex; align-items: center; gap: 0.5rem;">
-                                <input type="checkbox" name="REQUIRE_AUTH_FOR_CONFIG" style="width: auto;">
-                                Require Password for Configuration
-                            </label>
-                            <div class="form-hint">Prompt for password before accessing this config page</div>
-                        </div>
-                    </div>
-                    <div class="card">
-                        <h3 class="card-title">Server Identity</h3>
-                        <div class="form-group">
-                            <label class="form-label">Server ID</label>
-                            <input type="text" class="form-input" name="SERVER_ID">
-                            <div class="form-hint" style="color: var(--warning);">Warning: Changing this value will break existing client pairings. Changes require a server restart.</div>
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label">Server Name</label>
-                            <input type="text" class="form-input" name="SERVER_NAME" placeholder="Stash Media Server">
-                            <div class="form-hint">Display name shown in Infuse and other clients</div>
-                        </div>
-                    </div>
-                    <div class="card">
-                        <h3 class="card-title">Library Organization</h3>
-                        <div class="form-group">
-                            <label class="form-label">Tag Groups</label>
-                            <input type="text" class="form-input" name="TAG_GROUPS" placeholder="e.g. Favorites, VR, 4K">
-                            <div class="form-hint">Comma-separated Stash tag names to create as library folders in Infuse</div>
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label">Latest Groups</label>
-                            <input type="text" class="form-input" name="LATEST_GROUPS" placeholder="Scenes">
-                            <div class="form-hint">Libraries to show on Infuse home screen (use "Scenes" for all scenes)</div>
-                        </div>
-                    </div>
-                    <div class="card">
-                        <h3 class="card-title">Feature Toggles</h3>
-                        <div class="form-row">
-                            <div class="form-group">
-                                <label class="form-label" style="display: flex; align-items: center; gap: 0.5rem;">
-                                    <input type="checkbox" name="ENABLE_FILTERS" checked style="width: auto;">
-                                    Enable Scene Filters
-                                </label>
-                                <div class="form-hint">Show FILTERS folder in library (uses saved scene filters from Stash)</div>
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label" style="display: flex; align-items: center; gap: 0.5rem;">
-                                    <input type="checkbox" name="ENABLE_IMAGE_RESIZE" checked style="width: auto;">
-                                    Enable Image Resize
-                                </label>
-                                <div class="form-hint">Resize studio logos to fit Infuse tiles better</div>
-                            </div>
-                        </div>
-                        <div class="form-row">
-                            <div class="form-group">
-                                <label class="form-label" style="display: flex; align-items: center; gap: 0.5rem;">
-                                    <input type="checkbox" name="ENABLE_TAG_FILTERS" style="width: auto;">
-                                    Enable Tag Filters
-                                </label>
-                                <div class="form-hint">Show Tags folder for browsing tags and their scenes</div>
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label" style="display: flex; align-items: center; gap: 0.5rem;">
-                                    <input type="checkbox" name="ENABLE_ALL_TAGS" style="width: auto;">
-                                    Enable All Tags
-                                </label>
-                                <div class="form-hint">Show "All Tags" subfolder (may be large in some libraries)</div>
-                            </div>
-                        </div>
-                        <div class="form-group" style="margin-top: 16px; border-top: 1px solid var(--border); padding-top: 16px;">
-                            <label class="form-label">Image Cache Version</label>
+                        <div class="form-group" style="margin-bottom: 0;">
+                            <label class="form-label">Image Cache Busting</label>
                             <div style="display: flex; gap: 10px; align-items: center;">
                                 <span id="current-image-version" style="font-weight: bold; font-size: 1.2em; color: var(--accent);">v0</span>
                                 <button type="button" id="btn-increment-version" class="btn btn-secondary" style="padding: 6px 12px; font-size: 12px;">
                                     Force Image Refresh
                                 </button>
                             </div>
-                            <div class="form-hint">Increments the image tag sent to ErsatzTV, forcing it to redownload thumbnails on the next scan.</div>
+                            <div class="form-hint">Increments image tags to force clients (like ErsatzTV) to re-download thumbnails.</div>
                         </div>
                     </div>
+
                     <div class="card">
-                        <h3 class="card-title">Pagination</h3>
-                        <div class="form-row">
+                        <h3 class="card-title">Client Access & Security</h3>
+                        <div class="form-row three-col">
                             <div class="form-group">
-                                <label class="form-label">Default Page Size</label>
-                                <input type="number" class="form-input" name="DEFAULT_PAGE_SIZE" placeholder="50">
-                                <div class="form-hint">Items per page when Infuse doesn't specify a limit</div>
+                                <label class="form-label">Proxy Username</label>
+                                <input type="text" class="form-input" name="SJS_USER" placeholder="e.g. admin" autocomplete="off" data-1p-ignore>
                             </div>
                             <div class="form-group">
-                                <label class="form-label">Max Page Size</label>
-                                <input type="number" class="form-input" name="MAX_PAGE_SIZE" placeholder="200">
-                                <div class="form-hint">Maximum items allowed in a single API request</div>
+                                <label class="form-label">Proxy Password</label>
+                                <input type="password" class="form-input" name="SJS_PASSWORD" placeholder="Enter password" autocomplete="new-password" data-1p-ignore>
+                            </div>
+                            <div class="form-group" style="display: flex; align-items: flex-end; padding-bottom: 8px;">
+                                <label class="form-label" style="display: flex; align-items: center; gap: 0.5rem; margin:0;">
+                                    <input type="checkbox" name="REQUIRE_AUTH_FOR_CONFIG" style="width: auto;">
+                                    Require Password for UI
+                                </label>
+                            </div>
+                        </div>
+                        
+                        <div style="border-top: 1px solid var(--border); margin: 16px 0;"></div>
+                        
+                        <div class="form-row three-col">
+                            <div class="form-group">
+                                <label class="form-label">Ban Threshold</label>
+                                <input type="number" class="form-input" name="BAN_THRESHOLD" placeholder="10">
+                                <div class="form-hint">Failed attempts before ban</div>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Ban Window (mins)</label>
+                                <input type="number" class="form-input" name="BAN_WINDOW_MINUTES" placeholder="15">
+                                <div class="form-hint">Time window for failures</div>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Manually Banned IPs</label>
+                                <input type="text" class="form-input" name="BANNED_IPS" placeholder="192.168.1.100, 10.0.0.5">
+                                <div class="form-hint">Comma-separated IPs</div>
                             </div>
                         </div>
                     </div>
+
                     <div class="card">
-                        <h3 class="card-title">Logging</h3>
-                        <div class="form-hint" style="margin-bottom: 1rem; padding: 0.5rem; background: rgba(255,193,7,0.1); border-radius: 4px;">⚠️ Log Directory and Log File changes require a server restart.</div>
-                        <div class="form-row">
+                        <h3 class="card-title">Logging <span class="badge-warning">Restart Required</span></h3>
+                        <div class="form-row three-col">
                             <div class="form-group">
                                 <label class="form-label">Log Level</label>
                                 <select class="form-input" name="LOG_LEVEL">
@@ -669,24 +704,20 @@
                                     <option value="WARNING">WARNING</option>
                                     <option value="ERROR">ERROR</option>
                                 </select>
-                                <div class="form-hint">DEBUG shows all details, INFO shows key events only</div>
                             </div>
                             <div class="form-group">
                                 <label class="form-label">Log Directory</label>
                                 <input type="text" class="form-input" name="LOG_DIR" placeholder="/config">
-                                <div class="form-hint">Directory for log files</div>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Log File</label>
+                                <input type="text" class="form-input" name="LOG_FILE" placeholder="stash_jellyfin_proxy.log">
                             </div>
                         </div>
                         <div class="form-row">
                             <div class="form-group">
-                                <label class="form-label">Log File</label>
-                                <input type="text" class="form-input" name="LOG_FILE" placeholder="stash_jellyfin_proxy.log">
-                                <div class="form-hint">Log filename</div>
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">Max Size (MB)</label>
+                                <label class="form-label">Max File Size (MB)</label>
                                 <input type="number" class="form-input" name="LOG_MAX_SIZE_MB" placeholder="10">
-                                <div class="form-hint">Max file size before rotation</div>
                             </div>
                             <div class="form-group">
                                 <label class="form-label">Backup Count</label>
@@ -695,34 +726,14 @@
                             </div>
                         </div>
                     </div>
-                    <div class="card">
-                        <h3 class="card-title">Security - IP Banning</h3>
-                        <div class="form-row">
-                            <div class="form-group">
-                                <label class="form-label">Ban Threshold</label>
-                                <input type="number" class="form-input" name="BAN_THRESHOLD" placeholder="10">
-                                <div class="form-hint">Failed auth attempts before auto-ban</div>
-                            </div>
-                            <div class="form-group">
-                                <label class="form-label">Ban Window (minutes)</label>
-                                <input type="number" class="form-input" name="BAN_WINDOW_MINUTES" placeholder="15">
-                                <div class="form-hint">Rolling window for counting failures</div>
-                            </div>
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label">Banned IPs</label>
-                            <textarea class="form-input" name="BANNED_IPS" rows="3" placeholder="e.g. 192.168.1.100, 10.0.0.50" style="resize: vertical;"></textarea>
-                            <div class="form-hint">Comma-separated list of banned IP addresses. Edit to add/remove bans manually.</div>
-                        </div>
-                    </div>
+
                     <div id="env-notice" class="env-notice">
                         <strong>Environment Override:</strong> The following fields are set via environment variables and cannot be changed here: <span></span>
                     </div>
                     <div style="display: flex; gap: 1rem; align-items: center; margin-top: 16px;">
                         <button type="submit" class="btn btn-primary">Save Configuration</button>
-                        <button type="button" id="restart-btn" class="btn" style="background: #dc3545;">Restart Server</button>
+                        <button type="button" id="restart-btn" class="btn" style="background: var(--error);">Restart Server</button>
                     </div>
-                    <p id="restart-note" class="hidden" style="color: #ffc107; margin-top: 0.5rem; font-size: 0.9rem;">Note: Changes to bind address or ports require a restart to take effect.</p>
                 </form>
             </div>
             <!-- Logs Page -->
@@ -934,6 +945,7 @@
         const DEFAULTS = {
             STASH_URL: '',
             STASH_API_KEY: '',
+            SYNC_LEVEL: 'Everything',
             STASH_GRAPHQL_PATH: '/graphql',
             STASH_VERIFY_TLS: false,
             PROXY_BIND: '0.0.0.0',
@@ -1115,6 +1127,16 @@
                 }
             } catch (e) {
                 showToast('Failed to connect to proxy', 'error');
+            }
+        });
+
+        // Rotate API Key Button
+        document.getElementById('btn-rotate-key').addEventListener('click', () => {
+            if (confirm('Are you sure you want to rotate the API Key? You will need to update ErsatzTV and restart the proxy.')) {
+                // Generate a secure v4 UUID using the browser's crypto API
+                const newKey = crypto.randomUUID();
+                document.getElementById('PROXY_API_KEY').value = newKey;
+                showToast('New key generated. Click "Save Configuration" to apply.', 'info');
             }
         });
 
