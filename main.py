@@ -56,6 +56,7 @@ routes = [
     Route("/api/login", ui_routes.api_login, methods=["POST"]),
     Route("/api/logout", ui_routes.api_logout, methods=["POST"]),
     Route("/api/increment_image_version", ui_routes.api_increment_image_version, methods=["POST"]),
+    Route("/api/stats/reset", ui_routes.api_reset_stats, methods=["POST"]),
 
     # --- Jellyfin API Routes ---
     # Jellyfin clients request data using these standard endpoints

@@ -1,5 +1,6 @@
 import os
 import logging
+import state
 from starlette.responses import JSONResponse, HTMLResponse
 from starlette.requests import Request
 import config
@@ -26,62 +27,87 @@ async def serve_index(request: Request):
         return HTMLResponse(f"<h1>Error loading UI</h1><p>{e}</p>", status_code=500)
 
 async def api_get_config(request: Request):
-    return JSONResponse({
+    config_data = {
         "STASH_URL": getattr(config, "STASH_URL", ""),
         "STASH_API_KEY": getattr(config, "STASH_API_KEY", ""),
-        "SYNC_LEVEL": getattr(config, "SYNC_LEVEL", "Everything"),
         "PROXY_API_KEY": getattr(config, "PROXY_API_KEY", ""),
+        "PROXY_BIND": getattr(config, "PROXY_BIND", "0.0.0.0"),
         "PROXY_PORT": getattr(config, "PROXY_PORT", 8096),
+        "UI_PORT": getattr(config, "UI_PORT", 8097),
         "SJS_USER": getattr(config, "SJS_USER", ""),
         "SJS_PASSWORD": getattr(config, "SJS_PASSWORD", ""),
-        "PROXY_API_KEY": getattr(config, "PROXY_API_KEY", ""),
         "REQUIRE_AUTH_FOR_CONFIG": getattr(config, "REQUIRE_AUTH_FOR_CONFIG", False),
         "SERVER_NAME": getattr(config, "SERVER_NAME", "Stash Media Server"),
+        "SERVER_ID": getattr(config, "SERVER_ID", ""),
         "ENABLE_FILTERS": getattr(config, "ENABLE_FILTERS", True),
         "ENABLE_TAG_FILTERS": getattr(config, "ENABLE_TAG_FILTERS", False),
         "ENABLE_IMAGE_RESIZE": getattr(config, "ENABLE_IMAGE_RESIZE", True),
+        "ENABLE_ALL_TAGS": getattr(config, "ENABLE_ALL_TAGS", False),
+        "STASH_VERIFY_TLS": getattr(config, "STASH_VERIFY_TLS", False),
         "IMAGE_VERSION": getattr(config, "IMAGE_VERSION", 0),
-        "TAG_GROUPS": getattr(config, "TAG_GROUPS", [])
+        "TAG_GROUPS": getattr(config, "TAG_GROUPS", []),
+        "LATEST_GROUPS": getattr(config, "LATEST_GROUPS", ["Scenes"]),
+        "SYNC_LEVEL": getattr(config, "SYNC_LEVEL", "Everything"),
+        "STASH_GRAPHQL_PATH": getattr(config, "STASH_GRAPHQL_PATH", "/graphql"),
+        "STASH_TIMEOUT": getattr(config, "STASH_TIMEOUT", 30),
+        "STASH_RETRIES": getattr(config, "STASH_RETRIES", 3),
+        "DEFAULT_PAGE_SIZE": getattr(config, "DEFAULT_PAGE_SIZE", 50),
+        "MAX_PAGE_SIZE": getattr(config, "MAX_PAGE_SIZE", 200),
+        "LOG_LEVEL": getattr(config, "LOG_LEVEL", "INFO"),
+        "LOG_DIR": getattr(config, "LOG_DIR", "/config"),
+        "LOG_FILE": getattr(config, "LOG_FILE", "stash_jellyfin_proxy.log"),
+        "LOG_MAX_SIZE_MB": getattr(config, "LOG_MAX_SIZE_MB", 10),
+        "LOG_BACKUP_COUNT": getattr(config, "LOG_BACKUP_COUNT", 3),
+        "BAN_THRESHOLD": getattr(config, "BAN_THRESHOLD", 10),
+        "BAN_WINDOW_MINUTES": getattr(config, "BAN_WINDOW_MINUTES", 15),
+        "BANNED_IPS": list(getattr(config, "BANNED_IPS", set())),
+        "AUTHENTICATED_IPS": list(getattr(state, "authenticated_ips", set())),
+    }
+    
+    return JSONResponse({
+        "config": config_data,
+        "env_fields": getattr(config, "env_overrides", []),
+        "defined_fields": list(getattr(config, "config_defined_keys", set())) # <-- This fixes the blank fields!
     })
 
 async def api_post_config(request: Request):
-    """Dynamically saves settings sent from the UI."""
+    """Saves settings sent from the UI to memory and the file."""
     try:
         data = await request.json()
-        needs_restart = False
+        
+        # 1. Check if we need to warn the user to restart BEFORE applying changes
         restart_triggers = [
             "PROXY_PORT", "PROXY_BIND", "UI_PORT", 
             "LOG_LEVEL", "LOG_DIR", "LOG_FILE", "LOG_MAX_SIZE_MB", "LOG_BACKUP_COUNT"
         ]
         
-        # Explicit list of checkboxes from the frontend
-        bool_fields = ["ENABLE_FILTERS", "ENABLE_IMAGE_RESIZE", "ENABLE_TAG_FILTERS", "ENABLE_ALL_TAGS", "REQUIRE_AUTH_FOR_CONFIG", "STASH_VERIFY_TLS"]
+        needs_restart = any(str(data.get(k)) != str(getattr(config, k, "")) for k in restart_triggers if k in data)
         
-        for key, new_val in data.items():
-            # 1. Enforce specific data types
-            if key in bool_fields:
-                new_val = str(new_val).lower() in ['true', '1', 'on', 'yes']
-                write_val = "True" if new_val else "False"
-            elif isinstance(getattr(config, key, None), int):
-                new_val = int(new_val) if str(new_val).isdigit() else getattr(config, key, 0)
-                write_val = str(new_val)
-            elif isinstance(new_val, list):
-                write_val = ",".join(new_val)
+        # 2. Apply new settings to memory
+        for key, value in data.items():
+            if key == "AUTHENTICATED_IPS":
+                import state
+                if isinstance(value, str):
+                    new_ips = set(ip.strip() for ip in value.split(",") if ip.strip())
+                elif isinstance(value, list):
+                    new_ips = set(value)
+                else:
+                    new_ips = set()
+                state.authenticated_ips = new_ips
+                state.save_auth_ips(new_ips)
             else:
-                write_val = str(new_val)
-
-            # 2. Save if the value changed
-            if hasattr(config, key) or key in bool_fields:
-                old_val = getattr(config, key, None)
-                if old_val != new_val:
-                    setattr(config, key, new_val)
-                    config.save_setting_to_config(config.CONFIG_FILE, key, write_val)
-                    if key in restart_triggers:
-                        needs_restart = True
-
+                setattr(config, key, value)
+            
+        # 3. Save everything cleanly to the file
+        config.save_config()
+        
+        # 4. Trigger the restart flag if necessary
+        if needs_restart:
+            global RESTART_REQUESTED 
+            RESTART_REQUESTED = True
+            
         return JSONResponse({"status": "success", "needs_restart": needs_restart})
     except Exception as e:
-        logger.error(f"Error saving dynamic config: {e}")
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 async def api_get_logs(request: Request):
@@ -236,17 +262,24 @@ async def api_logout(request: Request):
     return response
 
 async def api_increment_image_version(request: Request):
-    """Increments the global image version to bust ErsatzTV caches."""
-    current_version = int(getattr(config, "IMAGE_VERSION", 0))
-    new_version = current_version + 1
+    """Increments the cache busting tag and saves it properly."""
+    try:
+        current = int(getattr(config, "IMAGE_VERSION", 0))
+        config.IMAGE_VERSION = current + 1
+        
+        # Trigger the new dynamic save engine
+        config.save_config() 
+        
+        return JSONResponse({"status": "success", "new_version": config.IMAGE_VERSION})
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
     
-    # Update it in memory
-    config.IMAGE_VERSION = new_version
-    
-    # Save it to the .conf file
-    config.save_setting_to_config(config.CONFIG_FILE, "IMAGE_VERSION", str(new_version))
-    
-    return JSONResponse({
-        "status": "success", 
-        "new_version": new_version
-    })
+async def api_reset_stats(request: Request):
+    """Resets the internal proxy usage statistics."""
+    import state
+    state.stats["streams_today"] = 0
+    state.stats["total_streams"] = 0
+    state.stats["auth_success"] = 0
+    state.stats["auth_failed"] = 0
+    state.stats["top_played"] = {}
+    return JSONResponse({"status": "success"})
