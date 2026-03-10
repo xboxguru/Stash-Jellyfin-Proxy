@@ -1,9 +1,11 @@
 import os
 import logging
-import state
+import datetime
+import secrets
 from starlette.responses import JSONResponse, HTMLResponse
 from starlette.requests import Request
 import config
+import state  # Required for IP and Session management
 from core import stash_client
 
 logger = logging.getLogger(__name__)
@@ -16,7 +18,6 @@ async def serve_index(request: Request):
         with open(template_path, "r", encoding="utf-8") as f:
             html_content = f.read()
             
-        # Replace the ugly brackets with the actual server name!
         server_name = getattr(config, "SERVER_NAME", "Stash Media Server")
         html_content = html_content.replace("{{SERVER_NAME}}", server_name)
         html_content = html_content.replace("{{VERSION}}", "Modular v2")
@@ -27,6 +28,7 @@ async def serve_index(request: Request):
         return HTMLResponse(f"<h1>Error loading UI</h1><p>{e}</p>", status_code=500)
 
 async def api_get_config(request: Request):
+    """Exposes all configuration and state data to the Web UI."""
     config_data = {
         "STASH_URL": getattr(config, "STASH_URL", ""),
         "STASH_API_KEY": getattr(config, "STASH_API_KEY", ""),
@@ -67,102 +69,77 @@ async def api_get_config(request: Request):
     return JSONResponse({
         "config": config_data,
         "env_fields": getattr(config, "env_overrides", []),
-        "defined_fields": list(getattr(config, "config_defined_keys", set())) # <-- This fixes the blank fields!
+        "defined_fields": list(getattr(config, "config_defined_keys", set()))
     })
 
 async def api_post_config(request: Request):
-    """Saves settings sent from the UI to memory and the file."""
+    """Saves settings sent from the UI to memory and persistent storage."""
     try:
         data = await request.json()
         
-        # 1. Check if we need to warn the user to restart BEFORE applying changes
-        restart_triggers = [
-            "PROXY_PORT", "PROXY_BIND", "UI_PORT", 
-            "LOG_LEVEL", "LOG_DIR", "LOG_FILE", "LOG_MAX_SIZE_MB", "LOG_BACKUP_COUNT"
-        ]
-        
+        # 1. Check for restart triggers
+        restart_triggers = ["PROXY_PORT", "PROXY_BIND", "UI_PORT", "LOG_LEVEL"]
         needs_restart = any(str(data.get(k)) != str(getattr(config, k, "")) for k in restart_triggers if k in data)
         
-        # 2. Apply new settings to memory
+        # 2. Apply settings to memory and specific persistent files
         for key, value in data.items():
             if key == "AUTHENTICATED_IPS":
-                import state
-                if isinstance(value, str):
-                    new_ips = set(ip.strip() for ip in value.split(",") if ip.strip())
-                elif isinstance(value, list):
-                    new_ips = set(value)
-                else:
-                    new_ips = set()
+                # Handle the trusted IP JSON storage
+                new_ips = set(value) if isinstance(value, list) else set()
                 state.authenticated_ips = new_ips
                 state.save_auth_ips(new_ips)
             else:
                 setattr(config, key, value)
             
-        # 3. Save everything cleanly to the file
+        # 3. Save standard config to .conf
         config.save_config()
         
-        # 4. Trigger the restart flag if necessary
         if needs_restart:
             global RESTART_REQUESTED 
             RESTART_REQUESTED = True
             
         return JSONResponse({"status": "success", "needs_restart": needs_restart})
     except Exception as e:
+        logger.error(f"Failed to save config: {e}")
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 async def api_get_logs(request: Request):
-    """Parses the log file and hides entries before the clear timestamp."""
-    import state
+    """Parses the log file for the UI viewer."""
     log_path = os.path.join(getattr(config, "LOG_DIR", "."), getattr(config, "LOG_FILE", "stash_jellyfin_proxy.log"))
     entries = []
     clear_time = getattr(state, "log_clear_time", "")
-    
-    # Extract the limit from the URL, default to 200
     limit = int(request.query_params.get("limit", 200))
     
     try:
         if os.path.exists(log_path):
             with open(log_path, 'r', encoding="utf-8") as f:
-                lines = f.readlines()[-limit:] # Use the dynamic limit here
+                lines = f.readlines()[-limit:]
                 for line in lines:
                     parts = line.split("] ", 1)
                     if len(parts) == 2 and " [" in parts[0]:
                         timestamp, level = parts[0].split(" [")
-                        
-                        if clear_time and timestamp < clear_time:
-                            continue
-                            
+                        if clear_time and timestamp < clear_time: continue
                         entries.append({
                             "timestamp": timestamp.strip(),
                             "level": level.strip(),
                             "message": parts[1].strip()
                         })
     except Exception as e:
-        entries.append({"timestamp": "", "level": "ERROR", "message": f"Could not read logs: {e}"})
-
+        entries.append({"timestamp": "", "level": "ERROR", "message": f"Log error: {e}"})
     return JSONResponse({"entries": entries})
 
 async def api_clear_logs(request: Request):
-    """Sets a timestamp marker to hide old logs from the UI view."""
-    import state, datetime
-    # Get current time in the exact format the python logger uses
     state.log_clear_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return JSONResponse({"status": "cleared"})
 
 async def api_get_status(request: Request):
-    """Checks the connection to Stash and returns the proxy status."""
-    try:
-        stash_ok = stash_client.test_stash_connection()
-    except Exception as e:
-        logger.error(f"Status check failed: {e}")
-        stash_ok = False
-        
+    stash_ok = stash_client.test_stash_connection()
     return JSONResponse({
         "running": True, 
         "stashConnected": stash_ok,
-        "stashVersion": "0.27+", # The JS looks for this
+        "stashVersion": "0.27+",
         "version": "Modular v2",
-        "uptime": 0 # Prevents JS errors
+        "uptime": 0
     })
 
 async def api_restart(request: Request):
@@ -171,29 +148,18 @@ async def api_restart(request: Request):
     return JSONResponse({"status": "restarting"})
 
 async def api_get_streams(request: Request):
-    """Fetches the active streams from the memory bank for the UI."""
-    import state
-    # Ensure active_streams exists as a list
-    if not hasattr(state, "active_streams"):
-        state.active_streams = []
-        
-    return JSONResponse({"streams": state.active_streams})
+    return JSONResponse({"streams": getattr(state, "active_streams", [])})
 
 async def api_get_stats(request: Request):
-    """Combines Stash library counts with internal Proxy usage stats."""
-    import state, time
-    
-    # 1. Get Stash Data
+    """Combines Stash library counts with Proxy usage stats."""
     stash_stats = stash_client.get_stash_stats()
+    current_day = datetime.datetime.now().strftime("%Y-%m-%d")
     
-    # 2. Reset "Today" stats if it's a new day
-    current_day = time.strftime("%Y-%m-%d")
     if getattr(state, "day_tracker", "") != current_day:
         state.stats["streams_today"] = 0
         state.stats["unique_ips_today"] = set()
         state.day_tracker = current_day
 
-    # 3. Format the top played list for the UI
     top_played_list = sorted(state.stats["top_played"].values(), key=lambda x: x["count"], reverse=True)[:5]
 
     return JSONResponse({
@@ -214,72 +180,39 @@ async def api_get_stats(request: Request):
         }
     })
 
-async def api_auth_check(request: Request):
-    """The frontend calls this to see if it should show the login screen."""
-    # If security is off, always return authenticated
-    if not getattr(config, "REQUIRE_AUTH_FOR_CONFIG", False):
-        return JSONResponse({"authenticated": True})
-        
-    # Middleware already checked the cookie by the time we get here
-    return JSONResponse({"authenticated": True})
-
-async def api_login(request: Request):
-    """Validates credentials and issues a secure session cookie."""
-    try:
-        data = await request.json()
-    except Exception:
-        data = {}
-        
-    username = data.get("username", "")
-    password = data.get("password", "")
-    
-    expected_user = getattr(config, "SJS_USER", "")
-    expected_pass = getattr(config, "SJS_PASSWORD", "")
-    
-    # Check credentials
-    if username == expected_user and password == expected_pass:
-        import state, secrets
-        # Generate a secure 64-character random session token
-        token = secrets.token_hex(32)
-        state.ui_sessions.add(token)
-        
-        response = JSONResponse({"status": "success"})
-        # Set the token as a secure, HTTP-only cookie valid for 24 hours
-        response.set_cookie(key="ui_session", value=token, httponly=True, max_age=86400, samesite="lax")
-        return response
-        
-    return JSONResponse({"error": "Invalid credentials"}, status_code=401)
-
-async def api_logout(request: Request):
-    """Destroys the current session."""
-    import state
-    token = request.cookies.get("ui_session")
-    if token in getattr(state, "ui_sessions", set()):
-        state.ui_sessions.remove(token)
-        
-    response = JSONResponse({"status": "logged_out"})
-    response.delete_cookie("ui_session")
-    return response
-
-async def api_increment_image_version(request: Request):
-    """Increments the cache busting tag and saves it properly."""
-    try:
-        current = int(getattr(config, "IMAGE_VERSION", 0))
-        config.IMAGE_VERSION = current + 1
-        
-        # Trigger the new dynamic save engine
-        config.save_config() 
-        
-        return JSONResponse({"status": "success", "new_version": config.IMAGE_VERSION})
-    except Exception as e:
-        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
-    
 async def api_reset_stats(request: Request):
-    """Resets the internal proxy usage statistics."""
-    import state
+    """Resets the usage statistics in the memory bank."""
     state.stats["streams_today"] = 0
     state.stats["total_streams"] = 0
     state.stats["auth_success"] = 0
     state.stats["auth_failed"] = 0
     state.stats["top_played"] = {}
     return JSONResponse({"status": "success"})
+
+async def api_auth_check(request: Request):
+    if not getattr(config, "REQUIRE_AUTH_FOR_CONFIG", False):
+        return JSONResponse({"authenticated": True})
+    return JSONResponse({"authenticated": True})
+
+async def api_login(request: Request):
+    try: data = await request.json()
+    except: data = {}
+    if data.get("username") == config.SJS_USER and data.get("password") == config.SJS_PASSWORD:
+        token = secrets.token_hex(32)
+        state.ui_sessions.add(token)
+        response = JSONResponse({"status": "success"})
+        response.set_cookie(key="ui_session", value=token, httponly=True, max_age=86400, samesite="lax")
+        return response
+    return JSONResponse({"error": "Invalid credentials"}, status_code=401)
+
+async def api_logout(request: Request):
+    token = request.cookies.get("ui_session")
+    if token in state.ui_sessions: state.ui_sessions.remove(token)
+    response = JSONResponse({"status": "logged_out"})
+    response.delete_cookie("ui_session")
+    return response
+
+async def api_increment_image_version(request: Request):
+    config.IMAGE_VERSION = int(getattr(config, "IMAGE_VERSION", 0)) + 1
+    config.save_config() 
+    return JSONResponse({"status": "success", "new_version": config.IMAGE_VERSION})
