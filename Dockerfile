@@ -21,13 +21,14 @@ RUN pip install --no-cache-dir \
     hypercorn \
     starlette \
     requests \
+    httpx \
     Pillow
 
 RUN mkdir -p /app /config && \
     chmod 755 /app /config
 
-COPY stash_jellyfin_proxy.py /app/
-RUN chmod +x /app/stash_jellyfin_proxy.py
+# Copy the entire modular directory structure
+COPY . /app/
 
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
@@ -47,4 +48,6 @@ EXPOSE 8096 8097
 VOLUME ["/config"]
 
 ENTRYPOINT ["/docker-entrypoint.sh"]
-CMD ["python", "/app/stash_jellyfin_proxy.py"]
+
+# Point to our new main loop
+CMD ["python", "/app/main.py"]

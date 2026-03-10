@@ -28,6 +28,7 @@ STASH_API_KEY = your_api_key_here
 PROXY_BIND = 0.0.0.0
 PROXY_PORT = 8096
 UI_PORT = 8097
+PROXY_API_KEY = 
 
 # Authentication (used by Infuse to connect) - CHANGE THESE!
 SJS_USER = admin
@@ -48,7 +49,6 @@ STASH_TIMEOUT = 30
 STASH_RETRIES = 3
 
 # GraphQL endpoint path
-# Use /graphql-local for SWAG bypass (host), /graphql for Docker direct
 STASH_GRAPHQL_PATH = /graphql
 
 # TLS verification (set to false for self-signed certs in Docker)
@@ -57,6 +57,9 @@ STASH_VERIFY_TLS = false
 # Feature toggles
 ENABLE_FILTERS = true
 ENABLE_IMAGE_RESIZE = true
+ENABLE_TAG_FILTERS = false
+ENABLE_ALL_TAGS = false
+IMAGE_VERSION = 0
 
 # Pagination
 DEFAULT_PAGE_SIZE = 100
