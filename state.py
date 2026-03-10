@@ -32,7 +32,7 @@ def save_auth_ips(ips_set):
     except Exception as e:
         print(f"Error saving authenticated IPs: {e}")
 
-# NEW: Tracks IPs that have successfully used the API key (Loads from JSON)
+# NEW: Tracks IPs that have successfully used the API key (Persisted)
 authenticated_ips = load_auth_ips()
 
 # Proxy Memory Bank for Statistics
