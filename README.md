@@ -1,112 +1,62 @@
-# Stash-Jellyfin Proxy
+# Stash-Jellyfin Proxy v2
 
-**Version 5.10**
+A high-performance Jellyfin API emulation proxy for Stash. This project is a heavily modified fork of the original Stash-Infuse proxy, optimized specifically to meet the strict metadata and scheduling requirements of **ErsatzTV** and **Tunarr**.
 
-A Python proxy server that enables Jellyfin-compatible media players (like Infuse and Swiftfin) to connect to Stash by emulating the Jellyfin API 10.11.6.
+> **Note on Compatibility**: While this was originally designed for Infuse, significant changes have been made to the API response structures to satisfy ErsatzTV's C# backend. I have not performed testing with Infuse and make no claims that it remains compatible with mobile clients.
 
-## Features
+## Key Features
+* **ErsatzTV Optimized**: Custom mappings for `o_counter` (play counts) and `created_at` timestamps ensure accurate library sorting.
+* **Content Firewall**: Automatically assigns a content rating of `XXX` to all scenes to keep them isolated from mainstream movie libraries.
+* **Dynamic Network Icons**: Proxies Stash Studio logos as Jellyfin "Studios" for use as watermarks/icons in linear playouts.
+* **Concurrent Fetching**: Uses `httpx` and `asyncio` to handle bulk metadata requests from ErsatzTV without timeouts.
+* **Web Configuration**: Manage settings, monitor active streams, and bust image caches from a built-in dashboard.
 
-- **Jellyfin API Emulation**: Implements 50+ Jellyfin 10.11.6 endpoints for broad client compatibility
-- **Client Compatibility**: Fully compatible with Infuse 8.x+ and Swiftfin 1.4+
-- **Full Stash Integration**: Scenes, Performers, Studios, Groups, and Tags
-- **Tag-Based Libraries**: Create custom library folders based on Stash tags
-- **Saved Filters Support**: Browse your Stash saved filters as folders
-- **Web Configuration UI**: Dashboard with status, active streams, statistics, and settings
-- **Docker Support**: Ready-to-use Docker container with PUID/PGID support
-- **IP Security**: Auto-banning for failed authentication attempts
+---
 
-## Quick Start
+## ErsatzTV Integration Guide
 
-### Standalone
+### 1. Separation of Content
+All scenes from this proxy are tagged with the **Official Rating: XXX**. To keep these separate from your Hollywood movies in ErsatzTV, use the following search filter for your Smart Collections:
+* **To include only Stash scenes**: `content_rating:XXX`
+* **To exclude Stash scenes**: `-content_rating:XXX`
 
-1. Install dependencies:
-   ```bash
-   pip install hypercorn starlette requests Pillow
-   ```
+### 2. Studio Logos (Network Watermarks)
+The proxy automatically maps Stash Studios to Jellyfin Studios. To use them in ErsatzTV:
+1. Run a **Scan Jellyfin** task on the Stash source.
+2. Go to **Channels** -> **Edit Channel**.
+3. Under **Watermark**, select your desired Stash Studio from the list.
 
-2. Configure `stash_jellyfin_proxy.conf` with your Stash URL and API key
+### 3. Fixing Image Caching
+ErsatzTV aggressively caches images. If you update a thumbnail in Stash and it won't refresh in ErsatzTV:
+1. Go to the Proxy Web UI (**Port 8097**).
+2. Click **Force Image Refresh**. This increments the internal version tag.
+3. Run a **Scan Jellyfin** task in ErsatzTV.
 
-3. Run:
-   ```bash
-   python stash_jellyfin_proxy.py
-   ```
+---
 
-4. Open Web UI at `http://localhost:8097`
+## Installation (Docker Compose)
 
-5. Add server in Infuse: `http://your-server:8096`
-
-### Docker
-
-```bash
-docker run -d \
-  --name stash-jellyfin-proxy \
-  -p 8096:8096 \
-  -p 8097:8097 \
-  -v /path/to/config:/config \
-  -e PUID=1000 \
-  -e PGID=1000 \
-  -e TZ=America/New_York \
-  stash-jellyfin-proxy:latest
+1. Create a `docker-compose.yml`:
+```yaml
+services:
+  stash-jellyfin-proxy:
+    image: YOUR_DOCKERHUB_USERNAME/stash-jellyfin-proxy:latest
+    container_name: stash-jellyfin-proxy
+    ports:
+      - "8096:8096"   # Jellyfin API
+      - "8097:8097"   # Web UI
+    volumes:
+      - ./config:/config
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+    restart: unless-stopped
 ```
 
-## Configuration
+2. Run `docker-compose up -d`.
+3. Access the Web UI at `http://YOUR_IP:8097` to configure your Stash URL and API Key.
+4. In ErsatzTV, add a new **Jellyfin** source using `http://YOUR_IP:8096` and the **Proxy API Key** found in the Web UI settings.
 
-Edit `stash_jellyfin_proxy.conf`:
-
-| Setting | Description | Default |
-|---------|-------------|---------|
-| `STASH_URL` | Your Stash server URL | `http://localhost:9999` |
-| `STASH_API_KEY` | API key from Stash Settings > Security | Required |
-| `SJS_USER` | Username for Infuse login | Required |
-| `SJS_PASSWORD` | Password for Infuse login | Required |
-| `TAG_GROUPS` | Comma-separated tags to show as library folders | Empty |
-| `PROXY_PORT` | Jellyfin API port | `8096` |
-| `UI_PORT` | Web UI port (0 to disable) | `8097` |
-
-See the config file for all available options.
-
-## Connecting from Infuse
-
-1. Add a new share in Infuse
-2. Select "Jellyfin" as the server type
-3. Enter your proxy server address (e.g., `http://192.168.1.100:8096`)
-4. Use the `SJS_USER` and `SJS_PASSWORD` credentials you configured
-
-## Requirements
-
-- Python 3.8+
-- Stash media server with API access enabled
-- Dependencies: `hypercorn`, `starlette`, `requests`
-- Optional: `Pillow` for image resizing
-
-## Architecture
-
-```
-Infuse/Jellyfin Client
-        |
-        v
-  Stash-Jellyfin Proxy (port 8096)
-        |
-        v
-  Stash GraphQL API (port 9999)
-```
-
-The proxy translates Jellyfin API requests into Stash GraphQL queries, handles authentication, serves images, and proxies video streams.
-
-## Web UI
-
-Access the configuration dashboard at `http://your-server:8097`:
-
-- **Dashboard**: Proxy status, Stash connection, active streams, usage statistics
-- **Configuration**: All settings with live updates
-- **Logs**: Filterable log viewer with download
-
-## Known Limitations
-
-- Single-user authentication (one set of credentials)
-- Infuse caches images aggressively; clear metadata cache if artwork doesn't update
-- Dashboard may briefly pause during stream initialization
-
-## License
-
-MIT License - Free to use and modify.
+## Credits
+Originally modified from the Stash-Infuse proxy project to bridge the gap between Stash and linear playout engines.

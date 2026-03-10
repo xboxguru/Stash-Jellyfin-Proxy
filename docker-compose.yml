@@ -1,0 +1,44 @@
+version: "3.8"
+
+services:
+  stash-jellyfin-proxy:
+    image: thebendz/stash-jellyfin-proxy:latest
+    container_name: stash-jellyfin-proxy
+    restart: unless-stopped
+    
+    ports:
+      - "8096:8096"   # Jellyfin API (for Infuse/ErsatzTV)
+      - "8097:8097"   # Web UI
+    
+    volumes:
+      - ./config:/config
+    
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=America/New_York
+      
+      # Optional: Override settings from config file via environment
+      # - STASH_URL=https://stash:9999
+      # - STASH_API_KEY=your_stash_api_key
+      # - PROXY_API_KEY=your_custom_proxy_key
+      # - SJS_USER=admin
+      # - SJS_PASSWORD=your_password
+      # - REQUIRE_AUTH_FOR_CONFIG=true
+      # - UI_PORT=8097
+      # - PROXY_PORT=8096
+      
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8096/System/Info/Public"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+# FIRST RUN INSTRUCTIONS:
+# 1. Start the container: docker-compose up -d
+# 2. Access Web UI at http://localhost:8097
+# 3. Configure your Stash URL and API Key in the web interface
+# 4. Save and Restart the Server from the UI
+# 5. In Infuse/ErsatzTV: Add server > Jellyfin > http://YOUR_IP:8096
+#    * Use the PROXY_API_KEY generated in the Web UI as your password/token!

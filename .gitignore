@@ -1,0 +1,18 @@
+# Local configuration (Contains sensitive API keys)
+stash_jellyfin_proxy.conf
+.env
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Logs
+*.log
+config/logos/
+
+# IDE settings
+.vscode/
+.idea/
+.DS_Store
