@@ -144,7 +144,12 @@ class AuthenticationMiddleware:
             # NEW: Remember this IP as a trusted client for password-less image requests
             if not hasattr(state, "authenticated_ips"):
                 state.authenticated_ips = set()
-            state.authenticated_ips.add(client_ip)
+            
+            # Save to JSON if this is a brand new IP
+            if client_ip not in state.authenticated_ips:
+                state.authenticated_ips.add(client_ip)
+                if hasattr(state, "save_auth_ips"):
+                    state.save_auth_ips(state.authenticated_ips)
             
             if not path_lower.startswith("/api/") and not path_lower.startswith("/web/"):
                 query = scope.get('query_string', b'').decode('utf-8')

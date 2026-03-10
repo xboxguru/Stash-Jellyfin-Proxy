@@ -43,24 +43,27 @@ async def endpoint_items(request: Request):
         if getattr(config, "STASH_API_KEY", ""):
             headers["ApiKey"] = config.STASH_API_KEY
         
+        # Create a semaphore to limit concurrent Stash requests to 10 at a time
+        semaphore = asyncio.Semaphore(10)
+        
         async def fetch_single_scene(client, raw_id):
-            query = f"""
-            query FindScene($id: ID!) {{
-                findScene(id: $id) {{
-                    {stash_client.SCENE_FIELDS}
+            async with semaphore:  # <-- This safely throttles the requests!
+                query = f"""
+                query FindScene($id: ID!) {{
+                    findScene(id: $id) {{
+                        {stash_client.SCENE_FIELDS}
+                    }}
                 }}
-            }}
-            """
-            try:
-                # Fire the request and wait for the response asynchronously
-                resp = await client.post(url, headers=headers, json={"query": query, "variables": {"id": raw_id}}, timeout=10.0)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if data and "data" in data and data["data"].get("findScene"):
-                        return data["data"]["findScene"]
-            except Exception as e:
-                logger.error(f"Concurrent fetch failed for scene {raw_id}: {e}")
-            return None
+                """
+                try:
+                    resp = await client.post(url, headers=headers, json={"query": query, "variables": {"id": raw_id}}, timeout=10.0)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if data and "data" in data and data["data"].get("findScene"):
+                            return data["data"]["findScene"]
+                except Exception as e:
+                    logger.error(f"Concurrent fetch failed for scene {raw_id}: {e}")
+                return None
 
         # Fire all 100 requests to Stash at the exact same time
         async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
