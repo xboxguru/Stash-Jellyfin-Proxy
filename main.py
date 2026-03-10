@@ -138,20 +138,17 @@ def main():
         sys.exit(1)
         
     # --- RESTART LOGIC ---
-    # This block executes after the asyncio loop is gracefully shut down
     if ui_routes.RESTART_REQUESTED:
-        logger.info("Executing server restart...")
-        time.sleep(1)  # Brief pause to ensure ports are released
+        logger.info("Executing in-place server restart...")
+        time.sleep(1)  # Brief pause to ensure network ports are fully released
         
-        # Detect if we are inside Unraid/Docker
-        in_docker = os.path.exists("/.dockerenv") or config.CONFIG_FILE.startswith("/config")
-        
-        if in_docker:
-            logger.info("Docker environment detected. Exiting script to allow Docker restart policy to reboot the container.")
-            sys.exit(0)
-        else:
-            logger.info("Standalone environment detected. Restarting Python process in place.")
-            os.execv(sys.executable, ['python3'] + sys.argv)
+        # os.execv replaces the current process with a new one. 
+        # In Docker, this keeps PID 1 alive so the container doesn't shut down.
+        try:
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        except Exception as e:
+            logger.error(f"Failed to execute restart: {e}")
+            sys.exit(1)
 
 if __name__ == "__main__":
     main()

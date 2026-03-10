@@ -29,6 +29,7 @@ async def api_get_config(request: Request):
     return JSONResponse({
         "STASH_URL": getattr(config, "STASH_URL", ""),
         "STASH_API_KEY": getattr(config, "STASH_API_KEY", ""),
+        "SYNC_LEVEL": getattr(config, "SYNC_LEVEL", "Everything"),
         "PROXY_API_KEY": getattr(config, "PROXY_API_KEY", ""),
         "PROXY_PORT": getattr(config, "PROXY_PORT", 8096),
         "SJS_USER": getattr(config, "SJS_USER", ""),
@@ -48,7 +49,10 @@ async def api_post_config(request: Request):
     try:
         data = await request.json()
         needs_restart = False
-        restart_triggers = ["PROXY_PORT", "PROXY_BIND", "PROXY_API_KEY", "STASH_URL"]
+        restart_triggers = [
+            "PROXY_PORT", "PROXY_BIND", "UI_PORT", 
+            "LOG_LEVEL", "LOG_DIR", "LOG_FILE", "LOG_MAX_SIZE_MB", "LOG_BACKUP_COUNT"
+        ]
         
         # Explicit list of checkboxes from the frontend
         bool_fields = ["ENABLE_FILTERS", "ENABLE_IMAGE_RESIZE", "ENABLE_TAG_FILTERS", "ENABLE_ALL_TAGS", "REQUIRE_AUTH_FOR_CONFIG", "STASH_VERIFY_TLS"]

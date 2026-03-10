@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 # The universal GraphQL fields we request for scenes. 
 SCENE_FIELDS = """
-    id title code date details o_counter created_at
+    id title code date details o_counter created_at organized
     files { path duration video_codec audio_codec frame_rate bit_rate width height format } 
     studio { id name image_path } 
     tags { name } 
@@ -78,7 +78,7 @@ def call_graphql(query: str, variables: Optional[Dict[str, Any]] = None) -> Opti
                 return None
 
 def get_scene(scene_id: str) -> Optional[Dict[str, Any]]:
-    """Fetch a single scene by ID."""
+    """Fetch a single scene by ID and enforce sync filters."""
     query = f"""
     query FindScene($id: ID!) {{
         findScene(id: $id) {{
@@ -88,11 +88,29 @@ def get_scene(scene_id: str) -> Optional[Dict[str, Any]]:
     """
     data = call_graphql(query, {"id": scene_id})
     if data and data.get("findScene"):
-        return data["findScene"]
+        scene = data["findScene"]
+        
+        # ENFORCE SYNC LEVEL ON DIRECT LOOKUPS
+        sync_mode = getattr(config, "SYNC_LEVEL", "Everything")
+        if sync_mode == "Organized" and not scene.get("organized"):
+            return None  # Pretend it doesn't exist
+        if sync_mode == "Tagged" and not scene.get("tags"):
+            return None  # Pretend it doesn't exist
+            
+        return scene
     return None
 
 def fetch_scenes(filter_args: Dict[str, Any], page: int = 1, per_page: int = 50, scene_filter: Dict[str, Any] = None) -> Dict[str, Any]:
-    """Fetch a paginated list of scenes based on filters."""
+    """Fetch scenes based on SYNC_LEVEL (Everything, Organized, Tagged)."""
+    # Build the scene filter object
+    sf = scene_filter or {}
+    sync_mode = getattr(config, "SYNC_LEVEL", "Everything")
+    
+    if sync_mode == "Organized":
+        sf["organized"] = True 
+    elif sync_mode == "Tagged":
+        sf["tags"] = {"modifier": "NOT_NULL"}  # Stash filter for 'has any tag'
+
     query = f"""
     query FindScenes($filter: FindFilterType, $scene_filter: SceneFilterType) {{
         findScenes(filter: $filter, scene_filter: $scene_filter) {{
@@ -104,19 +122,16 @@ def fetch_scenes(filter_args: Dict[str, Any], page: int = 1, per_page: int = 50,
     }}
     """
     
-    # Construct pagination
     filter_args["page"] = page
     filter_args["per_page"] = per_page
     
     variables = {
         "filter": filter_args,
-        "scene_filter": scene_filter or {} # Now correctly injects the ID filter
+        "scene_filter": sf
     }
     
     data = call_graphql(query, variables)
-    if data and data.get("findScenes"):
-        return data["findScenes"]
-    return {"count": 0, "scenes": []}
+    return data.get("findScenes") if data else {"count": 0, "scenes": []}
 
 def get_stash_stats() -> dict:
     """Fetches total library counts from Stash."""
