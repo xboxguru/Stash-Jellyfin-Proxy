@@ -64,9 +64,15 @@ routes = [
     Route("/Items/RemoteSearch/Studios", jellyfin_routes.endpoint_studios, methods=["GET"]),
     Route("/Items/{item_id}", jellyfin_routes.endpoint_item_details, methods=["GET"]),
     Route("/Items/{item_id}/Images/{image_type}", jellyfin_routes.endpoint_item_image, methods=["GET"]),
-    Route("/Items/{item_id}/PlaybackInfo", jellyfin_routes.endpoint_playback_info, methods=["GET"]),
+    Route("/Items/{item_id}/Images/Primary", jellyfin_routes.endpoint_item_image, methods=["GET"]),
+    Route("/Items/{item_id}/Images/Primary/0", jellyfin_routes.endpoint_item_image, methods=["GET"]),
+    Route("/Items/{item_id}/PlaybackInfo", jellyfin_routes.endpoint_playback_info, methods=["GET", "POST"]),
+    Route("/Videos/{item_id}/stream", jellyfin_routes.endpoint_stream, methods=["GET", "HEAD"]),
     Route("/Library/VirtualFolders", jellyfin_routes.endpoint_virtual_folders, methods=["GET"]),
     Route("/Studios", jellyfin_routes.endpoint_studios, methods=["GET"]),
+    Route("/Genres", jellyfin_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/Tags", jellyfin_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/Years", jellyfin_routes.endpoint_empty_list, methods=["GET"]),
     Route("/Users/{user_id}/Items", jellyfin_routes.endpoint_items, methods=["GET"]),
     Route("/Users/{user_id}/Items/{item_id}", jellyfin_routes.endpoint_item_details, methods=["GET"]),
     Route("/Users/{user_id}/Views", jellyfin_routes.endpoint_views, methods=["GET"]),
@@ -78,11 +84,16 @@ routes = [
     
     # --- System, Authentication & User Routes ---
     Route("/QuickConnect/Enabled", jellyfin_routes.endpoint_quickconnect_enabled, methods=["GET"]),
+    Route("/QuickConnect/Initiate", jellyfin_routes.endpoint_quickconnect_initiate, methods=["GET", "POST"]),
     Route("/System/Info", jellyfin_routes.endpoint_system_info, methods=["GET"]),
     Route("/system/info/public", jellyfin_routes.endpoint_system_info_public, methods=["GET"]),
     Route("/System/Ping", jellyfin_routes.endpoint_system_ping, methods=["GET", "POST"]),
-    Route("/Users", jellyfin_routes.endpoint_users, methods=["GET"]),
+    
+    # User routes (Order matters: specific routes must go before the catch-all {user_id})
+    Route("/Users/Public", jellyfin_routes.endpoint_public_users, methods=["GET"]),
+    Route("/Users/Me", jellyfin_routes.endpoint_user, methods=["GET"]),
     Route("/Users/AuthenticateByName", jellyfin_routes.endpoint_authenticate_by_name, methods=["POST"]),
+    Route("/Users", jellyfin_routes.endpoint_users, methods=["GET"]),
     Route("/Users/{user_id}", jellyfin_routes.endpoint_user, methods=["GET"]),
 ]
 

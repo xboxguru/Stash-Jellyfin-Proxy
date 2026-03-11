@@ -117,7 +117,7 @@ async def endpoint_items(request: Request):
 
 def _get_libraries():
     """Matches the exact 'VirtualFolder' schema."""
-    server_id = getattr(config, "SERVER_ID", "stash-proxy")
+    server_id = getattr(config, "SERVER_ID", "")
     
     views = [
         {
@@ -160,10 +160,15 @@ def _get_libraries():
 
 async def endpoint_views(request: Request):
     """
-    Original logic: Return raw array for BOTH Views and VirtualFolders.
-    This fixed 'Deserialization' errors in strict C# clients.
+    Jellycon STRICTLY expects this to be an object with an Items array.
+    (ErsatzTV/Tunarr usually rely on /Library/VirtualFolders for the raw array instead).
     """
-    return JSONResponse(content=_get_libraries())
+    views = _get_libraries()
+    return JSONResponse({
+        "Items": views,
+        "TotalRecordCount": len(views),
+        "StartIndex": 0
+    })
 
 async def endpoint_virtual_folders(request: Request):
     """Returns libraries as a raw Array with strict header enforcement."""
@@ -212,19 +217,6 @@ async def endpoint_playback_info(request: Request):
     }
 
     return JSONResponse(playback_payload)
-
-async def endpoint_system_info_public(request: Request):
-    """Public handshake endpoint required by Jellyfin clients.""" 
-    # Dynamically grab the IP and Port ErsatzTV used to reach us
-    client_host = request.headers.get("Host", f"127.0.0.1:{config.PROXY_PORT}")
-    
-    return JSONResponse({
-        "LocalAddress": f"http://{client_host}",
-        "ServerName": getattr(config, "SERVER_NAME", "Stash Media Server"),
-        "Version": "10.8.13",
-        "OperatingSystem": "Linux",
-        "Id": getattr(config, "SERVER_ID", "stash-proxy")
-    })
 
 async def endpoint_sessions_playing(request: Request):
     """Receives playback start and progress reports from Jellyfin clients."""
@@ -289,6 +281,37 @@ async def endpoint_sessions_stopped(request: Request):
 
     return JSONResponse({}, status_code=204)
 
+async def endpoint_public_users(request: Request):
+    """Jellycon uses this to list users on the login screen."""
+    # Strict 32-character hex ID required by Jellyfin clients
+    valid_jellyfin_id = "00000000000000000000000000000001" 
+    
+    return JSONResponse([{
+        "Name": getattr(config, "SJS_USER", "admin") or "admin",
+        "ServerId": getattr(config, "SERVER_ID", ""),
+        "Id": valid_jellyfin_id,
+        "HasPassword": bool(getattr(config, "SJS_PASSWORD", "")),
+        "HasConfiguredPassword": bool(getattr(config, "SJS_PASSWORD", "")),
+        "HasConfiguredEasyPassword": False
+    }])
+
+async def endpoint_user(request: Request):
+    """Returns the user details when Jellycon verifies the login."""
+    # Must perfectly match the ID from authentication and public users
+    valid_jellyfin_id = "00000000000000000000000000000001"
+    
+    return JSONResponse({
+        "Name": getattr(config, "SJS_USER", "admin") or "admin",
+        "Id": valid_jellyfin_id,
+        "ServerId": getattr(config, "SERVER_ID", ""),
+        "Policy": {
+            "IsAdministrator": True,
+            "IsHidden": False,
+            "IsDisabled": False,
+            "MaxParentalRating": None,
+        }
+    })
+
 async def endpoint_authenticate_by_name(request: Request):
     """Authenticates the user and hands the client our Proxy API Key."""
     try:
@@ -310,10 +333,13 @@ async def endpoint_authenticate_by_name(request: Request):
             return JSONResponse({"error": "Invalid username or password"}, status_code=401)
             
     # 2. Login successful! Hand them the master key.
+    # Jellyfin clients STRICTLY require a 32-character hex ID.
+    valid_jellyfin_id = "00000000000000000000000000000001"
+    
     fake_user = {
         "Name": expected_user or "admin",
-        "ServerId": getattr(config, "SERVER_ID", "stash-proxy"),
-        "Id": "stash-user-id",
+        "ServerId": getattr(config, "SERVER_ID", ""),
+        "Id": valid_jellyfin_id,
         "HasPassword": bool(expected_pass),
         "Policy": {"IsAdministrator": True}
     }
@@ -321,47 +347,54 @@ async def endpoint_authenticate_by_name(request: Request):
     return JSONResponse({
         "User": fake_user,
         "SessionInfo": {
-            "UserId": "stash-user-id",
-            "Id": "stash-session-id"
+            "UserId": valid_jellyfin_id,
+            "Id": "00000000000000000000000000000002" # Session ID can be any 32-char hex
         },
         "AccessToken": config.PROXY_API_KEY,
-        "ServerId": getattr(config, "SERVER_ID", "stash-proxy")
+        "ServerId": getattr(config, "SERVER_ID", "")
     })
 
 async def endpoint_users(request: Request):
     """Returns a fake user list containing our single proxy user."""
+    valid_jellyfin_id = "00000000000000000000000000000001"
+    
     user = {
         "Name": getattr(config, "SJS_USER", "admin") or "admin",
-        "ServerId": getattr(config, "SERVER_ID", "stash-proxy"),
-        "Id": "stash-user-id",
+        "ServerId": getattr(config, "SERVER_ID", ""),
+        "Id": valid_jellyfin_id,
         "Policy": {"IsAdministrator": True}
     }
     return JSONResponse([user])
 
-async def endpoint_user(request: Request):
-    """Returns details for our specific fake user."""
+async def endpoint_system_info_public(request: Request):
+    # Dynamically grab the exact IP/Host the client is using to reach us
+    host = request.headers.get("host", f"127.0.0.1:{getattr(config, 'PROXY_PORT', 8096)}")
+    scheme = request.url.scheme
     return JSONResponse({
-        "Name": getattr(config, "SJS_USER", "admin") or "admin",
-        "ServerId": getattr(config, "SERVER_ID", "stash-proxy"),
-        "Id": "stash-user-id",
-        "Policy": {"IsAdministrator": True}
+        "LocalAddress": f"{scheme}://{host}",
+        "ServerName": getattr(config, "SERVER_NAME", "Stash Proxy") or "Stash Proxy",
+        "Version": "10.8.10",
+        "Id": getattr(config, "SERVER_ID", "") or "stash-proxy-server-id-01"
     })
 
 async def endpoint_system_info(request: Request):
-    """Authenticated system info request."""
-    client_host = request.headers.get("Host", f"127.0.0.1:{config.PROXY_PORT}")
-    
+    host = request.headers.get("host", f"127.0.0.1:{getattr(config, 'PROXY_PORT', 8096)}")
+    scheme = request.url.scheme
     return JSONResponse({
-        "LocalAddress": f"http://{client_host}",
-        "ServerName": getattr(config, "SERVER_NAME", "Stash Media Server"),
-        "Version": "10.8.13",
-        "OperatingSystem": "Linux",
-        "Id": getattr(config, "SERVER_ID", "stash-proxy")
+        "LocalAddress": f"{scheme}://{host}",
+        "ServerName": getattr(config, "SERVER_NAME", "Stash Proxy") or "Stash Proxy",
+        "Version": "10.8.10",
+        "Id": getattr(config, "SERVER_ID", "") or "stash-proxy-server-id-01",
+        "OperatingSystem": "Linux"
     })
 
 async def endpoint_quickconnect_enabled(request: Request):
     """Tells clients that QuickConnect is disabled, forcing standard login."""
     return JSONResponse(False)
+
+async def endpoint_quickconnect_initiate(request: Request):
+    """Explicitly reject QuickConnect so Jellycon falls back to manual password entry."""
+    return JSONResponse({"error": "QuickConnect is not supported on this proxy."}, status_code=400)
 
 async def endpoint_item_image(request: Request):
     """Downloads the image from Stash and serves it directly to ErsatzTV."""
@@ -430,3 +463,44 @@ async def endpoint_studios(request: Request):
 async def endpoint_system_ping(request: Request):
     """Answers Tunarr server health checks."""
     return PlainTextResponse("Jellyfin Server")
+
+async def endpoint_empty_list(request: Request):
+    """Returns an empty Jellyfin list response for unsupported menu items."""
+    return JSONResponse({
+        "Items": [],
+        "TotalRecordCount": 0,
+        "StartIndex": 0
+    })
+
+from starlette.responses import StreamingResponse
+
+async def endpoint_stream(request: Request):
+    """Pipes the video stream directly from Stash to the client."""
+    item_id = request.path_params.get("item_id", "")
+    raw_id = item_id.replace("scene-", "")
+
+    stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+    apikey = getattr(config, "STASH_API_KEY", "")
+    
+    # Target the Stash native streaming endpoint
+    stash_stream_url = f"{stash_base}/scene/{raw_id}/stream.mp4"
+    if apikey:
+        stash_stream_url += f"?apikey={apikey}"
+
+    # Forward the client's headers (like 'Range: bytes=...') to Stash so seeking works
+    headers = dict(request.headers)
+    # Remove the host header so httpx generates a fresh one for the Stash server
+    headers.pop("host", None)
+
+    client = httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False))
+    
+    # We use build_request and send(stream=True) to pipe the data without loading it into RAM
+    req = client.build_request(request.method, stash_stream_url, headers=headers)
+    r = await client.send(req, stream=True)
+
+    # Pipe the raw Stash response directly back to Kodi
+    return StreamingResponse(
+        r.aiter_raw(), 
+        status_code=r.status_code, 
+        headers=r.headers
+    )

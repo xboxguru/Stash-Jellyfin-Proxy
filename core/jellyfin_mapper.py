@@ -223,10 +223,16 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") 
         item["Path"] = path
         item["LocationType"] = "FileSystem"
         
+        # --- JELLYCON PASSTHROUGH STREAM FIX ---
+        # Jellycon requires a DirectStreamUrl when playing files it cannot access locally.
+        # Providing a relative path tells Jellycon to fetch it from the Proxy's IP.
+        stream_url = f"/Videos/{item_id}/stream"
+        
         item["MediaSources"] = [
             {
                 "Id": item_id,
                 "Path": path,
+                "DirectStreamUrl": stream_url,
                 "Protocol": "File",
                 "Type": "Default",
                 "Container": container,
