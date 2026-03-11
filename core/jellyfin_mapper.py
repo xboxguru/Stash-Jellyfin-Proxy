@@ -99,8 +99,8 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") 
     # Add Date Info (Fixes 'added_inthelast' filters)
     created_at = scene.get("created_at")
     if created_at:
-        # Stash returns "YYYY-MM-DDTHH:MM:SSZ". ErsatzTV expects exactly 7 decimal places.
-        base_time = created_at.replace("Z", "").split(".")[0]
+        # Swap space for 'T', strip 'Z' and decimals, then force strict format
+        base_time = created_at.replace("Z", "").replace(" ", "T").split(".")[0]
         item["DateCreated"] = f"{base_time}.0000000Z"
     else:
         # Fallback to current time if stash doesn't provide created_at
