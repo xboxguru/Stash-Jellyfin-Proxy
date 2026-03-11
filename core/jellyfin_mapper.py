@@ -11,7 +11,7 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") 
     raw_id = str(scene.get("id"))
     item_id = f"scene-{raw_id}"
     date = scene.get("date")
-    img_version = getattr(config, "IMAGE_VERSION", 0)
+    cache_version = getattr(config, "CACHE_VERSION", 0)
     
     # Extract file details
     files = scene.get("files", [])
@@ -52,6 +52,27 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") 
     # For auto-refresh: Always report the current time as the "Last Saved" time
     now_iso = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
 
+    # Build Media Streams explicitly for Tunarr Schema
+    media_streams = [
+        {
+            "Codec": v_codec,
+            "Type": "Video",
+            "IsInterlaced": False,
+            "IsDefault": True,
+            "Width": width,
+            "Height": height,
+            "Index": 0,
+            "BitRate": bit_rate
+        },
+        {
+            "Codec": a_codec,
+            "Type": "Audio",
+            "IsDefault": True,
+            "Index": 1,
+            "Channels": 2
+        }
+    ]
+
     # Build the core Jellyfin Item
     item = {
         "Name": title,
@@ -64,24 +85,31 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") 
         "ParentId": parent_id,
         "DateLastSaved": now_iso, 
         
-        # IMAGE DATA: Bump to v8 to force cache break after the revert
         "HasPrimaryImage": True,
-        "ImageTags": {"Primary": f"{raw_id}-v{img_version}"}, 
+        "ImageTags": {"Primary": f"{raw_id}-v{cache_version}"}, 
         "PrimaryImageAspectRatio": 1.777,
         "VideoType": "VideoFile",
         "Protocol": "File",
         "BackdropImageTags": [],
         
-        # Scheduler / Health Check Requirements
         "RunTimeTicks": runtime_ticks,
         "OfficialRating": "XXX",
         "CommunityRating": play_count,
-        
-        # INJECT MEDIA INFO
         "Width": width,
         "Height": height,
 
-        # Hidden fields for proxy internal use
+        # --- TUNARR STRICT SCHEMA FIXES ---
+        "Etag": f"etag-{raw_id}-v{cache_version}",
+        "Taglines": [],
+        "ProviderIds": {},
+        "Chapters": [],
+        "Overview": "",
+        "People": [],
+        "Studios": [],
+        "MediaStreams": media_streams,
+        "Path": path if path else "",
+        # ----------------------------------
+
         "_StashVideoCodec": v_codec,
         "_StashAudioCodec": a_codec,
         "_StashContainer": container,
@@ -96,38 +124,57 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") 
         }
     }
 
-# Add Date Info (Fixes 'added_inthelast' filters)
-    created_at = scene.get("created_at")
-    if created_at:
-        # Force "YYYY-MM-DDTHH:MM:SS" by taking exactly the first 19 chars
-        # This strips out timezone offsets like "-05:00" before appending the .NET Z format
-        base_time = created_at.replace(" ", "T")[:19]
-        item["DateCreated"] = f"{base_time}.0000000Z"
-    else:
-        # Fallback to current time if stash doesn't provide created_at
-        item["DateCreated"] = now_iso
+    # 1. Grab existing Stash tags and initialize the item tags array ONCE
+    item_tags = [t.get("name") for t in tags if t.get("name")]
 
+    # 2. Add Date Info & Dynamic "Recently Added" Tag
+    created_at = scene.get("created_at")
+    recent_days_limit = getattr(config, "RECENT_DAYS", 14)
+
+    if created_at:
+        # Force "YYYY-MM-DDTHH:MM:SS"
+        base_time = created_at.replace("Z", "").replace(" ", "T")[:19]
+        formatted_created = f"{base_time}.0000000Z"
+        
+        # Inject dynamic tag based on UI config
+        if recent_days_limit > 0:
+            try:
+                dt = datetime.datetime.strptime(base_time, "%Y-%m-%dT%H:%M:%S")
+                if (datetime.datetime.utcnow() - dt).days <= recent_days_limit:
+                    item_tags.append("Recently Added")
+            except Exception:
+                pass 
+    else:
+        formatted_created = now_iso
+
+    item["DateCreated"] = formatted_created
+
+    # Tunarr Schema: Always provide PremiereDate and ProductionYear
     if date and len(date) >= 4:
         try:
             item["ProductionYear"] = int(date[:4])
             item["PremiereDate"] = f"{date}T00:00:00.0000000Z"
         except:
-            pass
+            item["PremiereDate"] = formatted_created
+            item["ProductionYear"] = int(formatted_created[:4])
+    else:
+        item["PremiereDate"] = formatted_created
+        item["ProductionYear"] = int(formatted_created[:4])
 
     # Build Overview (Description + Studio)
     overview_parts = []
     if description:
         overview_parts.append(description)
-    if studio_name:                                    # <-- Change to studio_name
-        overview_parts.append(f"Studio: {studio_name}")  # <-- Change to studio_name
+    if studio_name:
+        overview_parts.append(f"Studio: {studio_name}")
     if overview_parts:
         item["Overview"] = "\n\n".join(overview_parts)
 
-    # Process Tags & Add 'Played' status tag
-    item_tags = [t.get("name") for t in tags if t.get("name")]
+    # Process additional status tags
     if play_count >= 1:
         item_tags.append("Onot0")
     
+    # Assign the final accumulated tags array to the item
     item["Tags"] = item_tags
     item["Genres"] = item_tags[:10]
 
@@ -138,7 +185,7 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") 
             p_name = p.get("name")
             p_id = p.get("id")
             if p_name and p_id:
-                p_tag = f"p-{p_id}-v{img_version}"
+                p_tag = f"p-{p_id}-v{cache_version}"
                 has_image = bool(p.get("image_path"))
             
                 person = {
@@ -158,7 +205,7 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") 
         studio_id = studio_obj.get("id")
         has_studio_image = bool(studio_obj.get("image_path"))
         
-        s_tag = f"s-{studio_id}-v{img_version}"
+        s_tag = f"s-{studio_id}-v{cache_version}"
         
         studio_item = {
             "Name": studio_name,
@@ -167,7 +214,6 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") 
         
         if has_studio_image:
             studio_item["PrimaryImageTag"] = s_tag
-            # ADD THIS: ErsatzTV needs the explicit dictionary to "see" the image
             studio_item["ImageTags"] = {"Primary": s_tag}
             
         item["Studios"] = [studio_item]
@@ -190,25 +236,7 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") 
                 "SupportsDirectStream": True,
                 "SupportsTranscoding": True,
                 "VideoType": "VideoFile",
-                "MediaStreams": [
-                    {
-                        "Codec": v_codec,
-                        "Type": "Video",
-                        "IsInterlaced": False,
-                        "IsDefault": True,
-                        "Width": width,
-                        "Height": height,
-                        "Index": 0,
-                        "BitRate": bit_rate
-                    },
-                    {
-                        "Codec": a_codec,
-                        "Type": "Audio",
-                        "IsDefault": True,
-                        "Index": 1,
-                        "Channels": 2
-                    }
-                ]
+                "MediaStreams": media_streams
             }
         ]
 

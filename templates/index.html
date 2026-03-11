@@ -606,6 +606,11 @@
                                 <input type="number" class="form-input" name="MAX_PAGE_SIZE" placeholder="200">
                                 <div class="form-hint">Hard query limit</div>
                             </div>
+                            <div class="form-group">
+                                <label class="form-label">Recent Days Tag</label>
+                                <input type="number" class="form-input" name="RECENT_DAYS" placeholder="14">
+                                <div class="form-hint">Days to apply 'Recently Added'. 0 disables.</div>
+                            </div>
                         </div>
                         <div class="form-row">
                             <div class="form-group">
@@ -643,14 +648,14 @@
                         </div>
                         
                         <div class="form-group" style="margin-bottom: 0;">
-                            <label class="form-label">Image Cache Busting</label>
+                            <label class="form-label">Global Cache Busting</label>
                             <div style="display: flex; gap: 10px; align-items: center;">
-                                <span id="current-image-version" style="font-weight: bold; font-size: 1.2em; color: var(--accent);">v0</span>
+                                <span id="current-cache-version" style="font-weight: bold; font-size: 1.2em; color: var(--accent);">v0</span>
                                 <button type="button" id="btn-increment-version" class="btn btn-secondary" style="padding: 6px 12px; font-size: 12px;">
-                                    Force Image Refresh
+                                    Force Global Refresh
                                 </button>
                             </div>
-                            <div class="form-hint">Increments image tags to force clients (like ErsatzTV) to re-download thumbnails.</div>
+                            <div class="form-hint">Increments Etag and Image versions to force Tunarr and ErsatzTV to re-download metadata and thumbnails.</div>
                         </div>
                     </div>
 
@@ -789,6 +794,7 @@
             SJS_PASSWORD: '',
             SERVER_ID: '',
             SERVER_NAME: 'Stash Media Server',
+            RECENT_DAYS: 14,
             TAG_GROUPS: [],
             LATEST_GROUPS: ['Scenes'],
             STASH_TIMEOUT: 30,
@@ -810,7 +816,7 @@
             BAN_WINDOW_MINUTES: 15,
             BANNED_IPS: '',
             AUTHENTICATED_IPS: '',
-            IMAGE_VERSION: 0
+            CACHE_VERSION: 0
         };
 
         // UI HELPERS
@@ -1001,7 +1007,10 @@
                         }
                     }
                 });
-                document.getElementById('current-image-version').innerText = 'v' + (config.IMAGE_VERSION || 0);
+                
+                if (document.getElementById('current-cache-version')) {
+                    document.getElementById('current-cache-version').innerText = 'v' + (config.CACHE_VERSION || 0);
+                }
             } catch (e) { console.error(e); }
         }
 
@@ -1047,7 +1056,7 @@
             e.preventDefault();
             const formData = new FormData(e.target);
             const data = {};
-            const intFields = ['PROXY_PORT', 'UI_PORT', 'STASH_TIMEOUT', 'STASH_RETRIES', 'LOG_MAX_SIZE_MB', 'LOG_BACKUP_COUNT', 'DEFAULT_PAGE_SIZE', 'MAX_PAGE_SIZE', 'IMAGE_CACHE_MAX_SIZE', 'BAN_THRESHOLD', 'BAN_WINDOW_MINUTES'];
+            const intFields = ['PROXY_PORT', 'UI_PORT', 'STASH_TIMEOUT', 'STASH_RETRIES', 'RECENT_DAYS', 'LOG_MAX_SIZE_MB', 'LOG_BACKUP_COUNT', 'DEFAULT_PAGE_SIZE', 'MAX_PAGE_SIZE', 'IMAGE_CACHE_MAX_SIZE', 'BAN_THRESHOLD', 'BAN_WINDOW_MINUTES'];
             
             formData.forEach((value, key) => {
                 if (key === 'TAG_GROUPS' || key === 'LATEST_GROUPS' || key === 'AUTHENTICATED_IPS') {
@@ -1076,11 +1085,21 @@
         });
 
         document.getElementById('btn-increment-version').addEventListener('click', async () => {
-            const res = await fetch('/api/increment_image_version', { method: 'POST' });
-            if (res.ok) {
-                const data = await res.json();
-                document.getElementById('current-image-version').innerText = 'v' + data.new_version;
-                showToast('Image version updated to v' + data.new_version, 'success');
+            if(!confirm('This will invalidate all current Etags and Image URLs. Clients will rebuild their caches on the next sync. Continue?')) return;
+            
+            try {
+                const response = await fetch('/api/increment_cache_version', { method: 'POST' });
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showToast(data.message || 'Global Cache Version incremented.', 'success');
+                    fetchConfig(); 
+                } else {
+                    showToast('Failed to increment cache: ' + data.error, 'error');
+                }
+            } catch (error) {
+                console.error('Error incrementing cache:', error);
+                showToast('An error occurred while incrementing the cache version.', 'error');
             }
         });
 

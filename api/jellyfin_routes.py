@@ -1,7 +1,6 @@
 import logging
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.requests import Request
-from starlette.responses import Response
 import config
 from core import stash_client
 from core import jellyfin_mapper
@@ -128,7 +127,13 @@ def _get_libraries():
             "ServerId": server_id,
             "CollectionType": "movies",
             "Type": "CollectionFolder",
-            "ItemId": "root-scenes"
+            "ItemId": "root-scenes",
+            
+            # Tunarr Strict Schema Requirements
+            "LibraryOptions": {
+                "PathInfos": []
+            },
+            "Locations": []
         }
     ]
     
@@ -142,7 +147,13 @@ def _get_libraries():
                 "ServerId": server_id,
                 "CollectionType": "movies",
                 "Type": "CollectionFolder",
-                "ItemId": f"tag-{t}"
+                "ItemId": f"tag-{t}",
+                
+                # Tunarr Strict Schema Requirements
+                "LibraryOptions": {
+                    "PathInfos": []
+                },
+                "Locations": []
             })
             
     return views
@@ -415,3 +426,7 @@ async def endpoint_studios(request: Request):
         "TotalRecordCount": len(jelly_studios),
         "StartIndex": 0
     })
+
+async def endpoint_system_ping(request: Request):
+    """Answers Tunarr server health checks."""
+    return PlainTextResponse("Jellyfin Server")
