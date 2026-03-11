@@ -9,26 +9,23 @@ PGID=${PGID:-100}
 
 echo "Setting permissions -> PUID: $PUID, PGID: $PGID"
 
-# Create a group if it doesn't exist
-if ! getent group abc >/dev/null; then
-    groupadd -g "$PGID" abc
+# 2. Safely create user/group ONLY if the numeric IDs don't already exist
+if ! getent group "$PGID" >/dev/null 2>&1; then
+    groupadd -g "$PGID" proxygroup || true
 fi
 
-# Create a user if it doesn't exist
-if ! getent passwd abc >/dev/null; then
-    useradd -u "$PUID" -g "$PGID" -m -s /bin/bash abc
+if ! getent passwd "$PUID" >/dev/null 2>&1; then
+    useradd -u "$PUID" -g "$PGID" -m -s /bin/bash proxyuser || true
 fi
 
-# 2. Fix permissions on the config folder before starting
+# 3. Fast-boot permission fix (Only touch what we need)
 if [ -d "/config" ]; then
     chown "$PUID":"$PGID" /config
-    # Only touch the specific files we own, ignoring deep subdirectories
     [ -f "/config/stash_jellyfin_proxy.conf" ] && chown "$PUID":"$PGID" /config/stash_jellyfin_proxy.conf
+    [ -f "/config/authenticated_IPs.json" ] && chown "$PUID":"$PGID" /config/authenticated_IPs.json
     [ -f "/config/stash_jellyfin_proxy.log" ] && chown "$PUID":"$PGID" /config/stash_jellyfin_proxy.log*
 fi
 
-# 3. Start the application
-# We use 'gosu' to drop root privileges and run the app as the Unraid user.
-# config.py will automatically generate the config file if it doesn't exist!
+# 4. Start the application using numeric IDs
 echo "Starting Python backend..."
-exec gosu abc python main.py
+exec gosu "$PUID":"$PGID" python main.py
