@@ -7,7 +7,7 @@ import state
 logger = logging.getLogger(__name__)
 
 # Endpoints that do not require the PROXY_API_KEY
-PUBLIC_ENDPOINTS = {"/system/info/public", "/web/index.html", "/health", "/", "/users/authenticatebyname"}
+PUBLIC_ENDPOINTS = {"/system/info/public", "/web/index.html", "/health", "/", "/users/authenticatebyname", "/system/ping"}
 PUBLIC_PREFIXES = ["/web/", "/assets/", "/api/"]
 
 def get_client_ip(scope) -> str:
@@ -57,11 +57,24 @@ class AuthenticationMiddleware:
                     is_public = True
                     break
 
-        # NEW: Allow all Jellyfin image requests to bypass authentication
-            if "/images/" in path_lower:
-                import state
-                if client_ip in getattr(state, "authenticated_ips", set()):
-                    is_public = True          
+        # NEW: Allow image requests ONLY if the client or the referring website is authenticated
+        if "/images/" in path_lower:
+            import state
+            auth_ips = getattr(state, "authenticated_ips", set())
+            
+            # 1. Did this specific device already authenticate directly?
+            if client_ip in auth_ips:
+                is_public = True
+            else:
+                # 2. Did an authenticated server (like Tunarr) tell them to load this image?
+                for key, value in scope.get("headers", []):
+                    key_lower = key.decode("latin1").lower()
+                    if key_lower in ["referer", "origin"]:
+                        header_val = value.decode("utf-8", errors="ignore")
+                        # Check if any of our trusted IPs appear in the Referer URL
+                        if any(auth_ip in header_val for auth_ip in auth_ips):
+                            is_public = True
+                            break      
 
         if is_public:
             # 1. UI SECURITY: Check if this is a protected dashboard API route

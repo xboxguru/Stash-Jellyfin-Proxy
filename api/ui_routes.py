@@ -41,6 +41,7 @@ async def api_get_config(request: Request):
         "REQUIRE_AUTH_FOR_CONFIG": getattr(config, "REQUIRE_AUTH_FOR_CONFIG", False),
         "SERVER_NAME": getattr(config, "SERVER_NAME", "Stash Media Server"),
         "SERVER_ID": getattr(config, "SERVER_ID", ""),
+        "RECENT_DAYS": getattr(config, "RECENT_DAYS", 14),
         "ENABLE_FILTERS": getattr(config, "ENABLE_FILTERS", True),
         "ENABLE_TAG_FILTERS": getattr(config, "ENABLE_TAG_FILTERS", False),
         "ENABLE_IMAGE_RESIZE": getattr(config, "ENABLE_IMAGE_RESIZE", True),
@@ -212,7 +213,10 @@ async def api_logout(request: Request):
     response.delete_cookie("ui_session")
     return response
 
-async def api_increment_image_version(request: Request):
-    config.IMAGE_VERSION = int(getattr(config, "IMAGE_VERSION", 0)) + 1
-    config.save_config() 
-    return JSONResponse({"status": "success", "new_version": config.IMAGE_VERSION})
+async def api_increment_cache_version(request):
+    """Increments the global cache version to force clients to redownload metadata and images."""
+    config.CACHE_VERSION = getattr(config, "CACHE_VERSION", 0) + 1
+    config.save_config()
+    return JSONResponse({
+        "message": f"Global Cache Version bumped to v{config.CACHE_VERSION}. Tunarr and ErsatzTV will rebuild their libraries on the next sync."
+    })

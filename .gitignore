@@ -1,6 +1,7 @@
 # Local configuration (Contains sensitive API keys)
 stash_jellyfin_proxy.conf
 .env
+authenticated_IPs.json
 
 # Python artifacts
 __pycache__/

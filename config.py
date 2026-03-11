@@ -28,6 +28,7 @@ LATEST_GROUPS = ["Scenes"]
 SERVER_NAME = "Stash Media Server"
 SERVER_ID = ""
 LIBRARY_TYPE = "movies"
+RECENT_DAYS = 14
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 200
 IMAGE_CACHE_MAX_SIZE = 100
@@ -48,7 +49,7 @@ LOG_BACKUP_COUNT = 3
 BANNED_IPS = set()
 BAN_THRESHOLD = 10
 BAN_WINDOW_MINUTES = 15
-IMAGE_VERSION = 0 # Cache busting
+CACHE_VERSION = 0 # Cache busting
 
 # Tracking variables for UI integration
 config_defined_keys = set()
@@ -69,10 +70,10 @@ def save_config():
         "SJS_USER", "SJS_PASSWORD", "SERVER_ID", "SERVER_NAME", "TAG_GROUPS", "LATEST_GROUPS",
         "STASH_TIMEOUT", "STASH_RETRIES", "STASH_GRAPHQL_PATH", "STASH_VERIFY_TLS",
         "SYNC_LEVEL", "ENABLE_FILTERS", "ENABLE_IMAGE_RESIZE", "ENABLE_TAG_FILTERS", 
-        "ENABLE_ALL_TAGS", "IMAGE_VERSION", "DEFAULT_PAGE_SIZE", "MAX_PAGE_SIZE",
+        "ENABLE_ALL_TAGS", "CACHE_VERSION", "DEFAULT_PAGE_SIZE", "MAX_PAGE_SIZE",
         "IMAGE_CACHE_MAX_SIZE", "REQUIRE_AUTH_FOR_CONFIG", "LOG_DIR", "LOG_FILE", 
         "LOG_LEVEL", "LOG_MAX_SIZE_MB", "LOG_BACKUP_COUNT", "BAN_THRESHOLD", 
-        "BAN_WINDOW_MINUTES", "BANNED_IPS"
+        "BAN_WINDOW_MINUTES", "BANNED_IPS", "RECENT_DAYS"
     ]
     
     try:
@@ -111,9 +112,9 @@ def load_config_file():
                     v = v.strip().strip('"').strip("'") # Clean quotes and spaces
                     
                     # Enforce Integers
-                    if k in ["IMAGE_VERSION", "PROXY_PORT", "UI_PORT", "DEFAULT_PAGE_SIZE", "MAX_PAGE_SIZE", 
+                    if k in ["CACHE_VERSION", "PROXY_PORT", "UI_PORT", "DEFAULT_PAGE_SIZE", "MAX_PAGE_SIZE", 
                              "STASH_TIMEOUT", "STASH_RETRIES", "IMAGE_CACHE_MAX_SIZE", "LOG_MAX_SIZE_MB", 
-                             "LOG_BACKUP_COUNT", "BAN_THRESHOLD", "BAN_WINDOW_MINUTES"]:
+                             "LOG_BACKUP_COUNT", "BAN_THRESHOLD", "BAN_WINDOW_MINUTES", "RECENT_DAYS"]:
                         try:
                             v = int(v)
                         except ValueError:

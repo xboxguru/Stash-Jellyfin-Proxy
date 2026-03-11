@@ -44,46 +44,46 @@ logger = logging.getLogger("proxy_main")
 routes = [
     # --- Web UI Routes ---
     Route("/", ui_routes.serve_index, methods=["GET"]),
+    Route("/api/auth/check", ui_routes.api_auth_check, methods=["GET"]),
     Route("/api/config", ui_routes.api_get_config, methods=["GET"]),
     Route("/api/config", ui_routes.api_post_config, methods=["POST"]),
-    Route("/api/status", ui_routes.api_get_status, methods=["GET"]),
-    Route("/api/streams", ui_routes.api_get_streams, methods=["GET"]),
-    Route("/api/stats", ui_routes.api_get_stats, methods=["GET"]),
-    Route("/api/logs", ui_routes.api_get_logs, methods=["GET"]),
-    Route("/api/restart", ui_routes.api_restart, methods=["POST"]),
-    Route("/api/logs/clear", ui_routes.api_clear_logs, methods=["POST"]),
-    Route("/api/auth/check", ui_routes.api_auth_check, methods=["GET"]),
+    Route("/api/increment_cache_version", ui_routes.api_increment_cache_version, methods=["POST"]),
     Route("/api/login", ui_routes.api_login, methods=["POST"]),
     Route("/api/logout", ui_routes.api_logout, methods=["POST"]),
-    Route("/api/increment_image_version", ui_routes.api_increment_image_version, methods=["POST"]),
+    Route("/api/logs", ui_routes.api_get_logs, methods=["GET"]),
+    Route("/api/logs/clear", ui_routes.api_clear_logs, methods=["POST"]),
+    Route("/api/restart", ui_routes.api_restart, methods=["POST"]),
+    Route("/api/stats", ui_routes.api_get_stats, methods=["GET"]),
     Route("/api/stats/reset", ui_routes.api_reset_stats, methods=["POST"]),
+    Route("/api/status", ui_routes.api_get_status, methods=["GET"]),
+    Route("/api/streams", ui_routes.api_get_streams, methods=["GET"]),
 
-    # --- Jellyfin API Routes ---
+    # --- Jellyfin API Routes (Content & Libraries) ---
     # Jellyfin clients request data using these standard endpoints
     Route("/Items", jellyfin_routes.endpoint_items, methods=["GET"]),
-    Route("/Users/{user_id}/Items", jellyfin_routes.endpoint_items, methods=["GET"]),
-    Route("/Users/{user_id}/Views", jellyfin_routes.endpoint_views, methods=["GET"]),
-    Route("/Library/VirtualFolders", jellyfin_routes.endpoint_views, methods=["GET"]),
-    Route("/Users/{user_id}/Views", jellyfin_routes.endpoint_views, methods=["GET"]),
-    Route("/Library/VirtualFolders", jellyfin_routes.endpoint_virtual_folders, methods=["GET"]),
-    Route("/system/info/public", jellyfin_routes.endpoint_system_info_public, methods=["GET"]),
+    Route("/Items/RemoteSearch/Studios", jellyfin_routes.endpoint_studios, methods=["GET"]),
     Route("/Items/{item_id}", jellyfin_routes.endpoint_item_details, methods=["GET"]),
-    Route("/Users/{user_id}/Items/{item_id}", jellyfin_routes.endpoint_item_details, methods=["GET"]),
-    Route("/Items/{item_id}/PlaybackInfo", jellyfin_routes.endpoint_playback_info, methods=["GET"]),
     Route("/Items/{item_id}/Images/{image_type}", jellyfin_routes.endpoint_item_image, methods=["GET"]),
-    Route("/Studios", jellyfin_routes.endpoint_studios),
-    Route("/Items/RemoteSearch/Studios", jellyfin_routes.endpoint_studios),
+    Route("/Items/{item_id}/PlaybackInfo", jellyfin_routes.endpoint_playback_info, methods=["GET"]),
+    Route("/Library/VirtualFolders", jellyfin_routes.endpoint_virtual_folders, methods=["GET"]),
+    Route("/Studios", jellyfin_routes.endpoint_studios, methods=["GET"]),
+    Route("/Users/{user_id}/Items", jellyfin_routes.endpoint_items, methods=["GET"]),
+    Route("/Users/{user_id}/Items/{item_id}", jellyfin_routes.endpoint_item_details, methods=["GET"]),
+    Route("/Users/{user_id}/Views", jellyfin_routes.endpoint_views, methods=["GET"]),
     
-    # Playback Reporting Routes
+    # --- Playback Reporting Routes ---
     Route("/Sessions/Playing", jellyfin_routes.endpoint_sessions_playing, methods=["POST"]),
     Route("/Sessions/Playing/Progress", jellyfin_routes.endpoint_sessions_playing, methods=["POST"]),
     Route("/Sessions/Playing/Stopped", jellyfin_routes.endpoint_sessions_stopped, methods=["POST"]),
-    # Authentication & User Mocking Routes
-    Route("/Users/AuthenticateByName", jellyfin_routes.endpoint_authenticate_by_name, methods=["POST"]),
-    Route("/Users", jellyfin_routes.endpoint_users, methods=["GET"]),
-    Route("/Users/{user_id}", jellyfin_routes.endpoint_user, methods=["GET"]),
-    Route("/System/Info", jellyfin_routes.endpoint_system_info, methods=["GET"]),
+    
+    # --- System, Authentication & User Routes ---
     Route("/QuickConnect/Enabled", jellyfin_routes.endpoint_quickconnect_enabled, methods=["GET"]),
+    Route("/System/Info", jellyfin_routes.endpoint_system_info, methods=["GET"]),
+    Route("/system/info/public", jellyfin_routes.endpoint_system_info_public, methods=["GET"]),
+    Route("/System/Ping", jellyfin_routes.endpoint_system_ping, methods=["GET", "POST"]),
+    Route("/Users", jellyfin_routes.endpoint_users, methods=["GET"]),
+    Route("/Users/AuthenticateByName", jellyfin_routes.endpoint_authenticate_by_name, methods=["POST"]),
+    Route("/Users/{user_id}", jellyfin_routes.endpoint_user, methods=["GET"]),
 ]
 
 # Initialize the Starlette App
