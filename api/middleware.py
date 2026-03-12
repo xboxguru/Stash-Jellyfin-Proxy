@@ -7,7 +7,17 @@ import state
 logger = logging.getLogger(__name__)
 
 # Endpoints that do not require the PROXY_API_KEY
-PUBLIC_ENDPOINTS = {"/system/info/public", "/web/index.html", "/health", "/", "/users/authenticatebyname", "/system/ping"}
+PUBLIC_ENDPOINTS = {
+    "/system/info/public", 
+    "/web/index.html", 
+    "/health", 
+    "/", 
+    "/users/authenticatebyname", 
+    "/system/ping",
+    "/users/public",
+    "/quickconnect/initiate",
+    "/quickconnect/enabled"
+}
 PUBLIC_PREFIXES = ["/web/", "/assets/", "/api/"]
 
 def get_client_ip(scope) -> str:
@@ -57,8 +67,8 @@ class AuthenticationMiddleware:
                     is_public = True
                     break
 
-        # NEW: Allow image requests ONLY if the client or the referring website is authenticated
-        if "/images/" in path_lower:
+        # NEW: Allow image and video stream requests ONLY if the client or the referring website is authenticated
+        if "/images/" in path_lower or "/videos/" in path_lower:
             import state
             auth_ips = getattr(state, "authenticated_ips", set())
             
@@ -121,7 +131,7 @@ class AuthenticationMiddleware:
             parsed_query = {k.lower(): v for k, v in urllib.parse.parse_qs(query_bytes.decode("utf-8")).items()}
             token = parsed_query.get("api_key", [None])[0] or parsed_query.get("token", [None])[0]
 
-        # Check headers if not found in query string
+# Check headers if not found in query string
         if not token:
             for key, value in scope.get("headers", []):
                 key_lower = key.decode().lower()
@@ -130,15 +140,17 @@ class AuthenticationMiddleware:
                 # The C# Jellyfin SDK (ErsatzTV) passes keys in X-Emby-Authorization!
                 if key_lower in ["x-emby-token", "x-mediabrowser-token"]:
                     token = value_str
-                    break
                 elif key_lower in ["authorization", "x-emby-authorization"]:
                     if value_str.startswith("Bearer "):
                         token = value_str[7:]
-                    elif "Token=" in value_str:
-                        # Make quotes completely optional and catch everything up to a comma or space
-                        match = re.search(r'Token="?([^",\s]+)"?', value_str)
+                    elif "token=" in value_str.lower():
+                        # Make quotes optional and case-insensitive
+                        match = re.search(r'token="?([^",\s]+)"?', value_str, re.IGNORECASE)
                         if match:
                             token = match.group(1)
+                
+                # ONLY stop searching the headers if we actually found a token
+                if token:
                     break
 
         # Strip any literal quotes just in case the user typed them in the UI
@@ -180,7 +192,11 @@ class AuthenticationMiddleware:
         if token:
             logger.warning(f"Unauthorized access attempt to {path} from {client_ip} | Reason: Token mismatch. Received: '{token}' | Expected: '{expected_key}'")
         else:
-            logger.warning(f"Unauthorized access attempt to {path} from {client_ip} | Reason: No token provided in headers or query string.")
+            # DEBUG: Print the raw headers to see how Jellycon is hiding the token
+            safe_headers = {k.decode('latin1'): v.decode('utf-8', errors='ignore') for k, v in scope.get("headers", [])}
+            logger.warning(f"Unauthorized access attempt to {path} from {client_ip} | Reason: No token provided. Headers: {safe_headers}")
+        
+        response_body = b'{"error": "Unauthorized"}'
         
         response_body = b'{"error": "Unauthorized"}'
         await send({
