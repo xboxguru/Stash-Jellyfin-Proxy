@@ -6,6 +6,8 @@ from core import stash_client
 from core import jellyfin_mapper
 import asyncio
 import httpx
+from starlette.responses import StreamingResponse
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -83,14 +85,31 @@ async def endpoint_items(request: Request):
             "StartIndex": 0
         })
 
-    # 2. NORMAL PAGINATED SEARCH
+   # 2. NORMAL PAGINATED SEARCH
     filter_args = {
         "sort": "created_at",
         "direction": "DESC"
     }
 
+    # Keep track of original pagination limits
+    original_limit = limit
+
+    # --- JELLYCON FILTER ENGINE ---
+    name_starts = _get_query_param(request, "NameStartsWith")
+    search_term = _get_query_param(request, "SearchTerm")
+
+    if name_starts:
+        # Stash GraphQL lacks an exact 'StartsWith' modifier. 
+        # We fetch a broad search ('q') and strictly filter in Python to avoid 422 crashes.
+        filter_args["q"] = name_starts
+        filter_args["sort"] = "title"
+        filter_args["direction"] = "ASC"
+        limit = -1  # Override Stash limit so we get all broad matches to filter in memory
+    elif search_term:
+        filter_args["q"] = search_term
+
     # If Limit=0, ErsatzTV just wants the TotalRecordCount, not the actual items!
-    if limit == 0:
+    if original_limit == 0 and not name_starts:
         stash_data = stash_client.fetch_scenes(filter_args, page=1, per_page=1)
         return JSONResponse({
             "Items": [],
@@ -104,16 +123,29 @@ async def endpoint_items(request: Request):
     
     jellyfin_items = []
     for scene in stash_data.get("scenes", []):
+        # Strict Python filtering to guarantee exact "Browse By Letter" matches
+        if name_starts:
+            title = scene.get("title") or scene.get("code") or ""
+            if not title.lower().startswith(name_starts.lower()):
+                continue # Skip this scene, it doesn't start with the target letter!
+
         try:
             jellyfin_items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=parent_id or "root-scenes"))
         except Exception as e:
             logger.error(f"Failed to map scene during pagination: {e}")
 
+    # Manual Pagination for Python-filtered lists
+    total_count = stash_data.get("count", 0)
+    if name_starts:
+        total_count = len(jellyfin_items)
+        if original_limit > 0:
+            jellyfin_items = jellyfin_items[start_index : start_index + original_limit]
+
     return JSONResponse({
         "Items": jellyfin_items,
-        "TotalRecordCount": stash_data.get("count", 0),
+        "TotalRecordCount": total_count,
         "StartIndex": start_index
-    })
+    }) 
 
 def _get_libraries():
     """Matches the exact 'VirtualFolder' schema."""
@@ -179,14 +211,13 @@ async def endpoint_virtual_folders(request: Request):
     )
 
 async def endpoint_item_details(request: Request):
-    """
-    Handles requests for a single specific item.
-    ErsatzTV calls this when you do a 'MediaInfo' scan on a file.
-    """
+    """Handles requests for a single specific item."""
     item_id = request.path_params.get("item_id", "")
-    
-    # Strip the "scene-" prefix we added in the mapper
     raw_id = item_id.replace("scene-", "")
+    
+    # PROTECT STASH: If Jellycon asks for a menu string, reject it cleanly
+    if not raw_id.isdigit():
+        return JSONResponse({"error": "Item not found"}, status_code=404)
     
     # Fetch the single scene from Stash
     scene = stash_client.get_scene(raw_id)
@@ -194,9 +225,7 @@ async def endpoint_item_details(request: Request):
     if not scene:
         return JSONResponse({"error": "Item not found"}, status_code=404)
         
-    # Format and return it
     jellyfin_item = jellyfin_mapper.format_jellyfin_item(scene)
-    
     return JSONResponse(jellyfin_item)
 
 async def endpoint_playback_info(request: Request):
@@ -225,59 +254,104 @@ async def endpoint_sessions_playing(request: Request):
     
     try:
         data = await request.json()
-        item = data.get("Item", {})
-        session_id = data.get("PlaySessionId", "unknown_session")
         
-        # Ensure the list exists
+        # Aggressively hunt for IDs (clients format these differently)
+        session_id = data.get("PlaySessionId") or data.get("SessionId") or "unknown_session"
+        item_id = data.get("ItemId") or data.get("Item", {}).get("Id", "")
+        
+        # FIX: Check for both PlaybackPositionTicks and PositionTicks
+        playback_ticks = float(data.get("PlaybackPositionTicks") or data.get("PositionTicks") or 0)
+        runtime_ticks = float(data.get("RunTimeTicks") or data.get("Item", {}).get("RunTimeTicks") or 0)
+        title = data.get("Item", {}).get("Name") or "Unknown Scene"
+        
         if not hasattr(state, "active_streams"):
             state.active_streams = []
             
-        # Check if we are already tracking this stream
-        existing_stream = next((s for s in state.active_streams if s.get("id") == session_id), None)
+        stream = next((s for s in state.active_streams if s.get("id") == session_id), None)
         
-        if not existing_stream:
-            # 1. Add it to the Active Streams dashboard
-            title = item.get("Name", "Unknown Scene")
+        if not stream:
+            logger.info(f"▶️ PLAYBACK STARTED: Session {session_id} for Item {item_id}")
             stream_info = {
                 "id": session_id,
+                "item_id": item_id,  # SAVE ITEM ID TO MEMORY!
                 "title": title,
-                "performer": "", # We can leave this blank or fetch it later
-                "user": "Proxy User", 
-                "clientIp": request.client.host if request.client else "Unknown",
-                "clientType": data.get("ClientName", "ErsatzTV / Infuse"),
+                "runtime_ticks": runtime_ticks,
+                "last_ticks": playback_ticks,
                 "started": int(time.time())
             }
             state.active_streams.append(stream_info)
             
-            # 2. Increment Proxy Usage Stats
+            # Stats tracking
             state.stats["streams_today"] += 1
             state.stats["total_streams"] += 1
-            
-            # 3. Track Top Played Scene
-            scene_id = item.get("Id", "unknown")
+            scene_id = item_id if item_id else "unknown"
             if scene_id not in state.stats["top_played"]:
                 state.stats["top_played"][scene_id] = {"title": title, "performer": "Unknown", "count": 0}
             state.stats["top_played"][scene_id]["count"] += 1
+        else:
+            # UPDATE MEMORY during progress heartbeats
+            stream["last_ticks"] = max(stream.get("last_ticks", 0), playback_ticks)
+            if not stream.get("runtime_ticks") and runtime_ticks > 0:
+                stream["runtime_ticks"] = runtime_ticks
 
     except Exception as e:
         logger.error(f"Error parsing playing session: {e}")
         
-    # Always return 204 No Content for playback reporting so the client is happy
     return JSONResponse({}, status_code=204)
 
+
 async def endpoint_sessions_stopped(request: Request):
-    """Receives playback stopped reports to clear active streams."""
+    """Receives playback stopped reports to clear active streams and sync watch status."""
     import state
+    
     try:
         data = await request.json()
-        session_id = data.get("PlaySessionId", "unknown_session")
+        logger.info(f"🛑 RAW STOP PAYLOAD: {data}") # DEBUG: See exactly what the client sent
+        
+        session_id = data.get("PlaySessionId") or data.get("SessionId") or "unknown_session"
         
         if hasattr(state, "active_streams"):
-            # Remove the stream with this session ID from the memory bank
-            state.active_streams = [s for s in state.active_streams if s.get("id") != session_id]
+            stream = next((s for s in state.active_streams if s.get("id") == session_id), None)
+            
+            if stream:
+                # Remove the stream from the dashboard
+                state.active_streams = [s for s in state.active_streams if s.get("id") != session_id]
+                
+                # Fetch ID from the payload, OR fall back to the proxy's memory
+                item_id = data.get("ItemId") or data.get("Item", {}).get("Id") or stream.get("item_id", "")
+                
+                if item_id.startswith("scene-"):
+                    raw_id = item_id.replace("scene-", "")
+                    
+                    try:
+                        # FIX: Check for both PlaybackPositionTicks and PositionTicks
+                        reported_ticks = float(data.get("PlaybackPositionTicks") or data.get("PositionTicks") or 0)
+                        last_ticks = float(stream.get("last_ticks", 0))
+                        playback_ticks = max(reported_ticks, last_ticks)
+                        
+                        runtime_ticks = float(data.get("RunTimeTicks") or data.get("Item", {}).get("RunTimeTicks") or stream.get("runtime_ticks", 0))
+                        
+                        if runtime_ticks > 0:
+                            percentage = playback_ticks / runtime_ticks
+                            logger.info(f"📊 MATH CHECK: played={playback_ticks}, total={runtime_ticks}, pct={percentage*100:.1f}%")
+                            
+                            if percentage >= 0.90:
+                                logger.info(f"✅ Playback reached 90%! Syncing to Stash Play History...")
+                                asyncio.create_task(_increment_stash_playcount(raw_id))
+                            else:
+                                logger.info(f"❌ Playback stopped early. Skip logging.")
+                        else:
+                            logger.warning(f"Could not calculate completion. Missing RunTimeTicks. Memory: {stream}")
+                            
+                    except (ValueError, TypeError) as e:
+                        logger.error(f"Failed to calculate playback percentage due to invalid data format: {e}")
+                else:
+                    logger.warning(f"Stop event ignored. ItemId '{item_id}' is not a scene.")
+            else:
+                logger.warning(f"Stop event received but session '{session_id}' was not found in active streams!")
             
     except Exception as e:
-        logger.error(f"Error removing stopped session: {e}")
+        logger.error(f"Error processing stopped session: {e}")
 
     return JSONResponse({}, status_code=204)
 
@@ -472,10 +546,8 @@ async def endpoint_empty_list(request: Request):
         "StartIndex": 0
     })
 
-from starlette.responses import StreamingResponse
-
 async def endpoint_stream(request: Request):
-    """Pipes the video stream directly from Stash to the client."""
+    """Pipes the video stream directly from Stash, fully supporting byte-range seeking."""
     item_id = request.path_params.get("item_id", "")
     raw_id = item_id.replace("scene-", "")
 
@@ -483,24 +555,136 @@ async def endpoint_stream(request: Request):
     apikey = getattr(config, "STASH_API_KEY", "")
     
     # Target the Stash native streaming endpoint
-    stash_stream_url = f"{stash_base}/scene/{raw_id}/stream.mp4"
+    stash_stream_url = f"{stash_base}/scene/{raw_id}/stream"
     if apikey:
         stash_stream_url += f"?apikey={apikey}"
 
-    # Forward the client's headers (like 'Range: bytes=...') to Stash so seeking works
+    # Safely extract headers and clean them up for Stash
     headers = dict(request.headers)
-    # Remove the host header so httpx generates a fresh one for the Stash server
     headers.pop("host", None)
+    
+    # Kodi relies heavily on the 'Range' header for seeking and buffering
+    range_header = headers.get("range")
+
+    async def stream_generator(resp):
+        """Yields chunks of the video directly to the client."""
+        async for chunk in resp.aiter_bytes(chunk_size=8192):
+            yield chunk
 
     client = httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False))
     
-    # We use build_request and send(stream=True) to pipe the data without loading it into RAM
-    req = client.build_request(request.method, stash_stream_url, headers=headers)
-    r = await client.send(req, stream=True)
+    try:
+        # We MUST use send() with stream=True so we don't load a 10GB file into RAM
+        req = client.build_request(request.method, stash_stream_url, headers=headers)
+        r = await client.send(req, stream=True)
 
-    # Pipe the raw Stash response directly back to Kodi
-    return StreamingResponse(
-        r.aiter_raw(), 
-        status_code=r.status_code, 
-        headers=r.headers
-    )
+        # Prepare the response headers to bounce back to Kodi
+        resp_headers = dict(r.headers)
+        
+        # Security/CORS cleanup: Remove headers that might confuse Starlette/Kodi
+        resp_headers.pop("content-encoding", None)
+        resp_headers.pop("transfer-encoding", None)
+        resp_headers.pop("connection", None)
+        
+        # Default to 200 OK
+        status_code = r.status_code
+        
+        # CRITICAL: If Kodi asked for a range, we MUST return 206 Partial Content
+        if range_header and status_code == 206:
+            # Ensure the Content-Range header survived the trip from Stash
+            if "content-range" not in resp_headers:
+                logger.warning(f"Stash returned 206 but missing Content-Range for scene {raw_id}")
+        
+        # If it's a HEAD request (Kodi checking file size), don't stream the body
+        if request.method == "HEAD":
+            await r.aclose()
+            return Response(status_code=status_code, headers=resp_headers)
+
+        # Return the StreamingResponse, tying its lifecycle to the httpx response
+        response = StreamingResponse(
+            stream_generator(r), 
+            status_code=status_code, 
+            headers=resp_headers
+        )
+        
+        # Ensure the httpx client closes when the streaming response finishes/disconnects
+        response.background = r.aclose
+        return response
+
+    except Exception as e:
+        logger.error(f"Stream passthrough failed for scene {raw_id}: {e}")
+        return Response(status_code=500)
+
+async def endpoint_tags(request: Request):
+    """Fetches all tags from Stash and formats them for the Jellycon menu."""
+    stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+    url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if getattr(config, "STASH_API_KEY", ""):
+        headers["ApiKey"] = config.STASH_API_KEY
+        
+    query = """
+    query {
+        findTags(filter: {per_page: -1}, tag_filter: {sort: "name", direction: ASC}) {
+            tags { id name }
+        }
+    }
+    """
+    async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
+        try:
+            resp = await client.post(url, headers=headers, json={"query": query}, timeout=10.0)
+            stash_tags = resp.json().get("data", {}).get("findTags", {}).get("tags", [])
+        except Exception as e:
+            logger.error(f"Failed to fetch tags: {e}")
+            stash_tags = []
+
+    jelly_tags = [{"Name": t.get("name"), "Id": f"tag-{t.get('id')}", "Type": "Tag"} for t in stash_tags]
+
+    return JSONResponse({"Items": jelly_tags, "TotalRecordCount": len(jelly_tags), "StartIndex": 0})
+
+
+async def endpoint_years(request: Request):
+    """Returns a dynamic list of years for the Jellycon menu."""
+    import datetime
+    current_year = datetime.datetime.now().year
+    years = []
+    
+    # Generate years from current down to 1990
+    for y in range(current_year, 1989, -1):
+        years.append({"Name": str(y), "Id": str(y), "Type": "Year", "ProductionYear": y})
+
+    return JSONResponse({"Items": years, "TotalRecordCount": len(years), "StartIndex": 0})
+
+
+async def _increment_stash_playcount(raw_id: str):
+    """Logs a play in Stash using the official native player mutation."""
+    stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+    url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if getattr(config, "STASH_API_KEY", ""):
+        headers["ApiKey"] = config.STASH_API_KEY
+        
+    async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
+        try:
+            # Use the exact mutation Stash's native web player uses!
+            # This specifically logs a 'Play' in history WITHOUT triggering an 'O'
+            query_play = """
+            mutation($id: ID!) {
+                sceneIncrementPlayCount(id: $id)
+            }
+            """
+            await client.post(url, headers=headers, json={"query": query_play, "variables": {"id": raw_id}}, timeout=10.0)
+            logger.info(f"Two-Way Sync: Logged official Play event for Scene {raw_id}")
+        except Exception as e:
+            logger.error(f"Failed to increment play count for Scene {raw_id}: {e}")
+
+
+async def endpoint_mark_played(request: Request):
+    """Fired when a user clicks 'Mark as Watched' in the Jellycon context menu."""
+    item_id = request.path_params.get("item_id", "")
+    if item_id.startswith("scene-"):
+        raw_id = item_id.replace("scene-", "")
+        logger.info(f"Manual 'Mark as Watched' triggered for {item_id}")
+        asyncio.create_task(_increment_stash_playcount(raw_id))
+    
+    return JSONResponse({"Played": True, "PlayCount": 1, "PlaybackPositionTicks": 0, "Key": item_id})

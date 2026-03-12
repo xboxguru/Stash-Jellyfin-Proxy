@@ -103,6 +103,13 @@ def fetch_scenes(filter_args: Dict[str, Any], page: int = 1, per_page: int = 50,
     """Fetch scenes based on SYNC_LEVEL (Everything, Organized, Tagged)."""
     # Build the scene filter object
     sf = scene_filter or {}
+    
+    # --- FILTER ENGINE FIX ---
+    # Extract scene-specific filters (like title) from the generic filter_args
+    # so Stash's GraphQL schema accepts them in the SceneFilterType.
+    if "title" in filter_args:
+        sf["title"] = filter_args.pop("title")
+        
     sync_mode = getattr(config, "SYNC_LEVEL", "Everything")
     
     if sync_mode == "Organized":

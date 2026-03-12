@@ -60,6 +60,7 @@ routes = [
 
     # --- Jellyfin API Routes (Content & Libraries) ---
     # Jellyfin clients request data using these standard endpoints
+    Route("/Genres", jellyfin_routes.endpoint_empty_list, methods=["GET"]),
     Route("/Items", jellyfin_routes.endpoint_items, methods=["GET"]),
     Route("/Items/RemoteSearch/Studios", jellyfin_routes.endpoint_studios, methods=["GET"]),
     Route("/Items/{item_id}", jellyfin_routes.endpoint_item_details, methods=["GET"]),
@@ -70,12 +71,13 @@ routes = [
     Route("/Videos/{item_id}/stream", jellyfin_routes.endpoint_stream, methods=["GET", "HEAD"]),
     Route("/Library/VirtualFolders", jellyfin_routes.endpoint_virtual_folders, methods=["GET"]),
     Route("/Studios", jellyfin_routes.endpoint_studios, methods=["GET"]),
-    Route("/Genres", jellyfin_routes.endpoint_empty_list, methods=["GET"]),
-    Route("/Tags", jellyfin_routes.endpoint_empty_list, methods=["GET"]),
-    Route("/Years", jellyfin_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/Tags", jellyfin_routes.endpoint_tags, methods=["GET"]),
     Route("/Users/{user_id}/Items", jellyfin_routes.endpoint_items, methods=["GET"]),
     Route("/Users/{user_id}/Items/{item_id}", jellyfin_routes.endpoint_item_details, methods=["GET"]),
+    Route("/Users/{user_id}/Items/Resume", jellyfin_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/Users/{user_id}/PlayedItems/{item_id}", jellyfin_routes.endpoint_mark_played, methods=["POST"]),
     Route("/Users/{user_id}/Views", jellyfin_routes.endpoint_views, methods=["GET"]),
+    Route("/Years", jellyfin_routes.endpoint_years, methods=["GET"]),
     
     # --- Playback Reporting Routes ---
     Route("/Sessions/Playing", jellyfin_routes.endpoint_sessions_playing, methods=["POST"]),
