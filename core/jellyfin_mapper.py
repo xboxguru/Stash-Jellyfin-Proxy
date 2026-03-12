@@ -18,6 +18,10 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") 
     path = files[0].get("path") if files else ""
     duration_seconds = files[0].get("duration", 0) if files else 0
     
+    # NEW: Grab Stash's resume time and convert it to Ticks (1 sec = 10,000,000 ticks)
+    resume_time_seconds = scene.get("resume_time") or 0
+    resume_ticks = int(resume_time_seconds * 10000000)
+    
     # CRITICAL: Convert seconds to 100-nanosecond ticks for ErsatzTV Scheduler
     runtime_ticks = int(duration_seconds * 10000000)
     
@@ -116,7 +120,7 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") 
         "_StashBitRate": bit_rate,
 
         "UserData": {
-            "PlaybackPositionTicks": 0,
+            "PlaybackPositionTicks": resume_ticks,
             "PlayCount": play_count,
             "IsFavorite": False,
             "Played": play_count > 0,

@@ -90,53 +90,122 @@ async def endpoint_items(request: Request):
         "sort": "created_at",
         "direction": "DESC"
     }
-
-    # Keep track of original pagination limits
+    scene_filter = {}  # This gets passed to Stash's SceneFilterType
     original_limit = limit
 
     # --- JELLYCON FILTER ENGINE ---
+    # 0. PREVENT MENU LEAKAGE (Like Collections/Boxsets showing all movies)
+    item_types = _get_query_param(request, "IncludeItemTypes", "").lower()
+    if item_types:
+        allowed = False
+        # If they specifically ask for movies or series, let it through
+        for t in ["movie", "video", "series", "episode"]:
+            if t in item_types:
+                allowed = True
+                break
+        if not allowed:
+            # They asked for BoxSets, Playlists, or Persons. We don't map those to items!
+            return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": start_index})
+
+    # 1. Sort By & Sort Order
+    sort_by = _get_query_param(request, "SortBy", "").lower()
+    if "random" in sort_by:
+        filter_args["sort"] = "random"
+    elif "datecreated" in sort_by:
+        filter_args["sort"] = "created_at"
+    elif "dateplayed" in sort_by:
+        filter_args["sort"] = "updated_at" # Map Jellyfin's DatePlayed to Stash's Updated_At
+    elif "name" in sort_by or "sortname" in sort_by:
+        filter_args["sort"] = "title"
+        
+    sort_order = _get_query_param(request, "SortOrder", "").lower()
+    if sort_order == "ascending":
+        filter_args["direction"] = "ASC"
+
+    # 2. Watch Status & Favorites
+    filters_string = _get_query_param(request, "Filters", "")
+    # Split by comma so we check exact words, avoiding the "IsPlayed" in "IsUnplayed" trap!
+    filter_list = [f.strip() for f in filters_string.split(",")] 
+
+    if "IsUnplayed" in filter_list:
+        scene_filter["play_count"] = {"value": 0, "modifier": "EQUALS"}
+    elif "IsPlayed" in filter_list:
+        scene_filter["play_count"] = {"value": 0, "modifier": "GREATER_THAN"}
+        
+    if "IsFavorite" in filter_list:
+        scene_filter["o_counter"] = {"value": 0, "modifier": "GREATER_THAN"}
+        
+    # In Progress - Use memory filtering because Stash doesn't index resume_time!
+    if "IsResumable" in filter_list:
+        filter_args["sort"] = "updated_at" 
+        filter_args["direction"] = "DESC"
+        limit = -1
+
+    # 3. Years & Decades
+    years = _get_query_param(request, "Years")
+    if years:
+        year_list = [int(y) for y in years.split(",") if y.isdigit()]
+        if year_list:
+            min_year = min(year_list)
+            max_year = max(year_list)
+            scene_filter["date"] = {
+                "value": f"{min_year}-01-01",
+                "value2": f"{max_year}-12-31",
+                "modifier": "BETWEEN"
+            }
+
+    # 4. Tags & Genres
+    tags_param = _get_query_param(request, "Tags") or _get_query_param(request, "TagIds") or _get_query_param(request, "GenreIds")
+    if tags_param:
+        raw_tags = [t.replace("tag-", "") for t in tags_param.split(",") if t.replace("tag-", "").isdigit()]
+        if raw_tags:
+            scene_filter["tags"] = {"value": raw_tags, "modifier": "INCLUDES"}
+
+    # 5. Letters & Global Search
     name_starts = _get_query_param(request, "NameStartsWith")
     search_term = _get_query_param(request, "SearchTerm")
-
     if name_starts:
-        # Stash GraphQL lacks an exact 'StartsWith' modifier. 
-        # We fetch a broad search ('q') and strictly filter in Python to avoid 422 crashes.
         filter_args["q"] = name_starts
         filter_args["sort"] = "title"
         filter_args["direction"] = "ASC"
-        limit = -1  # Override Stash limit so we get all broad matches to filter in memory
+        limit = -1 
     elif search_term:
         filter_args["q"] = search_term
 
-    # If Limit=0, ErsatzTV just wants the TotalRecordCount, not the actual items!
+    # Execute Search!
     if original_limit == 0 and not name_starts:
-        stash_data = stash_client.fetch_scenes(filter_args, page=1, per_page=1)
+        stash_data = stash_client.fetch_scenes(filter_args, page=1, per_page=1, scene_filter=scene_filter)
         return JSONResponse({
             "Items": [],
             "TotalRecordCount": stash_data.get("count", 0),
             "StartIndex": start_index
         })
 
-    # Calculate pagination
     page = (start_index // limit) + 1 if limit > 0 else 1
-    stash_data = stash_client.fetch_scenes(filter_args, page=page, per_page=limit)
+    
+    # We pass the newly built scene_filter to Stash!
+    stash_data = stash_client.fetch_scenes(filter_args, page=page, per_page=limit, scene_filter=scene_filter)
     
     jellyfin_items = []
     for scene in stash_data.get("scenes", []):
-        # Strict Python filtering to guarantee exact "Browse By Letter" matches
+        # Strict Python filtering for Letters
         if name_starts:
             title = scene.get("title") or scene.get("code") or ""
             if not title.lower().startswith(name_starts.lower()):
-                continue # Skip this scene, it doesn't start with the target letter!
+                continue
+
+        # Strict Python filtering for In Progress
+        if "IsResumable" in filter_list:
+            if not scene.get("resume_time") or scene.get("resume_time") <= 0:
+                continue
 
         try:
             jellyfin_items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=parent_id or "root-scenes"))
         except Exception as e:
             logger.error(f"Failed to map scene during pagination: {e}")
 
-    # Manual Pagination for Python-filtered lists
     total_count = stash_data.get("count", 0)
-    if name_starts:
+    if name_starts or "IsResumable" in filter_list:
         total_count = len(jellyfin_items)
         if original_limit > 0:
             jellyfin_items = jellyfin_items[start_index : start_index + original_limit]
@@ -145,7 +214,7 @@ async def endpoint_items(request: Request):
         "Items": jellyfin_items,
         "TotalRecordCount": total_count,
         "StartIndex": start_index
-    }) 
+    })
 
 def _get_libraries():
     """Matches the exact 'VirtualFolder' schema."""
@@ -213,6 +282,11 @@ async def endpoint_virtual_folders(request: Request):
 async def endpoint_item_details(request: Request):
     """Handles requests for a single specific item."""
     item_id = request.path_params.get("item_id", "")
+    
+    # PREVENT CRASH: If Jellycon asks for a folder, hand it a dummy object
+    if item_id == "root-scenes" or item_id.startswith("tag-"):
+        return JSONResponse({"Name": "Folder", "Id": item_id, "Type": "CollectionFolder", "IsFolder": True})
+        
     raw_id = item_id.replace("scene-", "")
     
     # PROTECT STASH: If Jellycon asks for a menu string, reject it cleanly
@@ -338,8 +412,19 @@ async def endpoint_sessions_stopped(request: Request):
                             if percentage >= 0.90:
                                 logger.info(f"✅ Playback reached 90%! Syncing to Stash Play History...")
                                 asyncio.create_task(_increment_stash_playcount(raw_id))
+                                
+                                # Clear the resume time since the video is finished!
+                                asyncio.create_task(_update_stash_resume_time(raw_id, 0))
+                                
+                            elif percentage > 0.01:
+                                # They watched more than 1%, but didn't finish. Save the spot!
+                                resume_seconds = playback_ticks / 10000000.0
+                                logger.info(f"⏸️ Playback paused at {percentage*100:.1f}%. Saving resume time...")
+                                asyncio.create_task(_update_stash_resume_time(raw_id, resume_seconds))
                             else:
-                                logger.info(f"❌ Playback stopped early. Skip logging.")
+                                # They stopped immediately (0%). Clear any existing resume times.
+                                logger.info(f"❌ Playback stopped at beginning. Clearing resume time.")
+                                asyncio.create_task(_update_stash_resume_time(raw_id, 0))
                         else:
                             logger.warning(f"Could not calculate completion. Missing RunTimeTicks. Memory: {stream}")
                             
@@ -617,15 +702,20 @@ async def endpoint_stream(request: Request):
 
 async def endpoint_tags(request: Request):
     """Fetches all tags from Stash and formats them for the Jellycon menu."""
+    # Check if Jellycon asked for Genres or Tags
+    is_genre = "genre" in request.url.path.lower()
+    item_type = "Genre" if is_genre else "Tag"
+
     stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
     url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if getattr(config, "STASH_API_KEY", ""):
         headers["ApiKey"] = config.STASH_API_KEY
         
+    # FIX: sort and direction MUST be in the FindFilterType (filter), not the TagFilterType!
     query = """
     query {
-        findTags(filter: {per_page: -1}, tag_filter: {sort: "name", direction: ASC}) {
+        findTags(filter: {per_page: -1, sort: "name", direction: ASC}) {
             tags { id name }
         }
     }
@@ -638,7 +728,7 @@ async def endpoint_tags(request: Request):
             logger.error(f"Failed to fetch tags: {e}")
             stash_tags = []
 
-    jelly_tags = [{"Name": t.get("name"), "Id": f"tag-{t.get('id')}", "Type": "Tag"} for t in stash_tags]
+    jelly_tags = [{"Name": t.get("name"), "Id": f"tag-{t.get('id')}", "Type": item_type} for t in stash_tags]
 
     return JSONResponse({"Items": jelly_tags, "TotalRecordCount": len(jelly_tags), "StartIndex": 0})
 
@@ -655,6 +745,38 @@ async def endpoint_years(request: Request):
 
     return JSONResponse({"Items": years, "TotalRecordCount": len(years), "StartIndex": 0})
 
+async def _update_stash_resume_time(raw_id: str, seconds: float):
+    """Saves the exact playback position to Stash using its native activity tracker."""
+    stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+    url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if getattr(config, "STASH_API_KEY", ""):
+        headers["ApiKey"] = config.STASH_API_KEY
+        
+    async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
+        try:
+            # We now use the EXACT mutation the Stash Web UI uses!
+            query = """
+            mutation SceneSaveActivity($id: ID!, $resume_time: Float) {
+                sceneSaveActivity(id: $id, resume_time: $resume_time)
+            }
+            """
+            variables = {
+                "id": raw_id,
+                "resume_time": seconds
+            }
+            
+            resp = await client.post(url, headers=headers, json={"query": query, "variables": variables}, timeout=10.0)
+            data = resp.json()
+            
+            # STRICT ERROR CHECKING
+            if "errors" in data:
+                logger.error(f"❌ Stash rejected the resume time update: {data['errors']}")
+            else:
+                logger.info(f"✅ Stash accepted SceneSaveActivity! Resume time saved: {seconds}s")
+                
+        except Exception as e:
+            logger.error(f"Failed to communicate with Stash to update resume time: {e}")
 
 async def _increment_stash_playcount(raw_id: str):
     """Logs a play in Stash using the official native player mutation."""
@@ -688,3 +810,15 @@ async def endpoint_mark_played(request: Request):
         asyncio.create_task(_increment_stash_playcount(raw_id))
     
     return JSONResponse({"Played": True, "PlayCount": 1, "PlaybackPositionTicks": 0, "Key": item_id})
+
+async def endpoint_latest(request: Request):
+    """Feeds the 'Latest' ribbon on the Jellycon home screen."""
+    # Fetch 16 most recently added scenes
+    stash_data = stash_client.fetch_scenes({"sort": "created_at", "direction": "DESC"}, page=1, per_page=16)
+    jellyfin_items = []
+    for scene in stash_data.get("scenes", []):
+        try:
+            jellyfin_items.append(jellyfin_mapper.format_jellyfin_item(scene))
+        except Exception:
+            pass
+    return JSONResponse(jellyfin_items)
