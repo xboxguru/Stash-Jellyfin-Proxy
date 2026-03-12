@@ -2,7 +2,7 @@ import os
 import logging
 import datetime
 import secrets
-from starlette.responses import JSONResponse, HTMLResponse
+from starlette.responses import JSONResponse, HTMLResponse, PlainTextResponse
 from starlette.requests import Request
 import config
 import state  # Required for IP and Session management
@@ -13,6 +13,11 @@ RESTART_REQUESTED = False
 
 async def serve_index(request: Request):
     """Serves the main HTML page and replaces template variables."""
+    # Prevent the Proxy Dashboard from loading on the Jellyfin API port
+    proxy_port = getattr(config, "PROXY_PORT", 8096)
+    if request.url.port == proxy_port and proxy_port != getattr(config, "UI_PORT", 8097):
+        return PlainTextResponse("Stash-Jellyfin Proxy API is running. (No Web Client available)", status_code=200)
+
     template_path = os.path.join(config.SCRIPT_DIR, "templates", "index.html")
     try:
         with open(template_path, "r", encoding="utf-8") as f:
