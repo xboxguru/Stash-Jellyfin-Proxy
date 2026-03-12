@@ -15,6 +15,7 @@ def _get_full_user():
 
     return {
         "Name": expected_user,
+        "PrimaryImageTag": "default-avatar-v1",
         "ServerId": server_id,
         "Id": valid_jellyfin_id,
         "HasPassword": has_pass,
@@ -84,8 +85,23 @@ def _get_full_user():
     }
 
 async def endpoint_public_users(request: Request):
-    """Jellycon uses this to list users on the login screen."""
-    return JSONResponse([_get_full_user()])
+    """Findroid uses this to list users on the login screen. MUST be a simple PublicUserInfo object."""
+    valid_jellyfin_id = "00000000000000000000000000000001"
+    expected_user = str(getattr(config, "SJS_USER", "admin")).strip() or "admin"
+    has_pass = bool(str(getattr(config, "SJS_PASSWORD", "")).strip())
+    
+    # Do NOT include Policy or Configuration here, or Kotlin parsers will crash!
+    public_user = {
+        "Name": expected_user,
+        "Id": valid_jellyfin_id,
+        "ServerId": getattr(config, "SERVER_ID", ""),
+        "HasPassword": has_pass,
+        "HasConfiguredPassword": has_pass,
+        "HasConfiguredEasyPassword": False,
+        "PrimaryImageTag": None
+    }
+    
+    return JSONResponse([public_user])
 
 async def endpoint_user(request: Request):
     """Returns the user details when Jellycon verifies the login."""
