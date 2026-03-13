@@ -40,14 +40,15 @@ class AuthenticationMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        # We only care about HTTP requests
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
-        # FIX 2: Deep logging to catch exactly what the official app is sending
-        method = scope.get("method", "UNK")
+        # FORCE LOWERCASE PATH FOR ROUTING
         path = scope.get("path", "")
+        scope["path"] = path.lower()
+        
+        method = scope.get("method", "UNK")
         client_ip = get_client_ip(scope)
         logger.info(f"🔍 INCOMING REQUEST: {method} {path} from {client_ip}")
 

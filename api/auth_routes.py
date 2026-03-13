@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 
 def _get_full_user():
     """Generates a strictly-typed UserDto matched to a real Jellyfin Server response."""
-    valid_jellyfin_id = "00000000000000000000000000000001"
+    valid_jellyfin_id = "00000000-0000-0000-0000-000000000001"
     server_id = getattr(config, "SERVER_ID", "stash-proxy-server-id")
     expected_user = str(getattr(config, "SJS_USER", "admin")).strip() or "admin"
     expected_pass = str(getattr(config, "SJS_PASSWORD", "")).strip()
@@ -90,7 +90,7 @@ def _get_full_user():
 
 async def endpoint_public_users(request: Request):
     """Findroid uses this to list users on the login screen. MUST be a simple PublicUserInfo object."""
-    valid_jellyfin_id = "00000000000000000000000000000001"
+    valid_jellyfin_id = "00000000-0000-0000-0000-000000000001"
     expected_user = str(getattr(config, "SJS_USER", "admin")).strip() or "admin"
     has_pass = bool(str(getattr(config, "SJS_PASSWORD", "")).strip())
     

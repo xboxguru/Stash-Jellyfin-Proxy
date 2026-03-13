@@ -61,61 +61,57 @@ routes = [
     Route("/api/cache/increment", ui_routes.api_increment_cache_version, methods=["POST"]),
     
     # --- System & Auth ---
-    Route("/System/Info/Public", auth_routes.endpoint_system_info_public, methods=["GET"]),
-    Route("/Public/System/Info", auth_routes.endpoint_system_info_public, methods=["GET"]),
-    Route("/System/Info", auth_routes.endpoint_system_info, methods=["GET"]),
-    Route("/System/Ping", auth_routes.endpoint_system_ping, methods=["GET", "POST"]),
-    Route("/Users/Public", auth_routes.endpoint_public_users, methods=["GET"]),
-    Route("/Users/AuthenticateByName", auth_routes.endpoint_authenticate_by_name, methods=["POST"]),
-    Route("/Users/{user_id}", auth_routes.endpoint_user, methods=["GET"]),
-    Route("/Users", auth_routes.endpoint_users, methods=["GET"]),
-    Route("/QuickConnect/Enabled", auth_routes.endpoint_quickconnect_enabled, methods=["GET"]),
-    Route("/QuickConnect/Initiate", auth_routes.endpoint_quickconnect_initiate, methods=["POST"]),
-    Route("/Branding/Configuration", auth_routes.endpoint_branding_configuration, methods=["GET"]),
+    Route("/system/info/public", auth_routes.endpoint_system_info_public, methods=["GET"]),
+    Route("/public/system/info", auth_routes.endpoint_system_info_public, methods=["GET"]),
+    Route("/system/info", auth_routes.endpoint_system_info, methods=["GET"]),
+    Route("/system/ping", auth_routes.endpoint_system_ping, methods=["GET", "POST"]),
+    Route("/users/public", auth_routes.endpoint_public_users, methods=["GET"]),
+    Route("/users/authenticatebyname", auth_routes.endpoint_authenticate_by_name, methods=["POST"]),
+    Route("/users/{user_id}", auth_routes.endpoint_user, methods=["GET"]),
+    Route("/users", auth_routes.endpoint_users, methods=["GET"]),
+    Route("/quickconnect/enabled", auth_routes.endpoint_quickconnect_enabled, methods=["GET"]),
+    Route("/quickconnect/initiate", auth_routes.endpoint_quickconnect_initiate, methods=["POST"]),
+    Route("/branding/configuration", auth_routes.endpoint_branding_configuration, methods=["GET"]),
     
-    # --- Library & Menus ---
-    Route("/Users/{user_id}/Views", library_routes.endpoint_views, methods=["GET"]),
-    Route("/Library/VirtualFolders", library_routes.endpoint_virtual_folders, methods=["GET"]),
-    Route("/Users/{user_id}/Items/Resume", library_routes.endpoint_empty_list, methods=["GET"]),
-    Route("/Users/{user_id}/Items/Latest", library_routes.endpoint_latest, methods=["GET"]),
-    Route("/Users/{user_id}/Items/{item_id}", library_routes.endpoint_item_details, methods=["GET"]),
-    Route("/Users/{user_id}/Items", library_routes.endpoint_items, methods=["GET"]),
-    Route("/Items", library_routes.endpoint_items, methods=["GET"]),
-    Route("/Genres", library_routes.endpoint_tags, methods=["GET"]),
-    Route("/Users/{user_id}/Genres", library_routes.endpoint_tags, methods=["GET"]),
-    Route("/Tags", library_routes.endpoint_tags, methods=["GET"]),
-    Route("/Users/{user_id}/Tags", library_routes.endpoint_tags, methods=["GET"]),
-    Route("/Years", library_routes.endpoint_years, methods=["GET"]),
-    Route("/Studios", library_routes.endpoint_studios, methods=["GET"]),
-    Route("/Items/{item_id}", library_routes.endpoint_item_details, methods=["GET"]),
-    
-    # --- Images ---
-    Route("/Items/{item_id}/Images/Primary", image_routes.endpoint_item_image, methods=["GET"]),
-    Route("/Items/{item_id}/Images/Primary/{image_index}", image_routes.endpoint_item_image, methods=["GET"]),
-    
-    # --- Playback & Progress ---
-    Route("/Items/{item_id}/PlaybackInfo", playback_routes.endpoint_playback_info, methods=["POST", "GET"]),
-    Route("/Videos/{item_id}/stream.mp4", playback_routes.endpoint_stream, methods=["GET", "HEAD"]),
-    Route("/Videos/{item_id}/stream", playback_routes.endpoint_stream, methods=["GET", "HEAD"]),
-    Route("/Sessions/Playing", playback_routes.endpoint_sessions_playing, methods=["POST"]),
-    Route("/Sessions/Playing/Progress", playback_routes.endpoint_sessions_playing, methods=["POST"]),
-    Route("/Sessions/Playing/Stopped", playback_routes.endpoint_sessions_stopped, methods=["POST"]),
-    Route("/Users/{user_id}/PlayedItems/{item_id}", playback_routes.endpoint_mark_played, methods=["POST"]),
-
-    # --- Native App Dummy Routes ---
-    Route("/Items/Suggestions", library_routes.endpoint_empty_list, methods=["GET"]),
-    Route("/Shows/NextUp", library_routes.endpoint_empty_list, methods=["GET"]),
-    Route("/Sessions/Capabilities/Full", library_routes.endpoint_empty_list, methods=["POST"]),
-    Route("/UserItems/Resume", library_routes.endpoint_empty_list, methods=["GET"]),
+    # --- Specific Library Routes (Static paths MUST come before variable paths) ---
+    Route("/userviews", library_routes.endpoint_views, methods=["GET"]),
+    Route("/users/{user_id}/views", library_routes.endpoint_views, methods=["GET"]),
+    Route("/library/virtualfolders", library_routes.endpoint_virtual_folders, methods=["GET"]),
+    Route("/users/{user_id}/items/resume", library_routes.endpoint_empty_list, methods=["GET"]),
     Route("/useritems/resume", library_routes.endpoint_empty_list, methods=["GET"]),
-
-    # Catch-all for Display Preferences
-    Route("/DisplayPreferences/{display_id}", library_routes.endpoint_empty_list, methods=["GET"]),
-    Route("/Users/{user_id}/DisplayPreferences/{display_id}", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/users/{user_id}/items/latest", library_routes.endpoint_latest, methods=["GET"]),
+    Route("/items/latest", library_routes.endpoint_latest, methods=["GET"]), # <--- ADD THIS FIX
+    Route("/items/suggestions", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/shows/nextup", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/genres", library_routes.endpoint_tags, methods=["GET"]),
+    Route("/users/{user_id}/genres", library_routes.endpoint_tags, methods=["GET"]),
+    Route("/tags", library_routes.endpoint_tags, methods=["GET"]),
+    Route("/users/{user_id}/tags", library_routes.endpoint_tags, methods=["GET"]),
+    Route("/years", library_routes.endpoint_years, methods=["GET"]),
+    Route("/studios", library_routes.endpoint_studios, methods=["GET"]),
     
-    # User Policy and Configuration requests
-    Route("/Users/{user_id}/Policy", auth_routes.endpoint_user, methods=["GET"]),
-    Route("/Users/{user_id}/Configuration", auth_routes.endpoint_user, methods=["GET"]),
+    # Generic item listing
+    Route("/items", library_routes.endpoint_items, methods=["GET"]),
+    Route("/users/{user_id}/items", library_routes.endpoint_items, methods=["GET"]),
+
+    # --- Item Detail & Image Routes ---
+    Route("/users/{user_id}/items/{item_id}", library_routes.endpoint_item_details, methods=["GET"]),
+    Route("/items/{item_id}", library_routes.endpoint_item_details, methods=["GET"]),
+    Route("/items/{item_id}/images/primary", image_routes.endpoint_item_image, methods=["GET"]),
+    Route("/items/{item_id}/images/primary/{image_index}", image_routes.endpoint_item_image, methods=["GET"]),
+    
+    # --- Playback ---
+    Route("/items/{item_id}/playbackinfo", playback_routes.endpoint_playback_info, methods=["POST", "GET"]),
+    Route("/videos/{item_id}/stream.mp4", playback_routes.endpoint_stream, methods=["GET", "HEAD"]),
+    Route("/videos/{item_id}/stream", playback_routes.endpoint_stream, methods=["GET", "HEAD"]),
+    Route("/sessions/playing", playback_routes.endpoint_sessions_playing, methods=["POST"]),
+    Route("/sessions/playing/progress", playback_routes.endpoint_sessions_playing, methods=["POST"]),
+    Route("/sessions/playing/stopped", playback_routes.endpoint_sessions_stopped, methods=["POST"]),
+    Route("/users/{user_id}/playeditems/{item_id}", playback_routes.endpoint_mark_played, methods=["POST"]),
+    Route("/displaypreferences/{display_id}", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/users/{user_id}/displaypreferences/{display_id}", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/users/{user_id}/policy", auth_routes.endpoint_user, methods=["GET"]),
+    Route("/users/{user_id}/configuration", auth_routes.endpoint_user, methods=["GET"]),
 ]
 
 # Initialize the Starlette App

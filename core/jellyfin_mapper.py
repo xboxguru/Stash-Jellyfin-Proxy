@@ -1,8 +1,11 @@
 import os
 import datetime
 import hashlib
+import logging
 from typing import Dict, Any
 import config
+
+logger = logging.getLogger(__name__)
 
 def encode_id(prefix: str, raw_id: str) -> str:
     """Encodes a string into a strict 32-character hex UUID for Findroid."""
@@ -16,20 +19,19 @@ def decode_id(encoded_id: str) -> str:
     """Decodes the 32-character hex UUID back into our proxy ID format."""
     clean_id = encoded_id.replace("-", "")
     
-    # If the user passed in 'scene-11' directly, return it
     if clean_id.startswith("scene") or clean_id.startswith("person") or clean_id.startswith("studio"):
         return encoded_id 
         
     try:
-        # Convert hex back to bytes, then decode, then strip all null padding
         decoded_bytes = bytes.fromhex(clean_id)
         decoded_str = decoded_bytes.decode('utf-8').rstrip('\x00')
         
-        # Verify it's one of our internal formats
         if "scene-" in decoded_str or "person-" in decoded_str or "studio-" in decoded_str or "tag-" in decoded_str:
             return decoded_str.strip()
-    except Exception as e:
-        print(f"DECODE ERROR on {encoded_id}: {e}")
+    except Exception:
+        # Only log if it's a 32-char string that failed to hex-decode
+        if len(clean_id) == 32:
+             logger.debug(f"Failed to hex-decode potential UUID: {encoded_id}")
         pass
         
     return encoded_id
