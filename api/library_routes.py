@@ -281,10 +281,47 @@ async def endpoint_item_details(request: Request):
     item_id = request.path_params.get("item_id", "")
     decoded_id = decode_id(item_id)
     
+    # 1. Catch Root Folders and Tags
     if decoded_id == "root-scenes" or decoded_id.startswith("tag-"):
         safe_id = encode_id("root", "scenes") if decoded_id == "root-scenes" else encode_id("tag", decoded_id.replace("tag-", ""))
         return JSONResponse({"Name": "Folder", "Id": safe_id, "Type": "CollectionFolder", "IsFolder": True})
+
+    # 2. Catch Studios
+    if decoded_id.startswith("studio-"):
+        safe_id = encode_id("studio", decoded_id.replace("studio-", ""))
+        return JSONResponse({"Name": "Studio", "Id": safe_id, "Type": "Studio", "IsFolder": True})
+
+    # 3. Catch Performers (Actors)
+    if decoded_id.startswith("person-"):
+        raw_id = decoded_id.replace("person-", "")
+        stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+        url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if getattr(config, "STASH_API_KEY", ""):
+            headers["ApiKey"] = config.STASH_API_KEY
+            
+        query = """query FindPerformer($id: ID!) { findPerformer(id: $id) { id name image_path } }"""
+        async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
+            try:
+                resp = await client.post(url, headers=headers, json={"query": query, "variables": {"id": raw_id}}, timeout=10.0)
+                data = resp.json()
+                if data and "data" in data and data["data"].get("findPerformer"):
+                    perf = data["data"]["findPerformer"]
+                    return JSONResponse({
+                        "Name": perf.get("name", "Unknown Person"),
+                        "Id": item_id,
+                        "Type": "Person",
+                        "IsFolder": True, # Required so clicking them lists their movies
+                        "ImageTags": {"Primary": "primary"} if perf.get("image_path") else {},
+                        "HasPrimaryImage": bool(perf.get("image_path"))
+                    })
+            except Exception as e:
+                logger.error(f"Failed to fetch performer details: {e}")
+                
+        # Fallback if Stash is unreachable
+        return JSONResponse({"Name": "Person", "Id": item_id, "Type": "Person", "IsFolder": True})
         
+    # 4. Finally, if it's none of the above, it MUST be a Scene.
     number_match = re.search(r'\d+', decoded_id)
     if not number_match:
         return JSONResponse({"error": f"Invalid ID format: {decoded_id}"}, status_code=400)
