@@ -6,7 +6,7 @@ import config
 logger = logging.getLogger(__name__)
 
 def _get_full_user():
-    """Generates a strictly-typed UserDto to satisfy native Kotlin/C# parsers."""
+    """Generates a strictly-typed UserDto matched to a real Jellyfin Server response."""
     valid_jellyfin_id = "00000000000000000000000000000001"
     server_id = getattr(config, "SERVER_ID", "stash-proxy-server-id")
     expected_user = str(getattr(config, "SJS_USER", "admin")).strip() or "admin"
@@ -15,7 +15,6 @@ def _get_full_user():
 
     return {
         "Name": expected_user,
-        "PrimaryImageTag": "default-avatar-v1",
         "ServerId": server_id,
         "Id": valid_jellyfin_id,
         "HasPassword": has_pass,
@@ -26,32 +25,36 @@ def _get_full_user():
         "LastActivityDate": "2026-01-01T00:00:00.0000000Z",
         "Configuration": {
             "AudioLanguagePreference": "",
-            "PlayDefaultAudioTrack": False,
+            "PlayDefaultAudioTrack": True,
             "SubtitleLanguagePreference": "",
-            "DisplayMissingEpisodes": False,
+            "DisplayMissingEpisodes": True,
             "GroupedFolders": [],
             "SubtitleMode": "Default",
             "DisplayCollectionsView": False,
             "EnableLocalPassword": False,
             "OrderedViews": [],
             "LatestItemsExcludes": [],
-            "MyViewsExcludes": [],
-            "HidePlayedInLatest": False,
-            "RememberAudioSelections": False,
-            "RememberSubtitleSelections": False,
-            "EnableNextEpisodeAutoPlay": False
+            "MyMediaExcludes": [],  # Fixed from MyViewsExcludes
+            "HidePlayedInLatest": True,
+            "RememberAudioSelections": True,
+            "RememberSubtitleSelections": True,
+            "EnableNextEpisodeAutoPlay": True,
+            "CastReceiverId": "F007D354" # Added from real server
         },
         "Policy": {
             "IsAdministrator": True,
             "IsHidden": False,
+            "EnableCollectionManagement": False, # Added
+            "EnableSubtitleManagement": False,   # Added
+            "EnableLyricManagement": False,      # Added
             "IsDisabled": False,
-            "MaxParentalRating": None,
             "BlockedTags": [],
+            "AllowedTags": [],                   # Added
             "EnableUserPreferenceAccess": True,
             "AccessSchedules": [],
             "BlockUnratedItems": [],
-            "EnableRemoteControlOfOtherUsers": False,
-            "EnableSharedDeviceControl": False,
+            "EnableRemoteControlOfOtherUsers": True,
+            "EnableSharedDeviceControl": True,
             "EnableRemoteAccess": True,
             "EnableLiveTvManagement": False,
             "EnableLiveTvAccess": False,
@@ -72,14 +75,15 @@ def _get_full_user():
             "EnabledFolders": [],
             "EnableAllFolders": True,
             "InvalidLoginAttemptCount": 0,
-            "LoginAttemptsBeforeLockout": 15,
+            "LoginAttemptsBeforeLockout": -1, # Matched to real
             "MaxActiveSessions": 0,
             "EnablePublicSharing": False,
             "BlockedMediaFolders": [],
             "BlockedChannels": [],
             "RemoteClientBitrateLimit": 0,
-            "AuthenticationProviderId": "Emby.Server.Implementations.Library.DefaultAuthenticationProvider",
-            "PasswordResetProviderId": "Emby.Server.Implementations.Library.DefaultPasswordResetProvider",
+            # FIXED: Changed from Emby to Jellyfin namespaces
+            "AuthenticationProviderId": "Jellyfin.Server.Implementations.Users.DefaultAuthenticationProvider",
+            "PasswordResetProviderId": "Jellyfin.Server.Implementations.Users.DefaultPasswordResetProvider",
             "SyncPlayAccess": "CreateAndJoinGroups"
         }
     }
@@ -140,17 +144,15 @@ async def endpoint_authenticate_by_name(request: Request):
                 "CanSeek": False,
                 "IsPaused": False,
                 "IsMuted": False,
-                "RepeatMode": "RepeatNone"
+                "RepeatMode": "RepeatNone",
+                "PlaybackOrder": "Default" # Added
             },
             "AdditionalUsers": [],
             "Capabilities": {
                 "PlayableMediaTypes": [],
                 "SupportedCommands": [],
                 "SupportsMediaControl": False,
-                "SupportsContentUploading": False,
-                "MessageCallbackUrl": "",
-                "SupportsPersistentIdentifier": False,
-                "SupportsSync": False
+                "SupportsPersistentIdentifier": True # Matched to real
             },
             "RemoteEndPoint": request.client.host if request.client else "127.0.0.1",
             "PlayableMediaTypes": [],
@@ -159,7 +161,7 @@ async def endpoint_authenticate_by_name(request: Request):
             "UserName": fake_user["Name"],
             "Client": data.get("Client", "Findroid"),
             "LastActivityDate": "2026-01-01T00:00:00.0000000Z",
-            "LastViewingDate": "2026-01-01T00:00:00.0000000Z",
+            "LastPlaybackCheckIn": "0001-01-01T00:00:00.0000000Z", # Added
             "DeviceName": data.get("Device", "Device"),
             "DeviceId": data.get("DeviceId", "12345"),
             "ApplicationVersion": data.get("Version", "1.0.0"),
@@ -167,6 +169,7 @@ async def endpoint_authenticate_by_name(request: Request):
             "SupportsMediaControl": False,
             "SupportsRemoteControl": False,
             "NowPlayingQueue": [],
+            "NowPlayingQueueFullItems": [], # Added
             "HasCustomDeviceName": False,
             "ServerId": server_id,
             "SupportedCommands": []

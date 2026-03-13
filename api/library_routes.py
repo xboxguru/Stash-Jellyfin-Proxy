@@ -2,18 +2,28 @@ import logging
 import asyncio
 import httpx
 import datetime
+import re
 from starlette.responses import JSONResponse
 from starlette.requests import Request
 import config
 from core import stash_client
 from core import jellyfin_mapper
+from core.jellyfin_mapper import encode_id, decode_id
 
 logger = logging.getLogger(__name__)
 
 def _get_query_param(request: Request, param_name: str, default=None):
-    for k, v in request.query_params.items():
+    """Safely extracts query parameters, handling multiple values for the same key."""
+    values = []
+    # Use multi_items() to catch duplicate keys like ?type=Movie&type=Series
+    for k, v in request.query_params.multi_items():
         if k.lower() == param_name.lower():
-            return v
+            values.append(v)
+            
+    if values:
+        # Join multiple values with a comma (e.g., "Movie,Series")
+        return ",".join(values)
+        
     return default
 
 async def endpoint_items(request: Request):
@@ -61,7 +71,8 @@ async def endpoint_items(request: Request):
         for scene in results:
             if scene:
                 try:
-                    jellyfin_items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=parent_id or "root-scenes"))
+                    safe_root = encode_id("root", "scenes")
+                    jellyfin_items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=parent_id or safe_root))
                 except Exception as e:
                     pass
         
@@ -156,7 +167,8 @@ async def endpoint_items(request: Request):
                 continue
 
         try:
-            jellyfin_items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=parent_id or "root-scenes"))
+            safe_root = encode_id("root", "scenes")
+            jellyfin_items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=parent_id or safe_root))
         except Exception:
             pass
 
@@ -170,19 +182,47 @@ async def endpoint_items(request: Request):
 
 def _get_libraries():
     server_id = getattr(config, "SERVER_ID", "")
-    views = [{
-        "Name": "Scenes", "Id": "root-scenes", "Guid": "root-scenes", 
-        "ServerId": server_id, "CollectionType": "movies", "Type": "CollectionFolder", 
-        "ItemId": "root-scenes", "LibraryOptions": {"PathInfos": []}, "Locations": []
-    }]
+    root_id = encode_id("root", "scenes")
+    
+    # Helper to insert standard UUID hyphens for the UserData Key
+    def hyphens(h):
+        if len(h) != 32: return h
+        return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
+    
+    # Base template matching the real Jellyfin Server response EXACTLY
+    def build_view(name, view_id):
+        return {
+            "Name": name,
+            "ServerId": server_id,
+            "Id": view_id,
+            "ChannelId": None,
+            "IsFolder": True,
+            "Type": "CollectionFolder",
+            "UserData": {
+                "PlaybackPositionTicks": 0,
+                "PlayCount": 0,
+                "IsFavorite": False,
+                "Played": False,
+                "Key": hyphens(view_id),
+                "ItemId": view_id
+            },
+            "PrimaryImageAspectRatio": 1.7777777777777777,
+            "CollectionType": "movies",
+            "ImageTags": {},
+            "BackdropImageTags": [],
+            "ImageBlurHashes": {},
+            "LocationType": "FileSystem",
+            "MediaType": "Unknown"
+        }
+
+    views = [build_view("Scenes", root_id)]
+    
     for tag in getattr(config, "TAG_GROUPS", []):
         if tag.strip():
             t = tag.strip()
-            views.append({
-                "Name": t, "Id": f"tag-{t}", "Guid": f"tag-{t}", 
-                "ServerId": server_id, "CollectionType": "movies", "Type": "CollectionFolder", 
-                "ItemId": f"tag-{t}", "LibraryOptions": {"PathInfos": []}, "Locations": []
-            })
+            tag_id = encode_id("tag", t)
+            views.append(build_view(t, tag_id))
+            
     return views
 
 async def endpoint_views(request: Request):
@@ -192,20 +232,32 @@ async def endpoint_views(request: Request):
 async def endpoint_virtual_folders(request: Request):
     return JSONResponse(content=_get_libraries(), headers={"Content-Type": "application/json; charset=utf-8"})
 
+import re
+
 async def endpoint_item_details(request: Request):
     item_id = request.path_params.get("item_id", "")
-    if item_id == "root-scenes" or item_id.startswith("tag-"):
-        return JSONResponse({"Name": "Folder", "Id": item_id, "Type": "CollectionFolder", "IsFolder": True})
-        
-    raw_id = item_id.replace("scene-", "")
-    if not raw_id.isdigit():
-        return JSONResponse({"error": "Item not found"}, status_code=404)
+    decoded_id = decode_id(item_id)
     
-    scene = stash_client.get_scene(raw_id)
-    if not scene:
-        return JSONResponse({"error": "Item not found"}, status_code=404)
+    if decoded_id == "root-scenes" or decoded_id.startswith("tag-"):
+        safe_id = encode_id("root", "scenes") if decoded_id == "root-scenes" else encode_id("tag", decoded_id.replace("tag-", ""))
+        return JSONResponse({"Name": "Folder", "Id": safe_id, "Type": "CollectionFolder", "IsFolder": True})
         
-    return JSONResponse(jellyfin_mapper.format_jellyfin_item(scene))
+    # Extract ONLY the numbers for the Stash query
+    number_match = re.search(r'\d+', decoded_id)
+    if not number_match:
+        return JSONResponse({"error": f"Invalid ID format: {decoded_id}"}, status_code=400)
+        
+    raw_id = number_match.group()
+    
+    # Now query Stash with a guaranteed pure number
+    stash_data = stash_client.fetch_scenes({"id": int(raw_id)}, page=1, per_page=1)
+    
+    if stash_data and stash_data.get("scenes"):
+        scene = stash_data["scenes"][0]
+        jellyfin_item = jellyfin_mapper.format_jellyfin_item(scene)
+        return JSONResponse(jellyfin_item)
+        
+    return JSONResponse({"error": "Item not found"}, status_code=404)
 
 async def endpoint_tags(request: Request):
     is_genre = "genre" in request.url.path.lower()
@@ -248,9 +300,15 @@ async def endpoint_empty_list(request: Request):
 async def endpoint_latest(request: Request):
     stash_data = stash_client.fetch_scenes({"sort": "created_at", "direction": "DESC"}, page=1, per_page=16)
     jellyfin_items = []
+    
+    # Generate the safe UUID for the parent folder
+    safe_root = encode_id("root", "scenes")
+    
     for scene in stash_data.get("scenes", []):
         try:
-            jellyfin_items.append(jellyfin_mapper.format_jellyfin_item(scene))
+            # Explicitly pass the safe_root so it NEVER defaults to the raw string
+            jellyfin_items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=safe_root))
         except Exception:
             pass
+            
     return JSONResponse(jellyfin_items)

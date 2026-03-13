@@ -6,13 +6,14 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.requests import Request
 import config
 from core import stash_client, jellyfin_mapper
+from core.jellyfin_mapper import decode_id
 import state
 
 logger = logging.getLogger(__name__)
 
 async def endpoint_playback_info(request: Request):
     """Provides playback info using the robust metadata already built by the mapper."""
-    item_id = request.path_params.get("item_id", "")
+    item_id = decode_id(request.path_params.get("item_id", ""))
     raw_id = item_id.replace("scene-", "")
     scene = stash_client.get_scene(raw_id)
     if not scene:
@@ -29,7 +30,7 @@ async def endpoint_sessions_playing(request: Request):
     try:
         data = await request.json()
         session_id = data.get("PlaySessionId") or data.get("SessionId") or "unknown_session"
-        item_id = data.get("ItemId") or data.get("Item", {}).get("Id", "")
+        item_id = decode_id(data.get("ItemId") or data.get("Item", {}).get("Id", ""))
         
         playback_ticks = float(data.get("PlaybackPositionTicks") or data.get("PositionTicks") or 0)
         runtime_ticks = float(data.get("RunTimeTicks") or data.get("Item", {}).get("RunTimeTicks") or 0)
@@ -78,7 +79,7 @@ async def endpoint_sessions_stopped(request: Request):
             stream = next((s for s in state.active_streams if s.get("id") == session_id), None)
             if stream:
                 state.active_streams = [s for s in state.active_streams if s.get("id") != session_id]
-                item_id = data.get("ItemId") or data.get("Item", {}).get("Id") or stream.get("item_id", "")
+                item_id = decode_id(data.get("ItemId") or data.get("Item", {}).get("Id") or stream.get("item_id", ""))
                 
                 if item_id.startswith("scene-"):
                     raw_id = item_id.replace("scene-", "")
@@ -119,7 +120,7 @@ async def endpoint_sessions_stopped(request: Request):
 
 async def endpoint_stream(request: Request):
     """Pipes the video stream directly from Stash, fully supporting byte-range seeking."""
-    item_id = request.path_params.get("item_id", "")
+    item_id = decode_id(request.path_params.get("item_id", ""))
     raw_id = item_id.replace("scene-", "")
     stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
     apikey = getattr(config, "STASH_API_KEY", "")
@@ -204,7 +205,7 @@ async def _increment_stash_playcount(raw_id: str):
 
 async def endpoint_mark_played(request: Request):
     """Fired when a user clicks 'Mark as Watched' in the Jellycon context menu."""
-    item_id = request.path_params.get("item_id", "")
+    item_id = decode_id(request.path_params.get("item_id", ""))
     if item_id.startswith("scene-"):
         raw_id = item_id.replace("scene-", "")
         logger.info(f"Manual 'Mark as Watched' triggered for {item_id}")
