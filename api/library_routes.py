@@ -41,6 +41,7 @@ def _get_libraries():
         "Name": "Scenes",
         "ServerId": server_id,
         "Id": root_id,
+        "ItemId": root_id,
         "ChannelId": None,
         "IsFolder": True,
         "Type": "CollectionFolder",
@@ -55,7 +56,12 @@ def _get_libraries():
         "PrimaryImageAspectRatio": 1.7777777777777777,
         "CollectionType": "movies",
         
-        # --- NEW: TELL FINDROID WE HAVE A LOGO ---
+        # --- TUNARR STRICT SCHEMA MOCKS ---
+        "LibraryOptions": {
+            "PathInfos": []  # <-- ADDED FOR TUNARR
+        },    
+        "Locations": [],     
+
         "ImageTags": {"Primary": "stash-logo-1"}, 
         "HasPrimaryImage": True, 
         
@@ -108,8 +114,16 @@ async def endpoint_items(request: Request):
         })
 
     # 1. ERSATZTV SPECIFIC FETCH
+    # 1. ERSATZTV / TUNARR SPECIFIC FETCH
     if ids_param:
-        raw_ids = [i.replace("scene-", "") for i in ids_param.split(",")]
+        raw_ids = []
+        for i in ids_param.split(","):
+            # Properly decode the hex ID back into a raw Stash number
+            dec_i = decode_id(i)
+            match = re.search(r'\d+', dec_i)
+            if match:
+                raw_ids.append(match.group())
+                
         jellyfin_items = []
         stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
         url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
