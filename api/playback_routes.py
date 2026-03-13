@@ -87,7 +87,17 @@ async def endpoint_sessions_stopped(request: Request):
                         reported_ticks = float(data.get("PlaybackPositionTicks") or data.get("PositionTicks") or 0)
                         last_ticks = float(stream.get("last_ticks", 0))
                         playback_ticks = max(reported_ticks, last_ticks)
+                        
+                        # Findroid often omits RunTimeTicks in its stop payloads.
                         runtime_ticks = float(data.get("RunTimeTicks") or data.get("Item", {}).get("RunTimeTicks") or stream.get("runtime_ticks", 0))
+                        
+                        # --- FINDROID FIX: FETCH MISSING RUNTIME FROM STASH ---
+                        if runtime_ticks <= 0:
+                            logger.info(f"Findroid didn't provide RunTimeTicks. Fetching directly from Stash...")
+                            scene = stash_client.get_scene(raw_id)
+                            if scene and scene.get("files"):
+                                duration_seconds = scene["files"][0].get("duration", 0)
+                                runtime_ticks = float(duration_seconds * 10000000)
                         
                         if runtime_ticks > 0:
                             percentage = playback_ticks / runtime_ticks
@@ -105,7 +115,13 @@ async def endpoint_sessions_stopped(request: Request):
                                 logger.info(f"❌ Playback stopped at beginning. Clearing resume time.")
                                 asyncio.create_task(_update_stash_resume_time(raw_id, 0))
                         else:
-                            logger.warning(f"Could not calculate completion. Missing RunTimeTicks. Memory: {stream}")
+                            # Absolute fallback if stash file has no duration either
+                            logger.warning(f"Could not determine total duration. Falling back to raw resume time save.")
+                            if playback_ticks > 10000000: # > 1 second
+                                resume_seconds = playback_ticks / 10000000.0
+                                asyncio.create_task(_update_stash_resume_time(raw_id, resume_seconds))
+                            else:
+                                asyncio.create_task(_update_stash_resume_time(raw_id, 0))
                             
                     except (ValueError, TypeError) as e:
                         logger.error(f"Failed to calculate playback percentage: {e}")
