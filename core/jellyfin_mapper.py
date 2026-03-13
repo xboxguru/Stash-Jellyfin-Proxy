@@ -138,11 +138,14 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
         "ImageBlurHashes": {},
         
         "HasPrimaryImage": True,
+        "HasBackdrop": True,
         "ImageTags": {"Primary": f"{raw_id}-v{cache_version}"}, 
         "PrimaryImageAspectRatio": 1.777,
         "VideoType": "VideoFile",
         "Protocol": "File",
-        "BackdropImageTags": [],
+        "BackdropImageTags": [f"{raw_id}-v{cache_version}-backdrop"],
+        
+        "RunTimeTicks": runtime_ticks,
         
         "RunTimeTicks": runtime_ticks,
         "OfficialRating": "XXX",

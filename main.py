@@ -97,8 +97,14 @@ routes = [
     # --- Item Detail & Image Routes ---
     Route("/users/{user_id}/items/{item_id}", library_routes.endpoint_item_details, methods=["GET"]),
     Route("/items/{item_id}", library_routes.endpoint_item_details, methods=["GET"]),
-    Route("/items/{item_id}/images/primary", image_routes.endpoint_item_image, methods=["GET"]),
-    Route("/items/{item_id}/images/primary/{image_index}", image_routes.endpoint_item_image, methods=["GET"]),
+
+    # --- Item Detail & Image Routes ---
+    Route("/users/{user_id}/items/{item_id}", library_routes.endpoint_item_details, methods=["GET"]),
+    Route("/items/{item_id}", library_routes.endpoint_item_details, methods=["GET"]),
+    
+    # ADDED THE {image_type} VARIABLE HERE:
+    Route("/items/{item_id}/images/{image_type}", image_routes.endpoint_item_image, methods=["GET"]),
+    Route("/items/{item_id}/images/{image_type}/{image_index}", image_routes.endpoint_item_image, methods=["GET"]),
     
     # --- Playback ---
     Route("/items/{item_id}/playbackinfo", playback_routes.endpoint_playback_info, methods=["POST", "GET"]),
