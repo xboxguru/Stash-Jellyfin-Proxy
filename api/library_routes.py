@@ -54,7 +54,11 @@ def _get_libraries():
         },
         "PrimaryImageAspectRatio": 1.7777777777777777,
         "CollectionType": "movies",
-        "ImageTags": {},
+        
+        # --- NEW: TELL FINDROID WE HAVE A LOGO ---
+        "ImageTags": {"Primary": "stash-logo-1"}, 
+        "HasPrimaryImage": True, 
+        
         "BackdropImageTags": [],
         "ImageBlurHashes": {},
         "LocationType": "FileSystem",
