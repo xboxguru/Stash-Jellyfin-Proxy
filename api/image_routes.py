@@ -11,6 +11,8 @@ logger = logging.getLogger(__name__)
 
 async def endpoint_item_image(request: Request):
     raw_encoded_id = request.path_params.get("item_id", "")
+    # Detect if the client is asking for a Backdrop or Primary image
+    image_type = request.path_params.get("image_type", "Primary")
     decoded_id = decode_id(raw_encoded_id)
     
     # 1. CUSTOM LIBRARY & TAG GROUP LOGO INTERCEPT
@@ -35,6 +37,15 @@ async def endpoint_item_image(request: Request):
     raw_id = number_match.group() if number_match else ""
 
     stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+    params = {"apikey": config.STASH_API_KEY} if getattr(config, "STASH_API_KEY", "") else {}
+
+    if "person-" in decoded_id:
+        url = f"{stash_base}/performer/{raw_id}/image"
+    elif "studio-" in decoded_id:
+        url = f"{stash_base}/studio/{raw_id}/image"
+    else:
+        # For scenes, both Primary and Backdrop will show the Stash screenshot
+        url = f"{stash_base}/scene/{raw_id}/screenshot"
     
     params = {}
     if getattr(config, "STASH_API_KEY", ""):
