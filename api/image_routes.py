@@ -11,9 +11,11 @@ logger = logging.getLogger(__name__)
 
 async def endpoint_item_image(request: Request):
     raw_encoded_id = request.path_params.get("item_id", "")
+    decoded_id = decode_id(raw_encoded_id)
     
-    # 1. CUSTOM LIBRARY LOGO INTERCEPT
-    if raw_encoded_id == encode_id("root", "scenes") or "root-scenes" in decode_id(raw_encoded_id):
+    # 1. CUSTOM LIBRARY & TAG GROUP LOGO INTERCEPT
+    # This catches "root-scenes" and any "tag-ID" folder requests
+    if "root-" in decoded_id or "tag-" in decoded_id:
         # Look for a custom logo.png in the main proxy directory
         logo_path = os.path.join(os.getcwd(), "logo.png")
         if os.path.exists(logo_path):
@@ -28,10 +30,7 @@ async def endpoint_item_image(request: Request):
             </svg>'''
             return Response(content=svg_data, media_type="image/svg+xml")
 
-    # 2. Decode the hex (e.g., 'scene-11\x00\x00')
-    decoded_id = decode_id(raw_encoded_id)
-    
-    # 3. Extract ONLY the digits for the URL (e.g., '11')
+    # 2. Extract ONLY the digits for the Stash URL (e.g., '11')
     number_match = re.search(r'\d+', decoded_id)
     raw_id = number_match.group() if number_match else ""
 
@@ -41,7 +40,7 @@ async def endpoint_item_image(request: Request):
     if getattr(config, "STASH_API_KEY", ""):
         params["apikey"] = config.STASH_API_KEY
 
-    # 4. Use the DECODED_ID for logic, and the RAW_ID for the URL
+    # 3. Use the DECODED_ID for logic, and the RAW_ID for the URL
     if "person-" in decoded_id:
         url = f"{stash_base}/performer/{raw_id}/image"
     elif "studio-" in decoded_id:
