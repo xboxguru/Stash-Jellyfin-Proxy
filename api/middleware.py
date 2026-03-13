@@ -8,7 +8,10 @@ logger = logging.getLogger(__name__)
 
 # Endpoints that do not require the PROXY_API_KEY
 PUBLIC_ENDPOINTS = {
+    "/",
     "/system/info/public", 
+    "/system/info",
+    "/public/system/info",
     "/web/index.html", 
     "/health", 
     "/", 
@@ -16,7 +19,9 @@ PUBLIC_ENDPOINTS = {
     "/system/ping",
     "/users/public",
     "/quickconnect/initiate",
-    "/quickconnect/enabled"
+    "/quickconnect/enabled",
+    "/favicon.ico",
+    "/branding/configuration"
 }
 PUBLIC_PREFIXES = ["/web/", "/assets/", "/api/"]
 
@@ -35,17 +40,26 @@ class AuthenticationMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        # We only care about HTTP requests
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
+        # FORCE LOWERCASE PATH FOR ROUTING
         path = scope.get("path", "")
-        path_lower = path.lower()
+        scope["path"] = path.lower()
+        
+        method = scope.get("method", "UNK")
         client_ip = get_client_ip(scope)
+        logger.info(f"🔍 INCOMING REQUEST: {method} {path} from {client_ip}")
+
+        # FIX 3: ALWAYS allow mobile apps to perform CORS preflight checks!
+        if method == "OPTIONS":
+            await self.app(scope, receive, send)
+            return
+
+        path_lower = path.lower()
         
         # 1. STRIP PREFIXES: Fixes Findroid, Jellycon, and ErsatzTV prepending /emby or /jellyfin
-        # We ensure we only strip if it's a folder prefix (ending in /) or the exact path
         if path_lower.startswith("/emby/"):
             scope["path"] = path[5:]
         elif path_lower == "/emby":
@@ -67,7 +81,7 @@ class AuthenticationMiddleware:
                     is_public = True
                     break
 
-        # NEW: Allow image and video stream requests ONLY if the client or the referring website is authenticated
+        # NEW: Allow image and video stream requests ONLY if the client or referring website is authenticated
         if "/images/" in path_lower or "/videos/" in path_lower:
             import state
             auth_ips = getattr(state, "authenticated_ips", set())
@@ -106,6 +120,7 @@ class AuthenticationMiddleware:
                 
                 # If the token is missing or invalid, block access to the API data
                 if not token or token not in getattr(state, "ui_sessions", set()):
+                    logger.warning(f"❌ UI AUTH REQUIRED for {path}")
                     response_body = b'{"error": "UI Authentication Required"}'
                     await send({
                         "type": "http.response.start",
@@ -131,7 +146,7 @@ class AuthenticationMiddleware:
             parsed_query = {k.lower(): v for k, v in urllib.parse.parse_qs(query_bytes.decode("utf-8")).items()}
             token = parsed_query.get("api_key", [None])[0] or parsed_query.get("token", [None])[0]
 
-# Check headers if not found in query string
+        # Check headers if not found in query string
         if not token:
             for key, value in scope.get("headers", []):
                 key_lower = key.decode().lower()
@@ -159,14 +174,14 @@ class AuthenticationMiddleware:
 
         # 4. Validate the token against our configurable PROXY_API_KEY
         expected_key = getattr(config, "PROXY_API_KEY", "").strip()
-        clean_token = token.strip('"').strip("'").strip() if token else None
+        clean_token = token if token else None
         
         if clean_token and clean_token == expected_key:
             import state
             state.stats["auth_success"] += 1
             state.stats["unique_ips_today"].add(client_ip)
             
-            # NEW: Remember this IP as a trusted client for password-less image requests
+            # Remember this IP as a trusted client for password-less image requests
             if not hasattr(state, "authenticated_ips"):
                 state.authenticated_ips = set()
             
@@ -190,13 +205,11 @@ class AuthenticationMiddleware:
         
         # Enhanced debugging logging so we can see EXACTLY why a client failed
         if token:
-            logger.warning(f"Unauthorized access attempt to {path} from {client_ip} | Reason: Token mismatch. Received: '{token}' | Expected: '{expected_key}'")
+            logger.warning(f"🚫 Unauthorized access attempt to {path} from {client_ip} | Reason: Token mismatch. Received: '{token}' | Expected: '{expected_key}'")
         else:
             # DEBUG: Print the raw headers to see how Jellycon is hiding the token
             safe_headers = {k.decode('latin1'): v.decode('utf-8', errors='ignore') for k, v in scope.get("headers", [])}
-            logger.warning(f"Unauthorized access attempt to {path} from {client_ip} | Reason: No token provided. Headers: {safe_headers}")
-        
-        response_body = b'{"error": "Unauthorized"}'
+            logger.warning(f"🚫 Unauthorized access attempt to {path} from {client_ip} | Reason: No token provided. Headers: {safe_headers}")
         
         response_body = b'{"error": "Unauthorized"}'
         await send({

@@ -1,35 +1,69 @@
 import os
 import datetime
+import hashlib
+import logging
 from typing import Dict, Any
 import config
 
-def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") -> Dict[str, Any]:
+logger = logging.getLogger(__name__)
+
+def encode_id(prefix: str, raw_id: str) -> str:
+    """Encodes a string into a strict 32-character hex UUID for Findroid."""
+    s = f"{prefix}-{raw_id}"
+    hex_str = s.encode('utf-8').hex()
+    if len(hex_str) > 32:
+        return hashlib.md5(s.encode('utf-8')).hexdigest()
+    return hex_str.ljust(32, '0')
+
+def decode_id(encoded_id: str) -> str:
+    """Decodes the 32-character hex UUID back into our proxy ID format."""
+    clean_id = encoded_id.replace("-", "")
+    
+    # If the user passed in 'scene-11' directly, return it
+    if clean_id.startswith("scene") or clean_id.startswith("person") or clean_id.startswith("studio"):
+        return encoded_id 
+        
+    try:
+        # Convert hex back to bytes, then decode, then strip all null padding
+        decoded_bytes = bytes.fromhex(clean_id)
+        decoded_str = decoded_bytes.decode('utf-8').rstrip('\x00')
+        
+        # Verify it's one of our internal formats (NOW INCLUDING "root-")
+        if "scene-" in decoded_str or "person-" in decoded_str or "studio-" in decoded_str or "tag-" in decoded_str or "root-" in decoded_str:
+            return decoded_str.strip()
+    except Exception as e:
+        pass
+        
+    return encoded_id
+
+# ADDED: Hyphen helper for strict Kotlin UserData parsing
+def hyphens(h: str) -> str:
+    if len(h) != 32: return h
+    return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
+
+def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[str, Any]:
     """
     Transforms a Stash Scene object into a Jellyfin Movie/Video object.
-    Fully optimized for ErsatzTV's strict C# metadata and scheduler requirements.
     """
     raw_id = str(scene.get("id"))
-    item_id = f"scene-{raw_id}"
+    item_id = encode_id("scene", raw_id)
     date = scene.get("date")
     cache_version = getattr(config, "CACHE_VERSION", 0)
     
-    # Extract file details
-    files = scene.get("files", [])
-    path = files[0].get("path") if files else ""
-    duration_seconds = files[0].get("duration", 0) if files else 0
-    
-    # NEW: Grab Stash's resume time and convert it to Ticks (1 sec = 10,000,000 ticks)
+    # Safely generate the 32-character parent ID
+    final_parent_id = parent_id if parent_id else encode_id("root", "scenes")
+
     resume_time_seconds = scene.get("resume_time") or 0
     resume_ticks = int(resume_time_seconds * 10000000)
     
-    # CRITICAL: Convert seconds to 100-nanosecond ticks for ErsatzTV Scheduler
+    files = scene.get("files", [])
+    path = files[0].get("path") if files else ""
+    duration_seconds = files[0].get("duration", 0) if files else 0
     runtime_ticks = int(duration_seconds * 10000000)
     
-    # Normalize Windows backslashes to UNIX forward slashes for Path Replacements
     if path:
         path = path.replace("\\", "/")
 
-    # Extract resolution and dynamic codecs
     width = files[0].get("width", 0) if files else 0
     height = files[0].get("height", 0) if files else 0
     v_codec = files[0].get("video_codec", "h264") if files else "h264"
@@ -37,7 +71,6 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") 
     container = files[0].get("format", "mp4") if files else "mp4"
     bit_rate = files[0].get("bit_rate", 0) if files else 0
 
-    # Fallback title generation
     title = scene.get("title") or scene.get("code")
     if not title and path:
         filename = os.path.basename(path)
@@ -45,7 +78,6 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") 
     if not title:
         title = f"Scene {raw_id}"
         
-    # Studio & Network mapping
     studio_obj = scene.get("studio")
     studio_name = studio_obj.get("name") if studio_obj else None
     description = scene.get("details") or ""
@@ -53,29 +85,41 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") 
     performers = scene.get("performers", [])
     play_count = scene.get("o_counter", 0) or 0
     
-    # For auto-refresh: Always report the current time as the "Last Saved" time
     now_iso = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
 
-    # Build Media Streams explicitly for Tunarr Schema
-    media_streams = [
-        {
-            "Codec": v_codec,
-            "Type": "Video",
-            "IsInterlaced": False,
-            "IsDefault": True,
-            "Width": width,
-            "Height": height,
-            "Index": 0,
-            "BitRate": bit_rate
-        },
-        {
-            "Codec": a_codec,
-            "Type": "Audio",
-            "IsDefault": True,
-            "Index": 1,
-            "Channels": 2
-        }
-    ]
+    # --- STRICT FINDROID MEDIA STREAMS ---
+    # Create a base dictionary with all the mandatory boolean flags
+    base_stream_flags = {
+        "IsInterlaced": False,
+        "IsDefault": True,
+        "IsForced": False,
+        "IsHearingImpaired": False,
+        "IsExternal": False,
+        "IsTextSubtitleStream": False,
+        "SupportsExternalStream": False,
+        "IsAVC": False
+    }
+
+    video_stream = base_stream_flags.copy()
+    video_stream.update({
+        "Codec": v_codec,
+        "Type": "Video",
+        "Width": width,
+        "Height": height,
+        "Index": 0,
+        "BitRate": bit_rate,
+        "IsAVC": v_codec.lower() in ["h264", "avc"]
+    })
+
+    audio_stream = base_stream_flags.copy()
+    audio_stream.update({
+        "Codec": a_codec,
+        "Type": "Audio",
+        "Index": 1,
+        "Channels": 2
+    })
+
+    media_streams = [video_stream, audio_stream]
 
     # Build the core Jellyfin Item
     item = {
@@ -86,8 +130,12 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") 
         "Type": "Movie",
         "IsFolder": False,
         "MediaType": "Video",
-        "ParentId": parent_id,
+        "ParentId": final_parent_id,
         "DateLastSaved": now_iso, 
+        
+        "ChannelId": None,
+        "Container": container,
+        "ImageBlurHashes": {},
         
         "HasPrimaryImage": True,
         "ImageTags": {"Primary": f"{raw_id}-v{cache_version}"}, 
@@ -102,7 +150,6 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") 
         "Width": width,
         "Height": height,
 
-        # --- TUNARR STRICT SCHEMA FIXES ---
         "Etag": f"etag-{raw_id}-v{cache_version}",
         "Taglines": [],
         "ProviderIds": {},
@@ -112,7 +159,6 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") 
         "Studios": [],
         "MediaStreams": media_streams,
         "Path": path if path else "",
-        # ----------------------------------
 
         "_StashVideoCodec": v_codec,
         "_StashAudioCodec": a_codec,
@@ -124,23 +170,18 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") 
             "PlayCount": play_count,
             "IsFavorite": False,
             "Played": play_count > 0,
-            "Key": item_id
+            "Key": hyphens(item_id),
+            "ItemId": item_id
         }
     }
 
-    # 1. Grab existing Stash tags and initialize the item tags array ONCE
     item_tags = [t.get("name") for t in tags if t.get("name")]
-
-    # 2. Add Date Info & Dynamic "Recently Added" Tag
     created_at = scene.get("created_at")
     recent_days_limit = getattr(config, "RECENT_DAYS", 14)
 
     if created_at:
-        # Force "YYYY-MM-DDTHH:MM:SS"
         base_time = created_at.replace("Z", "").replace(" ", "T")[:19]
         formatted_created = f"{base_time}.0000000Z"
-        
-        # Inject dynamic tag based on UI config
         if recent_days_limit > 0:
             try:
                 dt = datetime.datetime.strptime(base_time, "%Y-%m-%dT%H:%M:%S")
@@ -153,7 +194,6 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") 
 
     item["DateCreated"] = formatted_created
 
-    # Tunarr Schema: Always provide PremiereDate and ProductionYear
     if date and len(date) >= 4:
         try:
             item["ProductionYear"] = int(date[:4])
@@ -165,7 +205,6 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") 
         item["PremiereDate"] = formatted_created
         item["ProductionYear"] = int(formatted_created[:4])
 
-    # Build Overview (Description + Studio)
     overview_parts = []
     if description:
         overview_parts.append(description)
@@ -174,15 +213,12 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") 
     if overview_parts:
         item["Overview"] = "\n\n".join(overview_parts)
 
-    # Process additional status tags
     if play_count >= 1:
         item_tags.append("Onot0")
     
-    # Assign the final accumulated tags array to the item
     item["Tags"] = item_tags
     item["Genres"] = item_tags[:10]
 
-    # Process Performers as Actors
     if performers:
         people_list = []
         for p in performers:
@@ -196,7 +232,7 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") 
                     "Name": p_name,
                     "Type": "Actor",
                     "Role": "",
-                    "Id": f"person-{p_id}",
+                    "Id": encode_id("person", str(p_id)),
                     "PrimaryImageTag": p_tag if has_image else None
                 }
                 if has_image:
@@ -204,16 +240,14 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") 
                 people_list.append(person)
         item["People"] = people_list
 
-    # Process Studio as Network/Studio for ErsatzTV Watermarks
     if studio_obj and studio_name:
         studio_id = studio_obj.get("id")
         has_studio_image = bool(studio_obj.get("image_path"))
-        
         s_tag = f"s-{studio_id}-v{cache_version}"
         
         studio_item = {
             "Name": studio_name,
-            "Id": f"studio-{studio_id}"
+            "Id": encode_id("studio", str(studio_id))
         }
         
         if has_studio_image:
@@ -222,14 +256,9 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") 
             
         item["Studios"] = [studio_item]
 
-    # MEDIA SOURCES: Fully dynamic metadata with Duration for Scheduler
     if path:
         item["Path"] = path
         item["LocationType"] = "FileSystem"
-        
-        # --- JELLYCON PASSTHROUGH STREAM FIX ---
-        # Jellycon requires a DirectStreamUrl when playing files it cannot access locally.
-        # Providing a relative path tells Jellycon to fetch it from the Proxy's IP.
         stream_url = f"/Videos/{item_id}/stream"
         
         item["MediaSources"] = [
@@ -246,7 +275,27 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = "root-scenes") 
                 "SupportsDirectStream": True,
                 "SupportsTranscoding": True,
                 "VideoType": "VideoFile",
-                "MediaStreams": media_streams
+                "MediaStreams": media_streams,
+                "MediaAttachments": [],
+                "Formats": [],
+                "RequiredHttpHeaders": {},
+                "Name": title,
+                "Size": 0,
+                
+                # --- ADDED: STRICT FINDROID MEDIASOURCEINFO FIELDS ---
+                "ReadAtNativeFramerate": False,
+                "IgnoreDts": False,
+                "IgnoreIndex": False,
+                "GenPtsInput": False,
+                "IsInfiniteStream": False,
+                "RequiresOpening": False,
+                "RequiresClosing": False,
+                "RequiresLooping": False,
+                "SupportsProbing": True,
+                "TranscodingSubProtocol": "http",
+                "HasSegments": False,
+                "UseMostCompatibleTranscodingProfile": False,
+                "DefaultAudioStreamIndex": 1
             }
         ]
 

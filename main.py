@@ -10,12 +10,12 @@ from hypercorn.asyncio import serve
 from starlette.applications import Starlette
 from starlette.routing import Route
 from logging.handlers import RotatingFileHandler
+from starlette.middleware.cors import CORSMiddleware
 
 # Import our custom modules
 import config
 from api.middleware import AuthenticationMiddleware
-from api import jellyfin_routes
-from api import ui_routes
+from api import ui_routes, auth_routes, library_routes, playback_routes, image_routes
 
 # Configure Logging with Log Rotation (Max 5MB, keeps 2 backups)
 # Create log directory if it doesn't exist to prevent silent write failures
@@ -44,68 +44,86 @@ logger = logging.getLogger("proxy_main")
 
 # Define the URL Routes
 routes = [
-    # --- Web UI Routes ---
+    # --- UI Routes (Proxy Web Dashboard) ---
     Route("/", ui_routes.serve_index, methods=["GET"]),
-    Route("/api/auth/check", ui_routes.api_auth_check, methods=["GET"]),
     Route("/api/config", ui_routes.api_get_config, methods=["GET"]),
     Route("/api/config", ui_routes.api_post_config, methods=["POST"]),
-    Route("/api/increment_cache_version", ui_routes.api_increment_cache_version, methods=["POST"]),
-    Route("/api/login", ui_routes.api_login, methods=["POST"]),
-    Route("/api/logout", ui_routes.api_logout, methods=["POST"]),
     Route("/api/logs", ui_routes.api_get_logs, methods=["GET"]),
     Route("/api/logs/clear", ui_routes.api_clear_logs, methods=["POST"]),
+    Route("/api/status", ui_routes.api_get_status, methods=["GET"]),
     Route("/api/restart", ui_routes.api_restart, methods=["POST"]),
+    Route("/api/streams", ui_routes.api_get_streams, methods=["GET"]),
     Route("/api/stats", ui_routes.api_get_stats, methods=["GET"]),
     Route("/api/stats/reset", ui_routes.api_reset_stats, methods=["POST"]),
-    Route("/api/status", ui_routes.api_get_status, methods=["GET"]),
-    Route("/api/streams", ui_routes.api_get_streams, methods=["GET"]),
+    Route("/api/auth/check", ui_routes.api_auth_check, methods=["GET"]),
+    Route("/api/auth/login", ui_routes.api_login, methods=["POST"]),
+    Route("/api/auth/logout", ui_routes.api_logout, methods=["POST"]),
+    Route("/api/cache/increment", ui_routes.api_increment_cache_version, methods=["POST"]),
+    
+    # --- System & Auth ---
+    Route("/system/info/public", auth_routes.endpoint_system_info_public, methods=["GET"]),
+    Route("/public/system/info", auth_routes.endpoint_system_info_public, methods=["GET"]),
+    Route("/system/info", auth_routes.endpoint_system_info, methods=["GET"]),
+    Route("/system/ping", auth_routes.endpoint_system_ping, methods=["GET", "POST"]),
+    Route("/users/public", auth_routes.endpoint_public_users, methods=["GET"]),
+    Route("/users/authenticatebyname", auth_routes.endpoint_authenticate_by_name, methods=["POST"]),
+    Route("/users/{user_id}", auth_routes.endpoint_user, methods=["GET"]),
+    Route("/users", auth_routes.endpoint_users, methods=["GET"]),
+    Route("/quickconnect/enabled", auth_routes.endpoint_quickconnect_enabled, methods=["GET"]),
+    Route("/quickconnect/initiate", auth_routes.endpoint_quickconnect_initiate, methods=["POST"]),
+    Route("/branding/configuration", auth_routes.endpoint_branding_configuration, methods=["GET"]),
+    
+    # --- Specific Library Routes (Static paths MUST come before variable paths) ---
+    Route("/userviews", library_routes.endpoint_views, methods=["GET"]),
+    Route("/users/{user_id}/views", library_routes.endpoint_views, methods=["GET"]),
+    Route("/library/virtualfolders", library_routes.endpoint_virtual_folders, methods=["GET"]),
+    Route("/users/{user_id}/items/resume", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/useritems/resume", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/users/{user_id}/items/latest", library_routes.endpoint_latest, methods=["GET"]),
+    Route("/items/latest", library_routes.endpoint_latest, methods=["GET"]), # <--- ADD THIS FIX
+    Route("/items/suggestions", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/shows/nextup", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/genres", library_routes.endpoint_tags, methods=["GET"]),
+    Route("/users/{user_id}/genres", library_routes.endpoint_tags, methods=["GET"]),
+    Route("/tags", library_routes.endpoint_tags, methods=["GET"]),
+    Route("/users/{user_id}/tags", library_routes.endpoint_tags, methods=["GET"]),
+    Route("/years", library_routes.endpoint_years, methods=["GET"]),
+    Route("/studios", library_routes.endpoint_studios, methods=["GET"]),
+    
+    # Generic item listing
+    Route("/items", library_routes.endpoint_items, methods=["GET"]),
+    Route("/users/{user_id}/items", library_routes.endpoint_items, methods=["GET"]),
 
-    # --- Jellyfin API Routes (Content & Libraries) ---
-    # Jellyfin clients request data using these standard endpoints
-    Route("/Genres", jellyfin_routes.endpoint_tags, methods=["GET"]),
-    Route("/Users/{user_id}/Genres", jellyfin_routes.endpoint_tags, methods=["GET"]),
-    Route("/Items", jellyfin_routes.endpoint_items, methods=["GET"]),
-    Route("/Items/RemoteSearch/Studios", jellyfin_routes.endpoint_studios, methods=["GET"]),
-    Route("/Items/{item_id}", jellyfin_routes.endpoint_item_details, methods=["GET"]),
-    Route("/Items/{item_id}/Images/{image_type}", jellyfin_routes.endpoint_item_image, methods=["GET"]),
-    Route("/Items/{item_id}/Images/Primary", jellyfin_routes.endpoint_item_image, methods=["GET"]),
-    Route("/Items/{item_id}/Images/Primary/0", jellyfin_routes.endpoint_item_image, methods=["GET"]),
-    Route("/Items/{item_id}/PlaybackInfo", jellyfin_routes.endpoint_playback_info, methods=["GET", "POST"]),
-    Route("/Videos/{item_id}/stream", jellyfin_routes.endpoint_stream, methods=["GET", "HEAD"]),
-    Route("/Library/VirtualFolders", jellyfin_routes.endpoint_virtual_folders, methods=["GET"]),
-    Route("/Studios", jellyfin_routes.endpoint_studios, methods=["GET"]),
-    Route("/Tags", jellyfin_routes.endpoint_tags, methods=["GET"]),
-    Route("/Users/{user_id}/Tags", jellyfin_routes.endpoint_tags, methods=["GET"]),
-    Route("/Users/{user_id}/Items", jellyfin_routes.endpoint_items, methods=["GET"]),
-    Route("/Users/{user_id}/Items/Latest", jellyfin_routes.endpoint_latest, methods=["GET"]), # NEW!
-    Route("/Users/{user_id}/Items/{item_id}", jellyfin_routes.endpoint_item_details, methods=["GET"]),
-    Route("/Users/{user_id}/Items/Resume", jellyfin_routes.endpoint_empty_list, methods=["GET"]),
-    Route("/Users/{user_id}/PlayedItems/{item_id}", jellyfin_routes.endpoint_mark_played, methods=["POST"]),
-    Route("/Users/{user_id}/Views", jellyfin_routes.endpoint_views, methods=["GET"]),
-    Route("/Years", jellyfin_routes.endpoint_years, methods=["GET"]),
+    # --- Item Detail & Image Routes ---
+    Route("/users/{user_id}/items/{item_id}", library_routes.endpoint_item_details, methods=["GET"]),
+    Route("/items/{item_id}", library_routes.endpoint_item_details, methods=["GET"]),
+    Route("/items/{item_id}/images/primary", image_routes.endpoint_item_image, methods=["GET"]),
+    Route("/items/{item_id}/images/primary/{image_index}", image_routes.endpoint_item_image, methods=["GET"]),
     
-    # --- Playback Reporting Routes ---
-    Route("/Sessions/Playing", jellyfin_routes.endpoint_sessions_playing, methods=["POST"]),
-    Route("/Sessions/Playing/Progress", jellyfin_routes.endpoint_sessions_playing, methods=["POST"]),
-    Route("/Sessions/Playing/Stopped", jellyfin_routes.endpoint_sessions_stopped, methods=["POST"]),
-    
-    # --- System, Authentication & User Routes ---
-    Route("/QuickConnect/Enabled", jellyfin_routes.endpoint_quickconnect_enabled, methods=["GET"]),
-    Route("/QuickConnect/Initiate", jellyfin_routes.endpoint_quickconnect_initiate, methods=["GET", "POST"]),
-    Route("/System/Info", jellyfin_routes.endpoint_system_info, methods=["GET"]),
-    Route("/system/info/public", jellyfin_routes.endpoint_system_info_public, methods=["GET"]),
-    Route("/System/Ping", jellyfin_routes.endpoint_system_ping, methods=["GET", "POST"]),
-    
-    # User routes (Order matters: specific routes must go before the catch-all {user_id})
-    Route("/Users/Public", jellyfin_routes.endpoint_public_users, methods=["GET"]),
-    Route("/Users/Me", jellyfin_routes.endpoint_user, methods=["GET"]),
-    Route("/Users/AuthenticateByName", jellyfin_routes.endpoint_authenticate_by_name, methods=["POST"]),
-    Route("/Users", jellyfin_routes.endpoint_users, methods=["GET"]),
-    Route("/Users/{user_id}", jellyfin_routes.endpoint_user, methods=["GET"]),
+    # --- Playback ---
+    Route("/items/{item_id}/playbackinfo", playback_routes.endpoint_playback_info, methods=["POST", "GET"]),
+    Route("/videos/{item_id}/stream.mp4", playback_routes.endpoint_stream, methods=["GET", "HEAD"]),
+    Route("/videos/{item_id}/stream", playback_routes.endpoint_stream, methods=["GET", "HEAD"]),
+    Route("/sessions/playing", playback_routes.endpoint_sessions_playing, methods=["POST"]),
+    Route("/sessions/playing/progress", playback_routes.endpoint_sessions_playing, methods=["POST"]),
+    Route("/sessions/playing/stopped", playback_routes.endpoint_sessions_stopped, methods=["POST"]),
+    Route("/users/{user_id}/playeditems/{item_id}", playback_routes.endpoint_mark_played, methods=["POST"]),
+    Route("/displaypreferences/{display_id}", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/users/{user_id}/displaypreferences/{display_id}", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/users/{user_id}/policy", auth_routes.endpoint_user, methods=["GET"]),
+    Route("/users/{user_id}/configuration", auth_routes.endpoint_user, methods=["GET"]),
 ]
 
 # Initialize the Starlette App
 app = Starlette(debug=(config.LOG_LEVEL == "DEBUG"), routes=routes)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # In a production environment, you might restrict this
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Wrap the app in our custom Security Bouncer (AuthenticationMiddleware)
 # This ensures every request (except UI) requires the PROXY_API_KEY
@@ -135,8 +153,10 @@ class JellyfinDiscoveryProtocol(asyncio.DatagramProtocol):
             # Build the exact JSON payload Jellycon expects
             response = {
                 "Address": f"http://{local_ip}:{getattr(config, 'PROXY_PORT', 8096)}",
-                "Id": getattr(config, "SERVER_ID", "stash-proxy-server-id-01"),
-                "Name": getattr(config, "SERVER_NAME", "Stash Proxy")
+                "EndpointAddress": f"http://{local_ip}:{getattr(config, 'PROXY_PORT', 8096)}",
+                "Id": getattr(config, "SERVER_ID", "stash-proxy-unique-id"),
+                "Name": getattr(config, "SERVER_NAME", "Stash Proxy"),
+                "Version": "10.11.6" # <--- MATCH HERE TOO
             }
             
             logger.debug(f"Answering discovery ping from {addr[0]}")
