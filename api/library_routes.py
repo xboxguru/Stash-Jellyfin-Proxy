@@ -29,7 +29,7 @@ def _get_query_param(request: Request, param_name: str, default=None):
         
     return default
 
-def _get_libraries():
+async def _get_libraries():
     server_id = getattr(config, "SERVER_ID", "stash-proxy")
     root_id = encode_id("root", "scenes")
     
@@ -37,40 +37,53 @@ def _get_libraries():
         if len(h) != 32: return h
         return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
     
-    views = [{
-        "Name": "Scenes",
-        "ServerId": server_id,
-        "Id": root_id,
-        "ItemId": root_id,
-        "ChannelId": None,
-        "IsFolder": True,
-        "Type": "CollectionFolder",
-        "UserData": {
-            "PlaybackPositionTicks": 0,
-            "PlayCount": 0,
-            "IsFavorite": False,
-            "Played": False,
-            "Key": hyphens(root_id),
-            "ItemId": root_id
-        },
-        "PrimaryImageAspectRatio": 1.7777777777777777,
-        "CollectionType": "movies",
-        
-        # --- TUNARR STRICT SCHEMA MOCKS ---
-        "LibraryOptions": {
-            "PathInfos": []  # <-- ADDED FOR TUNARR
-        },    
-        "Locations": [],     
+    def build_view(name, view_id):
+        return {
+            "Name": name, "ServerId": server_id, "Id": view_id, "ItemId": view_id,
+            "ChannelId": None, "IsFolder": True, "Type": "CollectionFolder",
+            "UserData": {"PlaybackPositionTicks": 0, "PlayCount": 0, "IsFavorite": False, "Played": False, "Key": hyphens(view_id), "ItemId": view_id},
+            "PrimaryImageAspectRatio": 1.7777777777777777, "CollectionType": "movies",
+            "LibraryOptions": {"PathInfos": []}, "Locations": [],
+            "ImageTags": {"Primary": "stash-logo-1"}, "HasPrimaryImage": True, 
+            "BackdropImageTags": [], "ImageBlurHashes": {}, "LocationType": "FileSystem", "MediaType": "Unknown"
+        }
 
-        "ImageTags": {"Primary": "stash-logo-1"}, 
-        "HasPrimaryImage": True, 
-        
-        "BackdropImageTags": [],
-        "ImageBlurHashes": {},
-        "LocationType": "FileSystem",
-        "MediaType": "Unknown"
-    }]
+    # Default Scenes View
+    views = [build_view("Scenes", root_id)]
+    
+    # FETCH TAG IDs AUTOMATICALLY
+    tag_names = getattr(config, "TAG_GROUPS", [])
+    if tag_names:
+        stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+        url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
+        headers = {"Content-Type": "application/json"}
+        if getattr(config, "STASH_API_KEY", ""):
+            headers["ApiKey"] = config.STASH_API_KEY
+
+        # Query Stash for all tags at once to find matches
+        query = "query { allTags { id name } }"
+        async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
+            try:
+                resp = await client.post(url, headers=headers, json={"query": query}, timeout=5.0)
+                all_tags = resp.json().get("data", {}).get("allTags", [])
+                
+                # Match local tag names to Stash IDs
+                for name in tag_names:
+                    match = next((t for t in all_tags if t['name'].lower() == name.lower()), None)
+                    if match:
+                        view_id = encode_id("tag", str(match['id']))
+                        views.append(build_view(match['name'], view_id))
+                    else:
+                        logger.warning(f"Tag Group '{name}' defined in config but not found in Stash.")
+            except Exception as e:
+                logger.error(f"Failed to auto-resolve tag IDs: {e}")
+
     return views
+
+# Update the endpoint_views call to be async
+async def endpoint_views(request: Request):
+    views = await _get_libraries()
+    return JSONResponse({"Items": views, "TotalRecordCount": len(views), "StartIndex": 0})
 
 async def endpoint_items(request: Request):
     parent_id = _get_query_param(request, "ParentId")
@@ -87,10 +100,7 @@ async def endpoint_items(request: Request):
     except:
         limit = getattr(config, "DEFAULT_PAGE_SIZE", 50)
 
-    # ==========================================
-    # FINDROID FIX 1: ROOT DIRECTORY HIERARCHY
-    # ==========================================
-    # This stops Findroid from treating your videos as Library Folders.
+    # 1. ROOT DIRECTORY INTERCEPT (My Media)
     search_term = _get_query_param(request, "SearchTerm")
     person_ids = (_get_query_param(request, "ArtistIds") or _get_query_param(request, "PeopleIds") or _get_query_param(request, "PersonIds"))
     tags_param = (_get_query_param(request, "Tags") or _get_query_param(request, "TagIds") or _get_query_param(request, "GenreIds"))
@@ -100,25 +110,17 @@ async def endpoint_items(request: Request):
 
     if not parent_id and not ids_param and not search_term and not recursive and not person_ids and not tags_param and not filters_string:
         if "movie" not in item_types and "episode" not in item_types:
-            views = _get_libraries()
+            views = await _get_libraries()
             return JSONResponse({"Items": views, "TotalRecordCount": len(views), "StartIndex": 0})
 
-    # ==========================================
-    # FINDROID FIX 2: STRICT LEAF NODE TERMINATION
-    # ==========================================
-    if decoded_parent_id and ("scene-" in decoded_parent_id or "person-" in decoded_parent_id):
-        return JSONResponse({
-            "Items": [], 
-            "TotalRecordCount": 0, 
-            "StartIndex": 0
-        })
+    # 2. LEAF NODE TERMINATION (Stop spinning on movies/people)
+    if decoded_parent_id and (decoded_parent_id.startswith("scene-") or decoded_parent_id.startswith("person-")):
+        return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": 0})
 
-    # 1. ERSATZTV SPECIFIC FETCH
-    # 1. ERSATZTV / TUNARR SPECIFIC FETCH
+    # 3. Ids BATCH FETCH (Tunarr/ErsatzTV)
     if ids_param:
         raw_ids = []
         for i in ids_param.split(","):
-            # Properly decode the hex ID back into a raw Stash number
             dec_i = decode_id(i)
             match = re.search(r'\d+', dec_i)
             if match:
@@ -156,32 +158,36 @@ async def endpoint_items(request: Request):
                     jellyfin_items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=parent_id or safe_root))
                 except Exception:
                     pass
-        
         return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": len(jellyfin_items), "StartIndex": 0})
 
-    # 2. NORMAL SEARCH & FILTER ENGINE
+    # 4. NORMAL SEARCH & FILTER ENGINE
     filter_args = {"sort": "created_at", "direction": "DESC"}
     scene_filter = {} 
     original_limit = limit
 
+    # Apply Performer Filter
     if person_ids:
         raw_p_ids = []
         for p in person_ids.split(","):
             dec_p = decode_id(p)
             match = re.search(r'\d+', dec_p)
-            if match: 
-                raw_p_ids.append(match.group())
+            if match: raw_p_ids.append(match.group())
         if raw_p_ids:
             scene_filter["performers"] = {"value": raw_p_ids, "modifier": "INCLUDES"}
 
-    if decoded_parent_id and "tag-" in decoded_parent_id:
-        tag_id_match = re.search(r'\d+', decoded_parent_id)
-        if tag_id_match:
-            scene_filter["tags"] = {"value": [tag_id_match.group()], "modifier": "INCLUDES"}
+    # --- TAG GROUP FILTERING ---
+    if decoded_parent_id and decoded_parent_id.startswith("tag-"):
+        raw_tag_id = decoded_parent_id.replace("tag-", "")
+        # Stash expects a list of IDs as strings
+        scene_filter["tags"] = {
+            "value": [raw_tag_id], 
+            "modifier": "INCLUDES"
+        }
 
+    # Type safety check
     if item_types:
         allowed = False
-        for t in ["movie", "video", "series", "episode"]:
+        for t in ["movie", "video", "series", "episode", "folder"]: # Added 'folder' to allow Tag Groups to work
             if t in item_types:
                 allowed = True
                 break
@@ -271,11 +277,13 @@ async def endpoint_items(request: Request):
     return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": total_count, "StartIndex": start_index})
 
 async def endpoint_views(request: Request):
-    views = _get_libraries()
+    views = await _get_libraries()
     return JSONResponse({"Items": views, "TotalRecordCount": len(views), "StartIndex": 0})
 
 async def endpoint_virtual_folders(request: Request):
-    return JSONResponse(content=_get_libraries(), headers={"Content-Type": "application/json; charset=utf-8"})
+    # We must await the library generation now that it queries Stash
+    views = await _get_libraries() 
+    return JSONResponse(views)
 
 async def endpoint_item_details(request: Request):
     item_id = request.path_params.get("item_id", "")
