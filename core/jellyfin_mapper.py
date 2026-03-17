@@ -200,7 +200,15 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
     if date and len(date) >= 4:
         try:
             item["ProductionYear"] = int(date[:4])
-            item["PremiereDate"] = f"{date}T00:00:00.0000000Z"
+            
+            # --- TUNARR ZOD FIX: Pad incomplete dates ---
+            clean_date = date
+            if len(clean_date) == 4:     # Only year provided (e.g., "2009")
+                clean_date = f"{clean_date}-01-01"
+            elif len(clean_date) == 7:   # Only year & month provided (e.g., "2009-05")
+                clean_date = f"{clean_date}-01"
+                
+            item["PremiereDate"] = f"{clean_date}T00:00:00.0000000Z"
         except:
             item["PremiereDate"] = formatted_created
             item["ProductionYear"] = int(formatted_created[:4])
