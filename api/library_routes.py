@@ -31,7 +31,6 @@ def _get_query_param(request: Request, param_name: str, default=None):
 
 async def _get_libraries():
     server_id = getattr(config, "SERVER_ID", "stash-proxy")
-    root_id = encode_id("root", "scenes")
     
     def hyphens(h):
         if len(h) != 32: return h
@@ -48,9 +47,19 @@ async def _get_libraries():
             "BackdropImageTags": [], "ImageBlurHashes": {}, "LocationType": "FileSystem", "MediaType": "Unknown"
         }
 
-    # Default Scenes View
-    views = [build_view("Scenes", root_id)]
+    # MULTI-LIBRARY DEFAULTS (Updated Names)
+    views = [
+        build_view("Scenes (Everything)", encode_id("root", "scenes")),
+        build_view("Scenes (Organized)", encode_id("root", "organized")),
+        build_view("Scenes (Tagged)", encode_id("root", "tagged"))
+    ]
     
+    # --- DYNAMIC RECENT FOLDER ---
+    recent_days = getattr(config, "RECENT_DAYS", 14)
+    if recent_days > 0:
+        # Insert it right after the main Scenes folder
+        views.insert(1, build_view(f"Recently Added ({recent_days} Days)", encode_id("root", "recent")))
+
     # FETCH TAG IDs AUTOMATICALLY
     tag_names = getattr(config, "TAG_GROUPS", [])
     if tag_names:
@@ -60,16 +69,15 @@ async def _get_libraries():
         if getattr(config, "STASH_API_KEY", ""):
             headers["ApiKey"] = config.STASH_API_KEY
 
-        # Query Stash for all tags at once to find matches
         query = "query { allTags { id name } }"
         async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
             try:
                 resp = await client.post(url, headers=headers, json={"query": query}, timeout=5.0)
                 all_tags = resp.json().get("data", {}).get("allTags", [])
                 
-                # Match local tag names to Stash IDs
                 for name in tag_names:
-                    match = next((t for t in all_tags if t['name'].lower() == name.lower()), None)
+                    search_name = name.strip().lower()
+                    match = next((t for t in all_tags if t['name'].strip().lower() == search_name), None)
                     if match:
                         view_id = encode_id("tag", str(match['id']))
                         views.append(build_view(match['name'], view_id))
@@ -80,27 +88,26 @@ async def _get_libraries():
 
     return views
 
-# Update the endpoint_views call to be async
 async def endpoint_views(request: Request):
     views = await _get_libraries()
     return JSONResponse({"Items": views, "TotalRecordCount": len(views), "StartIndex": 0})
+
+async def endpoint_virtual_folders(request: Request):
+    views = await _get_libraries() 
+    return JSONResponse(views)
 
 async def endpoint_items(request: Request):
     parent_id = _get_query_param(request, "ParentId")
     decoded_parent_id = decode_id(parent_id) if parent_id else None
     ids_param = _get_query_param(request, "Ids")
     
-    try:
-        start_index = int(_get_query_param(request, "StartIndex", 0))
-    except:
-        start_index = 0
+    try: start_index = int(_get_query_param(request, "StartIndex", 0))
+    except: start_index = 0
         
-    try:
-        limit = int(_get_query_param(request, "Limit", getattr(config, "DEFAULT_PAGE_SIZE", 50)))
-    except:
-        limit = getattr(config, "DEFAULT_PAGE_SIZE", 50)
+    try: limit = int(_get_query_param(request, "Limit", getattr(config, "DEFAULT_PAGE_SIZE", 50)))
+    except: limit = getattr(config, "DEFAULT_PAGE_SIZE", 50)
 
-    # 1. ROOT DIRECTORY INTERCEPT (My Media)
+    # 1. ROOT DIRECTORY INTERCEPT
     search_term = _get_query_param(request, "SearchTerm")
     person_ids = (_get_query_param(request, "ArtistIds") or _get_query_param(request, "PeopleIds") or _get_query_param(request, "PersonIds"))
     tags_param = (_get_query_param(request, "Tags") or _get_query_param(request, "TagIds") or _get_query_param(request, "GenreIds"))
@@ -113,7 +120,7 @@ async def endpoint_items(request: Request):
             views = await _get_libraries()
             return JSONResponse({"Items": views, "TotalRecordCount": len(views), "StartIndex": 0})
 
-    # 2. LEAF NODE TERMINATION (Stop spinning on movies/people)
+    # 2. LEAF NODE TERMINATION
     if decoded_parent_id and (decoded_parent_id.startswith("scene-") or decoded_parent_id.startswith("person-")):
         return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": 0})
 
@@ -123,8 +130,7 @@ async def endpoint_items(request: Request):
         for i in ids_param.split(","):
             dec_i = decode_id(i)
             match = re.search(r'\d+', dec_i)
-            if match:
-                raw_ids.append(match.group())
+            if match: raw_ids.append(match.group())
                 
         jellyfin_items = []
         stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
@@ -143,8 +149,7 @@ async def endpoint_items(request: Request):
                         data = resp.json()
                         if data and "data" in data and data["data"].get("findScene"):
                             return data["data"]["findScene"]
-                except Exception as e:
-                    logger.error(f"Concurrent fetch failed for scene {raw_id}: {e}")
+                except Exception: pass
                 return None
 
         async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
@@ -156,8 +161,7 @@ async def endpoint_items(request: Request):
                 try:
                     safe_root = encode_id("root", "scenes")
                     jellyfin_items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=parent_id or safe_root))
-                except Exception:
-                    pass
+                except Exception: pass
         return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": len(jellyfin_items), "StartIndex": 0})
 
     # 4. NORMAL SEARCH & FILTER ENGINE
@@ -165,7 +169,6 @@ async def endpoint_items(request: Request):
     scene_filter = {} 
     original_limit = limit
 
-    # Apply Performer Filter
     if person_ids:
         raw_p_ids = []
         for p in person_ids.split(","):
@@ -175,19 +178,34 @@ async def endpoint_items(request: Request):
         if raw_p_ids:
             scene_filter["performers"] = {"value": raw_p_ids, "modifier": "INCLUDES"}
 
-    # --- TAG GROUP FILTERING ---
-    if decoded_parent_id and decoded_parent_id.startswith("tag-"):
-        raw_tag_id = decoded_parent_id.replace("tag-", "")
-        # Stash expects a list of IDs as strings
-        scene_filter["tags"] = {
-            "value": [raw_tag_id], 
-            "modifier": "INCLUDES"
-        }
+    # --- MULTI-LIBRARY DIRECTORY ROUTING ---
+    is_folder_override = False
+    
+    if decoded_parent_id:
+        if decoded_parent_id == "root-scenes":
+            is_folder_override = True
+        elif decoded_parent_id == "root-organized":
+            scene_filter["organized"] = True
+            is_folder_override = True
+        elif decoded_parent_id == "root-tagged":
+            scene_filter["tags"] = {"modifier": "NOT_NULL"}
+            is_folder_override = True
+        # --- NEW: DYNAMIC RECENT FILTER ---
+        elif decoded_parent_id == "root-recent":
+            recent_days = getattr(config, "RECENT_DAYS", 14)
+            # Calculate the exact timestamp from X days ago
+            cutoff_date = (datetime.datetime.utcnow() - datetime.timedelta(days=recent_days)).strftime("%Y-%m-%dT%H:%M:%S")
+            # Apply Stash's native Timestamp filter
+            scene_filter["created_at"] = {"value": cutoff_date, "modifier": "GREATER_THAN"}
+            is_folder_override = True
+        elif decoded_parent_id.startswith("tag-"):
+            raw_tag_id = decoded_parent_id.replace("tag-", "")
+            scene_filter["tags"] = {"value": [raw_tag_id], "modifier": "INCLUDES"}
+            is_folder_override = True
 
-    # Type safety check
     if item_types:
         allowed = False
-        for t in ["movie", "video", "series", "episode", "folder"]: # Added 'folder' to allow Tag Groups to work
+        for t in ["movie", "video", "series", "episode", "folder"]:
             if t in item_types:
                 allowed = True
                 break
@@ -195,29 +213,16 @@ async def endpoint_items(request: Request):
             return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": start_index})
 
     sort_by = _get_query_param(request, "SortBy", "").lower()
-    if "random" in sort_by:
-        filter_args["sort"] = "random"
-    elif "datecreated" in sort_by:
-        filter_args["sort"] = "created_at"
-    elif "dateplayed" in sort_by:
-        filter_args["sort"] = "updated_at" 
-    elif "name" in sort_by or "sortname" in sort_by:
-        filter_args["sort"] = "title"
-        
-    sort_order = _get_query_param(request, "SortOrder", "").lower()
-    if sort_order == "ascending":
-        filter_args["direction"] = "ASC"
+    if "random" in sort_by: filter_args["sort"] = "random"
+    elif "datecreated" in sort_by: filter_args["sort"] = "created_at"
+    elif "dateplayed" in sort_by: filter_args["sort"] = "updated_at" 
+    elif "name" in sort_by or "sortname" in sort_by: filter_args["sort"] = "title"
+    if _get_query_param(request, "SortOrder", "").lower() == "ascending": filter_args["direction"] = "ASC"
 
     filter_list = [f.strip() for f in filters_string.split(",")] if filters_string else []
-
-    if "IsUnplayed" in filter_list:
-        scene_filter["play_count"] = {"value": 0, "modifier": "EQUALS"}
-    elif "IsPlayed" in filter_list:
-        scene_filter["play_count"] = {"value": 0, "modifier": "GREATER_THAN"}
-        
-    if "IsFavorite" in filter_list:
-        scene_filter["o_counter"] = {"value": 0, "modifier": "GREATER_THAN"}
-        
+    if "IsUnplayed" in filter_list: scene_filter["play_count"] = {"value": 0, "modifier": "EQUALS"}
+    elif "IsPlayed" in filter_list: scene_filter["play_count"] = {"value": 0, "modifier": "GREATER_THAN"}
+    if "IsFavorite" in filter_list: scene_filter["o_counter"] = {"value": 0, "modifier": "GREATER_THAN"}
     if "IsResumable" in filter_list:
         filter_args["sort"] = "updated_at" 
         filter_args["direction"] = "DESC"
@@ -225,28 +230,22 @@ async def endpoint_items(request: Request):
 
     years = _get_query_param(request, "Years")
     if years:
-        year_list = [int(y) for y in years.split(",") if y.isdigit()]
-        if year_list:
-            min_year = min(year_list)
-            max_year = max(year_list)
-            scene_filter["date"] = {"value": f"{min_year}-01-01", "value2": f"{max_year}-12-31", "modifier": "BETWEEN"}
-
+        y_l = [int(y) for y in years.split(",") if y.isdigit()]
+        if y_l: scene_filter["date"] = {"value": f"{min(y_l)}-01-01", "value2": f"{max(y_l)}-12-31", "modifier": "BETWEEN"}
     if tags_param:
-        raw_tags = [t.replace("tag-", "") for t in tags_param.split(",") if t.replace("tag-", "").isdigit()]
-        if raw_tags:
-            scene_filter["tags"] = {"value": raw_tags, "modifier": "INCLUDES"}
+        raw_t = [t.replace("tag-", "") for t in tags_param.split(",") if t.replace("tag-", "").isdigit()]
+        if raw_t: scene_filter["tags"] = {"value": raw_t, "modifier": "INCLUDES"}
 
-    if search_term:
-        filter_args["q"] = search_term
+    if search_term: filter_args["q"] = search_term
 
     if original_limit == 0 and not search_term and "IsResumable" not in filter_list:
-        stash_data = stash_client.fetch_scenes(filter_args, page=1, per_page=1, scene_filter=scene_filter)
+        stash_data = stash_client.fetch_scenes(filter_args, page=1, per_page=1, scene_filter=scene_filter, ignore_sync_level=is_folder_override)
         if not stash_data:
             return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": start_index})
         return JSONResponse({"Items": [], "TotalRecordCount": stash_data.get("count", 0), "StartIndex": start_index})
 
     page = (start_index // limit) + 1 if limit > 0 else 1
-    stash_data = stash_client.fetch_scenes(filter_args, page=page, per_page=limit, scene_filter=scene_filter)
+    stash_data = stash_client.fetch_scenes(filter_args, page=page, per_page=limit, scene_filter=scene_filter, ignore_sync_level=is_folder_override)
     
     if not stash_data:
         return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": start_index})
@@ -255,18 +254,15 @@ async def endpoint_items(request: Request):
     for scene in stash_data.get("scenes", []):
         if search_term:
             title = scene.get("title") or scene.get("code") or ""
-            if not title.lower().startswith(search_term.lower()):
-                continue
+            if not title.lower().startswith(search_term.lower()): continue
 
         if "IsResumable" in filter_list:
-            if not scene.get("resume_time") or scene.get("resume_time") <= 0:
-                continue
+            if not scene.get("resume_time") or scene.get("resume_time") <= 0: continue
 
         try:
             safe_root = encode_id("root", "scenes")
             jellyfin_items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=parent_id or safe_root))
-        except Exception:
-            pass
+        except Exception: pass
 
     total_count = stash_data.get("count", 0)
     if search_term or "IsResumable" in filter_list:
@@ -276,22 +272,13 @@ async def endpoint_items(request: Request):
 
     return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": total_count, "StartIndex": start_index})
 
-async def endpoint_views(request: Request):
-    views = await _get_libraries()
-    return JSONResponse({"Items": views, "TotalRecordCount": len(views), "StartIndex": 0})
-
-async def endpoint_virtual_folders(request: Request):
-    # We must await the library generation now that it queries Stash
-    views = await _get_libraries() 
-    return JSONResponse(views)
-
 async def endpoint_item_details(request: Request):
     item_id = request.path_params.get("item_id", "")
     decoded_id = decode_id(item_id)
     
     # 1. Catch Root Folders and Tags
-    if decoded_id == "root-scenes" or decoded_id.startswith("tag-"):
-        safe_id = encode_id("root", "scenes") if decoded_id == "root-scenes" else encode_id("tag", decoded_id.replace("tag-", ""))
+    if decoded_id.startswith("root-") or decoded_id.startswith("tag-"):
+        safe_id = encode_id("root", decoded_id.replace("root-", "")) if decoded_id.startswith("root-") else encode_id("tag", decoded_id.replace("tag-", ""))
         return JSONResponse({"Name": "Folder", "Id": safe_id, "Type": "CollectionFolder", "IsFolder": True})
 
     # 2. Catch Studios
@@ -319,14 +306,13 @@ async def endpoint_item_details(request: Request):
                         "Name": perf.get("name", "Unknown Person"),
                         "Id": item_id,
                         "Type": "Person",
-                        "IsFolder": True, # Required so clicking them lists their movies
+                        "IsFolder": True,
                         "ImageTags": {"Primary": "primary"} if perf.get("image_path") else {},
                         "HasPrimaryImage": bool(perf.get("image_path"))
                     })
             except Exception as e:
                 logger.error(f"Failed to fetch performer details: {e}")
                 
-        # Fallback if Stash is unreachable
         return JSONResponse({"Name": "Person", "Id": item_id, "Type": "Person", "IsFolder": True})
         
     # 4. Finally, if it's none of the above, it MUST be a Scene.
@@ -335,9 +321,6 @@ async def endpoint_item_details(request: Request):
         return JSONResponse({"error": f"Invalid ID format: {decoded_id}"}, status_code=400)
         
     raw_id = number_match.group()
-    
-    # --- FINDROID FIX: AVOID 422 ERRRORS ---
-    # Use get_scene (singular) instead of fetch_scenes
     scene = stash_client.get_scene(raw_id)
     
     if scene:
@@ -386,10 +369,40 @@ async def endpoint_empty_list(request: Request):
 
 async def endpoint_latest(request: Request):
     parent_id = _get_query_param(request, "ParentId")
+    decoded_parent_id = decode_id(parent_id) if parent_id else None
     
-    stash_data = stash_client.fetch_scenes({"sort": "created_at", "direction": "DESC"}, page=1, per_page=16)
+    scene_filter = {}
+    is_folder_override = False
+    
+    # Ensure the "Latest" shelf on the home screen respects the folder choice
+    if decoded_parent_id:
+        if decoded_parent_id == "root-scenes":
+            is_folder_override = True
+        elif decoded_parent_id == "root-organized":
+            scene_filter["organized"] = True
+            is_folder_override = True
+        elif decoded_parent_id == "root-tagged":
+            scene_filter["tags"] = {"modifier": "NOT_NULL"}
+            is_folder_override = True
+        # --- NEW: DYNAMIC RECENT FILTER ---
+        elif decoded_parent_id == "root-recent":
+            recent_days = getattr(config, "RECENT_DAYS", 14)
+            cutoff_date = (datetime.datetime.utcnow() - datetime.timedelta(days=recent_days)).strftime("%Y-%m-%dT%H:%M:%S")
+            scene_filter["created_at"] = {"value": cutoff_date, "modifier": "GREATER_THAN"}
+            is_folder_override = True
+        elif decoded_parent_id.startswith("tag-"):
+            raw_tag_id = decoded_parent_id.replace("tag-", "")
+            scene_filter["tags"] = {"value": [raw_tag_id], "modifier": "INCLUDES"}
+            is_folder_override = True
+            
+    stash_data = stash_client.fetch_scenes(
+        {"sort": "created_at", "direction": "DESC"}, 
+        page=1, per_page=16, 
+        scene_filter=scene_filter,
+        ignore_sync_level=is_folder_override
+    )
+    
     jellyfin_items = []
-    
     safe_root = encode_id("root", "scenes")
     
     for scene in stash_data.get("scenes", []):
@@ -398,5 +411,4 @@ async def endpoint_latest(request: Request):
         except Exception:
             pass
             
-    # Note: Latest returns an array directly, NOT an object with 'Items'
     return JSONResponse(jellyfin_items)

@@ -77,7 +77,7 @@ def call_graphql(query: str, variables: Optional[Dict[str, Any]] = None) -> Opti
                 return None
 
 def get_scene(scene_id: str) -> Optional[Dict[str, Any]]:
-    """Fetch a single scene by ID and enforce sync filters."""
+    """Fetch a single scene by ID. Does NOT enforce sync filters to allow access from override folders."""
     query = f"""
     query FindScene($id: ID!) {{
         findScene(id: $id) {{
@@ -87,35 +87,24 @@ def get_scene(scene_id: str) -> Optional[Dict[str, Any]]:
     """
     data = call_graphql(query, {"id": scene_id})
     if data and data.get("findScene"):
-        scene = data["findScene"]
+        return data["findScene"]
         
-        # ENFORCE SYNC LEVEL ON DIRECT LOOKUPS
-        sync_mode = getattr(config, "SYNC_LEVEL", "Everything")
-        if sync_mode == "Organized" and not scene.get("organized"):
-            return None  # Pretend it doesn't exist
-        if sync_mode == "Tagged" and not scene.get("tags"):
-            return None  # Pretend it doesn't exist
-            
-        return scene
     return None
 
-def fetch_scenes(filter_args: Dict[str, Any], page: int = 1, per_page: int = 50, scene_filter: Dict[str, Any] = None) -> Dict[str, Any]:
-    """Fetch scenes based on SYNC_LEVEL (Everything, Organized, Tagged)."""
-    # Build the scene filter object
+def fetch_scenes(filter_args: Dict[str, Any], page: int = 1, per_page: int = 50, scene_filter: Dict[str, Any] = None, ignore_sync_level: bool = False) -> Dict[str, Any]:
+    """Fetch scenes based on SYNC_LEVEL, with an override for specific library folders."""
     sf = scene_filter or {}
     
-    # --- FILTER ENGINE FIX ---
-    # Extract scene-specific filters (like title) from the generic filter_args
-    # so Stash's GraphQL schema accepts them in the SceneFilterType.
     if "title" in filter_args:
         sf["title"] = filter_args.pop("title")
         
-    sync_mode = getattr(config, "SYNC_LEVEL", "Everything")
-    
-    if sync_mode == "Organized":
-        sf["organized"] = True 
-    elif sync_mode == "Tagged":
-        sf["tags"] = {"modifier": "NOT_NULL"}  # Stash filter for 'has any tag'
+    # Apply global SYNC_LEVEL filter ONLY if we aren't already filtering by a specific folder
+    if not ignore_sync_level:
+        sync_mode = getattr(config, "SYNC_LEVEL", "Everything")
+        if sync_mode == "Organized":
+            sf["organized"] = True 
+        elif sync_mode == "Tagged":
+            sf["tags"] = {"modifier": "NOT_NULL"}  # Stash filter for 'has any tag'
 
     query = f"""
     query FindScenes($filter: FindFilterType, $scene_filter: SceneFilterType) {{
