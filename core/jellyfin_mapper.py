@@ -19,24 +19,20 @@ def decode_id(encoded_id: str) -> str:
     """Decodes the 32-character hex UUID back into our proxy ID format."""
     clean_id = encoded_id.replace("-", "")
     
-    # If the user passed in 'scene-11' directly, return it
     if clean_id.startswith("scene") or clean_id.startswith("person") or clean_id.startswith("studio"):
         return encoded_id 
         
     try:
-        # Convert hex back to bytes, then decode, then strip all null padding
         decoded_bytes = bytes.fromhex(clean_id)
         decoded_str = decoded_bytes.decode('utf-8').rstrip('\x00')
         
-        # Verify it's one of our internal formats (NOW INCLUDING "root-")
         if "scene-" in decoded_str or "person-" in decoded_str or "studio-" in decoded_str or "tag-" in decoded_str or "root-" in decoded_str:
             return decoded_str.strip()
-    except Exception as e:
+    except Exception:
         pass
         
     return encoded_id
 
-# ADDED: Hyphen helper for strict Kotlin UserData parsing
 def hyphens(h: str) -> str:
     if len(h) != 32: return h
     return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
@@ -44,32 +40,33 @@ def hyphens(h: str) -> str:
 def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[str, Any]:
     """
     Transforms a Stash Scene object into a Jellyfin Movie/Video object.
+    Crash-proofed against null GraphQL returns for newly scraped media.
     """
     raw_id = str(scene.get("id"))
     item_id = encode_id("scene", raw_id)
     date = scene.get("date")
     cache_version = getattr(config, "CACHE_VERSION", 0)
     
-    # Safely generate the 32-character parent ID
     final_parent_id = parent_id if parent_id else encode_id("root", "scenes")
 
+    # SAFE FALLBACKS: Use 'or 0' instead of '.get(key, 0)' to catch explicit nulls
     resume_time_seconds = scene.get("resume_time") or 0
     resume_ticks = int(resume_time_seconds * 10000000)
     
-    files = scene.get("files", [])
+    files = scene.get("files") or []
     path = files[0].get("path") if files else ""
-    duration_seconds = files[0].get("duration", 0) if files else 0
+    duration_seconds = (files[0].get("duration") or 0) if files else 0
     runtime_ticks = int(duration_seconds * 10000000)
     
     if path:
         path = path.replace("\\", "/")
 
-    width = files[0].get("width", 0) if files else 0
-    height = files[0].get("height", 0) if files else 0
-    v_codec = files[0].get("video_codec", "h264") if files else "h264"
-    a_codec = files[0].get("audio_codec", "aac") if files else "aac"
-    container = files[0].get("format", "mp4") if files else "mp4"
-    bit_rate = files[0].get("bit_rate", 0) if files else 0
+    width = (files[0].get("width") or 0) if files else 0
+    height = (files[0].get("height") or 0) if files else 0
+    v_codec = (files[0].get("video_codec") or "h264") if files else "h264"
+    a_codec = (files[0].get("audio_codec") or "aac") if files else "aac"
+    container = (files[0].get("format") or "mp4") if files else "mp4"
+    bit_rate = (files[0].get("bit_rate") or 0) if files else 0
 
     title = scene.get("title") or scene.get("code")
     if not title and path:
@@ -81,14 +78,14 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
     studio_obj = scene.get("studio")
     studio_name = studio_obj.get("name") if studio_obj else None
     description = scene.get("details") or ""
-    tags = scene.get("tags", [])
-    performers = scene.get("performers", [])
-    play_count = scene.get("o_counter", 0) or 0
+    
+    # SAFE FALLBACKS: Use 'or []' for arrays
+    tags = scene.get("tags") or []
+    performers = scene.get("performers") or []
+    play_count = scene.get("o_counter") or 0
     
     now_iso = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
 
-    # --- STRICT FINDROID MEDIA STREAMS ---
-    # Create a base dictionary with all the mandatory boolean flags
     base_stream_flags = {
         "IsInterlaced": False,
         "IsDefault": True,
@@ -121,7 +118,6 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
 
     media_streams = [video_stream, audio_stream]
 
-    # Build the core Jellyfin Item
     item = {
         "Name": title,
         "SortName": title,
@@ -144,8 +140,6 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
         "VideoType": "VideoFile",
         "Protocol": "File",
         "BackdropImageTags": [f"{raw_id}-v{cache_version}-backdrop"],
-        
-        "RunTimeTicks": runtime_ticks,
         
         "RunTimeTicks": runtime_ticks,
         "OfficialRating": "XXX",
@@ -200,12 +194,10 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
     if date and len(date) >= 4:
         try:
             item["ProductionYear"] = int(date[:4])
-            
-            # --- TUNARR ZOD FIX: Pad incomplete dates ---
             clean_date = date
-            if len(clean_date) == 4:     # Only year provided (e.g., "2009")
+            if len(clean_date) == 4:
                 clean_date = f"{clean_date}-01-01"
-            elif len(clean_date) == 7:   # Only year & month provided (e.g., "2009-05")
+            elif len(clean_date) == 7:
                 clean_date = f"{clean_date}-01"
                 
             item["PremiereDate"] = f"{clean_date}T00:00:00.0000000Z"
@@ -293,7 +285,6 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
                 "Name": title,
                 "Size": 0,
                 
-                # --- ADDED: STRICT FINDROID MEDIASOURCEINFO FIELDS ---
                 "ReadAtNativeFramerate": False,
                 "IgnoreDts": False,
                 "IgnoreIndex": False,
