@@ -64,6 +64,8 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
     duration_seconds = (files[0].get("duration") or 0) if files else 0
     runtime_ticks = int(duration_seconds * 10000000)
     
+    file_size = int(files[0].get("size") or 0) if files else 0
+
     if path:
         path = path.replace("\\", "/")
 
@@ -134,6 +136,7 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
         "Type": "Movie",
         "IsFolder": False,
         "MediaType": "Video",
+        "CanDownload": True,
         "ParentId": final_parent_id,
         "DateLastSaved": now_iso, 
         
@@ -307,7 +310,8 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
                 "Formats": [],
                 "RequiredHttpHeaders": {},
                 "Name": title,
-                "Size": 0,
+                "Size": file_size,
+                "ETag": etag_hash,
                 
                 "ReadAtNativeFramerate": False,
                 "IgnoreDts": False,

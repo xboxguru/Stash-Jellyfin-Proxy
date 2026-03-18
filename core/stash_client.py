@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 # The universal GraphQL fields we request for scenes. 
 SCENE_FIELDS = """
     id title code date details o_counter play_count created_at organized resume_time
-    files { path duration video_codec audio_codec frame_rate bit_rate width height format } 
+    files { path duration video_codec audio_codec frame_rate bit_rate width height format size } 
     studio { id name image_path } 
     tags { name } 
     performers { name id image_path } 

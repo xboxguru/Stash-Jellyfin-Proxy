@@ -87,7 +87,7 @@ routes = [
     Route("/movies/recommendations", library_routes.endpoint_empty_array, methods=["GET"]),
     Route("/items/filters", library_routes.endpoint_filters, methods=["GET"]),
     Route("/items/filters2", library_routes.endpoint_filters, methods=["GET"]),
-    
+    Route("/mediasegments/{item_id}", library_routes.endpoint_empty_list, methods=["GET"]),
     Route("/shows/nextup", library_routes.endpoint_empty_list, methods=["GET"]),
     Route("/genres", library_routes.endpoint_tags, methods=["GET"]),
     Route("/users/{user_id}/genres", library_routes.endpoint_tags, methods=["GET"]),
@@ -138,6 +138,8 @@ routes = [
     Route("/users/{user_id}/playeditems/{item_id}", playback_routes.endpoint_mark_unplayed, methods=["DELETE"]),
     Route("/userplayeditems/{item_id}", playback_routes.endpoint_mark_played, methods=["POST"]),
     Route("/userplayeditems/{item_id}", playback_routes.endpoint_mark_unplayed, methods=["DELETE"]),
+    Route("/useritems/{item_id}/userdata", playback_routes.endpoint_update_userdata, methods=["POST"]),
+    Route("/users/{user_id}/items/{item_id}/userdata", playback_routes.endpoint_update_userdata, methods=["POST"]),
     
     # --- Favorites ---
     Route("/users/{user_id}/favoriteitems/{item_id}", playback_routes.endpoint_mark_favorite, methods=["POST"]),
@@ -149,6 +151,10 @@ routes = [
     Route("/users/{user_id}/displaypreferences/{display_id}", library_routes.endpoint_empty_list, methods=["GET"]),
     Route("/users/{user_id}/policy", auth_routes.endpoint_user, methods=["GET"]),
     Route("/users/{user_id}/configuration", auth_routes.endpoint_user, methods=["GET"]),
+
+    # --- Downloads ---
+    Route("/items/{item_id}/download", playback_routes.endpoint_stream, methods=["GET"]),
+    Route("/users/{user_id}/items/{item_id}/download", playback_routes.endpoint_stream, methods=["GET"]),
 ]
 
 # Initialize the Starlette App

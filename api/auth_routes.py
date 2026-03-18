@@ -65,7 +65,7 @@ def _get_full_user():
             "ForceRemoteSourceTranscoding": False,
             "EnableContentDeletion": False,
             "EnableContentDeletionFromFolders": [],
-            "EnableContentDownloading": False,
+            "EnableContentDownloading": True,
             "EnableSyncTranscoding": False,
             "EnableMediaConversion": False,
             "EnabledDevices": [],
