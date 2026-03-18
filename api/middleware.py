@@ -41,6 +41,7 @@ class AuthenticationMiddleware:
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
+            # logger.info(f"NON-HTTP REQUEST DETECTED: Type={scope['type']}, Path={scope.get('path', 'unknown')}")
             await self.app(scope, receive, send)
             return
 
