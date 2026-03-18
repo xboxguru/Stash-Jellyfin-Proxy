@@ -1088,7 +1088,7 @@
             if(!confirm('This will invalidate all current Etags and Image URLs. Clients will rebuild their caches on the next sync. Continue?')) return;
             
             try {
-                const response = await fetch('/api/increment_cache_version', { method: 'POST' });
+                const response = await fetch('/api/cache/increment', { method: 'POST' });
                 const data = await response.json();
                 
                 if (response.ok) {

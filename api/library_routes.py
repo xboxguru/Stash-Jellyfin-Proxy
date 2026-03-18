@@ -9,7 +9,7 @@ from starlette.requests import Request
 import config
 from core import stash_client
 from core import jellyfin_mapper
-from core.jellyfin_mapper import encode_id, decode_id
+from core.jellyfin_mapper import encode_id, decode_id, hyphens
 
 logger = logging.getLogger(__name__)
 
@@ -31,17 +31,13 @@ async def _get_libraries():
     server_id = getattr(config, "SERVER_ID", "stash-proxy")
     cache_version = getattr(config, "CACHE_VERSION", 0)
     
-    def hyphens(h):
-        if len(h) != 32: return h
-        return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
-    
     def build_view(name, view_id):
-        # FIX: Wholphin strict MD5 hash requirement for image tags
         logo_hash = hashlib.md5(f"stash-logo-{cache_version}".encode()).hexdigest()
         
         return {
             "Name": name, "ServerId": server_id, "Id": view_id, "ItemId": view_id,
-            "ChannelId": None, "IsFolder": True, "Type": "CollectionFolder",
+            "ChannelId": None, "IsFolder": True, 
+            "Type": "UserView", # FIX 1: Enforce strict UserView type for Fladder
             "UserData": {"PlaybackPositionTicks": 0, "PlayCount": 0, "IsFavorite": False, "Played": False, "Key": hyphens(view_id), "ItemId": view_id},
             "PrimaryImageAspectRatio": 1.7777777777777777, 
             "CollectionType": "movies",
@@ -84,8 +80,6 @@ async def _get_libraries():
                     if match:
                         view_id = encode_id("tag", str(match['id']))
                         views.append(build_view(match['name'], view_id))
-                    else:
-                        logger.warning(f"Tag Group '{name}' defined in config but not found in Stash.")
             except Exception as e:
                 logger.error(f"Failed to auto-resolve tag IDs: {e}")
 
@@ -96,8 +90,23 @@ async def endpoint_views(request: Request):
     return JSONResponse({"Items": views, "TotalRecordCount": len(views), "StartIndex": 0})
 
 async def endpoint_virtual_folders(request: Request):
+    # FIX 2: Enforce strict VirtualFolderInfo schema so Fladder doesn't drop the array
     views = await _get_libraries() 
-    return JSONResponse(views)
+    virtual_folders = []
+    
+    for v in views:
+        virtual_folders.append({
+            "Name": v.get("Name"),
+            "Locations": [],
+            "CollectionType": v.get("CollectionType", "movies"),
+            "LibraryOptions": {},
+            "ItemId": v.get("Id"),
+            "PrimaryImageItemId": v.get("Id"),
+            "RefreshProgress": 0,
+            "RefreshStatus": "Idle"
+        })
+        
+    return JSONResponse(virtual_folders)
 
 async def endpoint_items(request: Request):
     parent_id = _get_query_param(request, "ParentId")
@@ -122,7 +131,6 @@ async def endpoint_items(request: Request):
             views = await _get_libraries()
             return JSONResponse({"Items": views, "TotalRecordCount": len(views), "StartIndex": 0})
 
-    # FIX: Removed 'person-' so Actor scenes are not blocked
     if decoded_parent_id and decoded_parent_id.startswith("scene-"):
         return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": 0})
 
@@ -198,7 +206,6 @@ async def endpoint_items(request: Request):
             raw_tag_id = decoded_parent_id.replace("tag-", "")
             scene_filter["tags"] = {"value": [raw_tag_id], "modifier": "INCLUDES"}
             is_folder_override = True
-        # FIX: Re-added Actor/Studio Routing so clicking them filters scenes!
         elif decoded_parent_id.startswith("person-"):
             raw_person_id = decoded_parent_id.replace("person-", "")
             scene_filter["performers"] = {"value": [raw_person_id], "modifier": "INCLUDES"}
@@ -241,7 +248,7 @@ async def endpoint_items(request: Request):
     if "IsResumable" in filter_list:
         filter_args["sort"] = "updated_at" 
         filter_args["direction"] = "DESC"
-        limit = 100 # FIX: Prevents database hang on large libraries
+        limit = 100 
 
     years = _get_query_param(request, "Years")
     if years:
@@ -302,7 +309,6 @@ async def endpoint_item_details(request: Request):
     cache_version = getattr(config, "CACHE_VERSION", 0)
     server_id = getattr(config, "SERVER_ID", "stash-proxy")
     
-    # 1. Catch Root Folders and Tags
     if decoded_id.startswith("root-") or decoded_id.startswith("tag-"):
         safe_id = encode_id("root", decoded_id.replace("root-", "")) if decoded_id.startswith("root-") else encode_id("tag", decoded_id.replace("tag-", ""))
         return JSONResponse({
@@ -310,11 +316,10 @@ async def endpoint_item_details(request: Request):
             "SortName": "Folder",
             "Id": safe_id, 
             "ServerId": server_id,
-            "Type": "CollectionFolder", 
+            "Type": "UserView", # FIX: Ensure detail queries for folders also return UserView
             "IsFolder": True
         })
 
-    # 2. Catch Studios
     if decoded_id.startswith("studio-"):
         safe_id = encode_id("studio", decoded_id.replace("studio-", ""))
         return JSONResponse({
@@ -326,7 +331,6 @@ async def endpoint_item_details(request: Request):
             "IsFolder": False
         })
 
-    # 3. Catch Performers (Actors)
     if decoded_id.startswith("person-"):
         raw_id = decoded_id.replace("person-", "")
         stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
@@ -380,7 +384,6 @@ async def endpoint_item_details(request: Request):
             "IsFolder": False
         })
         
-    # 4. Finally, if it's none of the above, it MUST be a Scene.
     number_match = re.search(r'\d+', decoded_id)
     if not number_match:
         return JSONResponse({"error": f"Invalid ID format: {decoded_id}"}, status_code=400)
@@ -426,7 +429,6 @@ async def endpoint_studios(request: Request):
     
     jelly_studios = []
     for s in studios:
-        # FIX: Ensure Studio menu items have proper MD5 hashes too
         s_tag = hashlib.md5(f"studio-{s.get('id')}-v{cache_version}".encode()).hexdigest()
         jelly_studios.append({
             "Name": s.get("name"), 
@@ -440,6 +442,10 @@ async def endpoint_studios(request: Request):
 
 async def endpoint_empty_list(request: Request):
     return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": 0})
+
+async def endpoint_empty_array(request: Request):
+    """Provides a raw empty array for endpoints that do not use pagination."""
+    return JSONResponse([])
 
 async def endpoint_filters(request: Request):
     return JSONResponse({
@@ -492,4 +498,4 @@ async def endpoint_latest(request: Request):
         except Exception:
             pass
             
-    return JSONResponse(jellyfin_items)
+    return JSONResponse(jellyfin_items) 

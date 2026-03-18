@@ -84,7 +84,7 @@ routes = [
     
     # --- ANDROID TV & WHOLPHIN STUBS ---
     Route("/sessions/capabilities", auth_routes.endpoint_system_ping, methods=["POST"]),
-    Route("/movies/recommendations", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/movies/recommendations", library_routes.endpoint_empty_array, methods=["GET"]),
     Route("/items/filters", library_routes.endpoint_filters, methods=["GET"]),
     Route("/items/filters2", library_routes.endpoint_filters, methods=["GET"]),
     
