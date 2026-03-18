@@ -80,7 +80,7 @@ routes = [
     Route("/users/{user_id}/items/resume", library_routes.endpoint_empty_list, methods=["GET"]),
     Route("/useritems/resume", library_routes.endpoint_empty_list, methods=["GET"]),
     Route("/users/{user_id}/items/latest", library_routes.endpoint_latest, methods=["GET"]),
-    Route("/items/latest", library_routes.endpoint_latest, methods=["GET"]), # <--- ADD THIS FIX
+    Route("/items/latest", library_routes.endpoint_latest, methods=["GET"]),
     Route("/items/suggestions", library_routes.endpoint_empty_list, methods=["GET"]),
     Route("/shows/nextup", library_routes.endpoint_empty_list, methods=["GET"]),
     Route("/genres", library_routes.endpoint_tags, methods=["GET"]),
@@ -97,14 +97,14 @@ routes = [
     # --- Item Detail & Image Routes ---
     Route("/users/{user_id}/items/{item_id}", library_routes.endpoint_item_details, methods=["GET"]),
     Route("/items/{item_id}", library_routes.endpoint_item_details, methods=["GET"]),
-
-    # --- Item Detail & Image Routes ---
-    Route("/users/{user_id}/items/{item_id}", library_routes.endpoint_item_details, methods=["GET"]),
-    Route("/items/{item_id}", library_routes.endpoint_item_details, methods=["GET"]),
     
-    # ADDED THE {image_type} VARIABLE HERE:
+    # Catch ALL Images (Primary, Backdrop, Thumb, Logo)
     Route("/items/{item_id}/images/{image_type}", image_routes.endpoint_item_image, methods=["GET"]),
     Route("/items/{item_id}/images/{image_type}/{image_index}", image_routes.endpoint_item_image, methods=["GET"]),
+    
+    # Fladder Specific: Catch User Profile Avatar Image & Prefixed item images
+    Route("/users/{item_id}/images/{image_type}", image_routes.endpoint_item_image, methods=["GET"]),
+    Route("/users/{user_id}/items/{item_id}/images/{image_type}", image_routes.endpoint_item_image, methods=["GET"]),
     
     # --- Playback ---
     Route("/items/{item_id}/playbackinfo", playback_routes.endpoint_playback_info, methods=["POST", "GET"]),
@@ -113,7 +113,19 @@ routes = [
     Route("/sessions/playing", playback_routes.endpoint_sessions_playing, methods=["POST"]),
     Route("/sessions/playing/progress", playback_routes.endpoint_sessions_playing, methods=["POST"]),
     Route("/sessions/playing/stopped", playback_routes.endpoint_sessions_stopped, methods=["POST"]),
+    
+    # --- Watched Status (Handles both /users/ID/ and /userplayeditems/ routing patterns) ---
     Route("/users/{user_id}/playeditems/{item_id}", playback_routes.endpoint_mark_played, methods=["POST"]),
+    Route("/users/{user_id}/playeditems/{item_id}", playback_routes.endpoint_mark_unplayed, methods=["DELETE"]),
+    Route("/userplayeditems/{item_id}", playback_routes.endpoint_mark_played, methods=["POST"]),
+    Route("/userplayeditems/{item_id}", playback_routes.endpoint_mark_unplayed, methods=["DELETE"]),
+    
+    # --- Favorites ---
+    Route("/users/{user_id}/favoriteitems/{item_id}", playback_routes.endpoint_mark_favorite, methods=["POST"]),
+    Route("/users/{user_id}/favoriteitems/{item_id}", playback_routes.endpoint_unmark_favorite, methods=["DELETE"]),
+    Route("/userfavoriteitems/{item_id}", playback_routes.endpoint_mark_favorite, methods=["POST"]),
+    Route("/userfavoriteitems/{item_id}", playback_routes.endpoint_unmark_favorite, methods=["DELETE"]),
+    
     Route("/displaypreferences/{display_id}", library_routes.endpoint_empty_list, methods=["GET"]),
     Route("/users/{user_id}/displaypreferences/{display_id}", library_routes.endpoint_empty_list, methods=["GET"]),
     Route("/users/{user_id}/policy", auth_routes.endpoint_user, methods=["GET"]),

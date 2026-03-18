@@ -31,6 +31,7 @@ def _get_query_param(request: Request, param_name: str, default=None):
 
 async def _get_libraries():
     server_id = getattr(config, "SERVER_ID", "stash-proxy")
+    cache_version = getattr(config, "CACHE_VERSION", 0)
     
     def hyphens(h):
         if len(h) != 32: return h
@@ -41,10 +42,18 @@ async def _get_libraries():
             "Name": name, "ServerId": server_id, "Id": view_id, "ItemId": view_id,
             "ChannelId": None, "IsFolder": True, "Type": "CollectionFolder",
             "UserData": {"PlaybackPositionTicks": 0, "PlayCount": 0, "IsFavorite": False, "Played": False, "Key": hyphens(view_id), "ItemId": view_id},
-            "PrimaryImageAspectRatio": 1.7777777777777777, "CollectionType": "movies",
+            "PrimaryImageAspectRatio": 1.7777777777777777, 
+            "CollectionType": "movies",
             "LibraryOptions": {"PathInfos": []}, "Locations": [],
-            "ImageTags": {"Primary": "stash-logo-1"}, "HasPrimaryImage": True, 
-            "BackdropImageTags": [], "ImageBlurHashes": {}, "LocationType": "FileSystem", "MediaType": "Unknown"
+            
+            # --- CACHE BUSTER APPLIED HERE ---
+            "ImageTags": {"Primary": f"stash-logo-{cache_version}", "Thumb": f"stash-logo-{cache_version}"}, 
+            "HasPrimaryImage": True, 
+            "HasThumb": True,
+            "HasBackdrop": True,
+            "BackdropImageTags": [f"stash-logo-{cache_version}"], 
+            
+            "ImageBlurHashes": {}, "LocationType": "FileSystem", "MediaType": "Unknown"
         }
 
     # MULTI-LIBRARY DEFAULTS (Updated Names)
@@ -57,9 +66,8 @@ async def _get_libraries():
     # --- DYNAMIC RECENT FOLDER ---
     recent_days = getattr(config, "RECENT_DAYS", 14)
     if recent_days > 0:
-        # Insert it right after the main Scenes folder
         views.insert(1, build_view(f"Recently Added ({recent_days} Days)", encode_id("root", "recent")))
-
+    
     # FETCH TAG IDs AUTOMATICALLY
     tag_names = getattr(config, "TAG_GROUPS", [])
     if tag_names:

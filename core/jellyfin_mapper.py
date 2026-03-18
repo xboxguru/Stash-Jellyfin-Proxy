@@ -79,10 +79,13 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
     studio_name = studio_obj.get("name") if studio_obj else None
     description = scene.get("details") or ""
     
-    # SAFE FALLBACKS: Use 'or []' for arrays
     tags = scene.get("tags") or []
     performers = scene.get("performers") or []
-    play_count = scene.get("o_counter") or 0
+    
+    # --- SEPARATE WATCHES FROM FAVORITES ---
+    play_count = scene.get("play_count") or 0
+    o_counter = scene.get("o_counter") or 0
+    is_favorite = o_counter > 0
     
     now_iso = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
 
@@ -165,7 +168,7 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
         "UserData": {
             "PlaybackPositionTicks": resume_ticks,
             "PlayCount": play_count,
-            "IsFavorite": False,
+            "IsFavorite": is_favorite,
             "Played": play_count > 0,
             "Key": hyphens(item_id),
             "ItemId": item_id
@@ -216,7 +219,7 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
     if overview_parts:
         item["Overview"] = "\n\n".join(overview_parts)
 
-    if play_count >= 1:
+    if o_counter >= 1:
         item_tags.append("Onot0")
     
     item["Tags"] = item_tags
