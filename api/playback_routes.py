@@ -88,12 +88,10 @@ async def endpoint_sessions_stopped(request: Request):
                         last_ticks = float(stream.get("last_ticks", 0))
                         playback_ticks = max(reported_ticks, last_ticks)
                         
-                        # Findroid often omits RunTimeTicks in its stop payloads.
                         runtime_ticks = float(data.get("RunTimeTicks") or data.get("Item", {}).get("RunTimeTicks") or stream.get("runtime_ticks", 0))
                         
-                        # --- FINDROID FIX: FETCH MISSING RUNTIME FROM STASH ---
                         if runtime_ticks <= 0:
-                            logger.info(f"Findroid didn't provide RunTimeTicks. Fetching directly from Stash...")
+                            logger.info(f"Client didn't provide RunTimeTicks. Fetching directly from Stash...")
                             scene = stash_client.get_scene(raw_id)
                             if scene and scene.get("files"):
                                 duration_seconds = scene["files"][0].get("duration", 0)
@@ -115,7 +113,6 @@ async def endpoint_sessions_stopped(request: Request):
                                 logger.info(f"❌ Playback stopped at beginning. Clearing resume time.")
                                 asyncio.create_task(_update_stash_resume_time(raw_id, 0))
                         else:
-                            # Absolute fallback if stash file has no duration either
                             logger.warning(f"Could not determine total duration. Falling back to raw resume time save.")
                             if playback_ticks > 10000000: # > 1 second
                                 resume_seconds = playback_ticks / 10000000.0
@@ -219,11 +216,141 @@ async def _increment_stash_playcount(raw_id: str):
         except Exception as e:
             logger.error(f"Failed to increment play count for Scene {raw_id}: {e}")
 
+async def _increment_stash_o_counter(raw_id: str):
+    """Logs an 'O' in Stash using the modern SceneAddO mutation."""
+    stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+    url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if getattr(config, "STASH_API_KEY", ""):
+        headers["ApiKey"] = config.STASH_API_KEY
+        
+    async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
+        try:
+            # Using the exact payload format from the Stash Web UI
+            query_o = """
+            mutation SceneAddO($id: ID!, $times: [Timestamp!]) {
+              sceneAddO(id: $id, times: $times) {
+                count
+              }
+            }
+            """
+            payload = {
+                "operationName": "SceneAddO",
+                "variables": {"id": raw_id},
+                "query": query_o
+            }
+            
+            resp = await client.post(url, headers=headers, json=payload, timeout=10.0)
+            data = resp.json()
+            
+            if "errors" in data:
+                logger.error(f"❌ Stash rejected the O-Counter update: {data['errors']}")
+            else:
+                new_count = data.get("data", {}).get("sceneAddO", {}).get("count", "Unknown")
+                logger.info(f"✅ Two-Way Sync: Added 'O' event for Scene {raw_id}. New Total: {new_count}")
+        except Exception as e:
+            logger.error(f"Failed to increment O counter for Scene {raw_id}: {e}")
+
 async def endpoint_mark_played(request: Request):
-    """Fired when a user clicks 'Mark as Watched' in the Jellycon context menu."""
+    """Fired when a user clicks 'Mark as Watched' in a Jellyfin client."""
     item_id = decode_id(request.path_params.get("item_id", ""))
+    play_count = 1
+    
     if item_id.startswith("scene-"):
         raw_id = item_id.replace("scene-", "")
-        logger.info(f"Manual 'Mark as Watched' triggered for {item_id}")
+        logger.info(f"✅ 'Mark as Watched' (ON) triggered for {item_id}. Incrementing Play Count.")
         asyncio.create_task(_increment_stash_playcount(raw_id))
-    return JSONResponse({"Played": True, "PlayCount": 1, "PlaybackPositionTicks": 0, "Key": item_id})
+        
+        # Fetch the real watch status to pass back to the UI
+        scene = stash_client.get_scene(raw_id)
+        if scene:
+            # We add +1 because the async background task hasn't finished saving to Stash yet
+            play_count = (scene.get("play_count") or 0) + 1
+            
+    return JSONResponse({
+        "Played": True, 
+        "PlayCount": play_count, 
+        "PlaybackPositionTicks": 0, 
+        "Key": item_id
+    })
+
+async def endpoint_mark_favorite(request: Request):
+    """Fired when a user clicks the Heart/Favorite icon to turn it ON."""
+    item_id = decode_id(request.path_params.get("item_id", ""))
+    
+    played = False
+    play_count = 0
+    resume_ticks = 0
+    
+    if item_id.startswith("scene-"):
+        raw_id = item_id.replace("scene-", "")
+        logger.info(f"💖 Favorite (ON) triggered for {item_id}. Incrementing O-Counter.")
+        asyncio.create_task(_increment_stash_o_counter(raw_id))
+        
+        # Fetch the REAL watch status so Fladder doesn't fake a checkmark
+        scene = stash_client.get_scene(raw_id)
+        if scene:
+            play_count = scene.get("play_count") or 0
+            played = play_count > 0
+            resume_ticks = int((scene.get("resume_time") or 0) * 10000000)
+        
+    return JSONResponse({
+        "IsFavorite": True, 
+        "Played": played,
+        "PlayCount": play_count,
+        "PlaybackPositionTicks": resume_ticks,
+        "Key": item_id
+    })
+
+async def endpoint_unmark_favorite(request: Request):
+    """Fired when a user clicks the Heart/Favorite icon to turn it OFF."""
+    item_id = decode_id(request.path_params.get("item_id", ""))
+    
+    played = False
+    play_count = 0
+    resume_ticks = 0
+    
+    if item_id.startswith("scene-"):
+        raw_id = item_id.replace("scene-", "")
+        logger.info(f"💖 Favorite (OFF) triggered for {item_id}. REPURPOSED: Incrementing O-Counter anyway!")
+        asyncio.create_task(_increment_stash_o_counter(raw_id))
+        
+        # Fetch the REAL watch status so Fladder doesn't fake a checkmark
+        scene = stash_client.get_scene(raw_id)
+        if scene:
+            play_count = scene.get("play_count") or 0
+            played = play_count > 0
+            resume_ticks = int((scene.get("resume_time") or 0) * 10000000)
+        
+    return JSONResponse({
+        "IsFavorite": False, 
+        "Played": played,
+        "PlayCount": play_count,
+        "PlaybackPositionTicks": resume_ticks,
+        "Key": item_id
+    })
+
+async def endpoint_mark_unplayed(request: Request):
+    """Fired when a user clicks the Checkmark to un-watch an item."""
+    item_id = decode_id(request.path_params.get("item_id", ""))
+    play_count = 1
+    
+    if item_id.startswith("scene-"):
+        raw_id = item_id.replace("scene-", "")
+        logger.info(f"❌ 'Mark as Unwatched' (OFF) triggered for {item_id}. REPURPOSED: Incrementing Play Count anyway!")
+        
+        # REPURPOSED: We call the INCREMENT function here too!
+        asyncio.create_task(_increment_stash_playcount(raw_id))
+        
+        scene = stash_client.get_scene(raw_id)
+        if scene:
+            play_count = (scene.get("play_count") or 0) + 1
+            
+    # We still return Played: False to Jellyfin so the UI checkmark toggles off, 
+    # allowing the user to click it again.
+    return JSONResponse({
+        "Played": False, 
+        "PlayCount": play_count, 
+        "PlaybackPositionTicks": 0, 
+        "Key": item_id
+    })

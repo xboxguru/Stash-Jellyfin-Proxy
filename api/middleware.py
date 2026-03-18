@@ -45,33 +45,31 @@ class AuthenticationMiddleware:
             return
 
         # FORCE LOWERCASE PATH FOR ROUTING
-        path = scope.get("path", "")
-        scope["path"] = path.lower()
+        original_path = scope.get("path", "")
+        path_lower = original_path.lower()
+        scope["path"] = path_lower
         
         method = scope.get("method", "UNK")
         client_ip = get_client_ip(scope)
-        logger.info(f"🔍 INCOMING REQUEST: {method} {path} from {client_ip}")
+        logger.info(f"🔍 INCOMING REQUEST: {method} {original_path} from {client_ip}")
 
         # FIX 3: ALWAYS allow mobile apps to perform CORS preflight checks!
         if method == "OPTIONS":
             await self.app(scope, receive, send)
             return
 
-        path_lower = path.lower()
-        
-        # 1. STRIP PREFIXES: Fixes Findroid, Jellycon, and ErsatzTV prepending /emby or /jellyfin
+        # 1. STRIP PREFIXES (Using the already lowercased path!)
         if path_lower.startswith("/emby/"):
-            scope["path"] = path[5:]
+            scope["path"] = path_lower[5:]
         elif path_lower == "/emby":
             scope["path"] = "/"
         elif path_lower.startswith("/jellyfin/"):
-            scope["path"] = path[9:]
+            scope["path"] = path_lower[9:]
         elif path_lower == "/jellyfin":
             scope["path"] = "/"
 
         # Update local variables after potentially stripping prefix
-        path = scope.get("path", "")
-        path_lower = path.lower()
+        path_lower = scope["path"]
 
         # 2. Check if the path is allowed without authentication
         is_public = path_lower in PUBLIC_ENDPOINTS
@@ -120,7 +118,7 @@ class AuthenticationMiddleware:
                 
                 # If the token is missing or invalid, block access to the API data
                 if not token or token not in getattr(state, "ui_sessions", set()):
-                    logger.warning(f"❌ UI AUTH REQUIRED for {path}")
+                    logger.warning(f"❌ UI AUTH REQUIRED for {original_path}")
                     response_body = b'{"error": "UI Authentication Required"}'
                     await send({
                         "type": "http.response.start",
@@ -193,7 +191,7 @@ class AuthenticationMiddleware:
             
             if not path_lower.startswith("/api/") and not path_lower.startswith("/web/"):
                 query = scope.get('query_string', b'').decode('utf-8')
-                full_url = f"{path}?{query}" if query else path
+                full_url = f"{original_path}?{query}" if query else original_path
                 logger.info(f"JELLYFIN CLIENT -> {scope['method']} {full_url}")
             
             await self.app(scope, receive, send)
@@ -205,11 +203,11 @@ class AuthenticationMiddleware:
         
         # Enhanced debugging logging so we can see EXACTLY why a client failed
         if token:
-            logger.warning(f"🚫 Unauthorized access attempt to {path} from {client_ip} | Reason: Token mismatch. Received: '{token}' | Expected: '{expected_key}'")
+            logger.warning(f"🚫 Unauthorized access attempt to {original_path} from {client_ip} | Reason: Token mismatch. Received: '{token}' | Expected: '{expected_key}'")
         else:
             # DEBUG: Print the raw headers to see how Jellycon is hiding the token
             safe_headers = {k.decode('latin1'): v.decode('utf-8', errors='ignore') for k, v in scope.get("headers", [])}
-            logger.warning(f"🚫 Unauthorized access attempt to {path} from {client_ip} | Reason: No token provided. Headers: {safe_headers}")
+            logger.warning(f"🚫 Unauthorized access attempt to {original_path} from {client_ip} | Reason: No token provided. Headers: {safe_headers}")
         
         response_body = b'{"error": "Unauthorized"}'
         await send({
