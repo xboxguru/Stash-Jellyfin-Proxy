@@ -3,23 +3,21 @@ import asyncio
 import httpx
 import datetime
 import re
+import hashlib
 from starlette.responses import JSONResponse
 from starlette.requests import Request
 import config
 from core import stash_client
 from core import jellyfin_mapper
-from core.jellyfin_mapper import encode_id, decode_id
+from core.jellyfin_mapper import encode_id, decode_id, hyphens
 
 logger = logging.getLogger(__name__)
 
 def _get_query_param(request: Request, param_name: str, default=None):
     """Safely extracts query parameters with case-insensitive matching."""
     values = []
-    
-    # Query parameters are case-sensitive in HTTP. We must check against lower()
     target_param = param_name.lower()
     
-    # Iterate through all raw query keys provided by the client
     for key, value in request.query_params.multi_items():
         if key.lower() == target_param:
             values.append(value)
@@ -33,42 +31,35 @@ async def _get_libraries():
     server_id = getattr(config, "SERVER_ID", "stash-proxy")
     cache_version = getattr(config, "CACHE_VERSION", 0)
     
-    def hyphens(h):
-        if len(h) != 32: return h
-        return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
-    
     def build_view(name, view_id):
+        logo_hash = hashlib.md5(f"stash-logo-{cache_version}".encode()).hexdigest()
+        
         return {
             "Name": name, "ServerId": server_id, "Id": view_id, "ItemId": view_id,
-            "ChannelId": None, "IsFolder": True, "Type": "CollectionFolder",
+            "ChannelId": None, "IsFolder": True, 
+            "Type": "UserView", # FIX 1: Enforce strict UserView type for Fladder
             "UserData": {"PlaybackPositionTicks": 0, "PlayCount": 0, "IsFavorite": False, "Played": False, "Key": hyphens(view_id), "ItemId": view_id},
             "PrimaryImageAspectRatio": 1.7777777777777777, 
             "CollectionType": "movies",
             "LibraryOptions": {"PathInfos": []}, "Locations": [],
-            
-            # --- CACHE BUSTER APPLIED HERE ---
-            "ImageTags": {"Primary": f"stash-logo-{cache_version}", "Thumb": f"stash-logo-{cache_version}"}, 
+            "ImageTags": {"Primary": logo_hash, "Thumb": logo_hash}, 
             "HasPrimaryImage": True, 
             "HasThumb": True,
             "HasBackdrop": True,
-            "BackdropImageTags": [f"stash-logo-{cache_version}"], 
-            
+            "BackdropImageTags": [logo_hash], 
             "ImageBlurHashes": {}, "LocationType": "FileSystem", "MediaType": "Unknown"
         }
 
-    # MULTI-LIBRARY DEFAULTS (Updated Names)
     views = [
         build_view("Scenes (Everything)", encode_id("root", "scenes")),
         build_view("Scenes (Organized)", encode_id("root", "organized")),
         build_view("Scenes (Tagged)", encode_id("root", "tagged"))
     ]
     
-    # --- DYNAMIC RECENT FOLDER ---
     recent_days = getattr(config, "RECENT_DAYS", 14)
     if recent_days > 0:
         views.insert(1, build_view(f"Recently Added ({recent_days} Days)", encode_id("root", "recent")))
     
-    # FETCH TAG IDs AUTOMATICALLY
     tag_names = getattr(config, "TAG_GROUPS", [])
     if tag_names:
         stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
@@ -89,8 +80,6 @@ async def _get_libraries():
                     if match:
                         view_id = encode_id("tag", str(match['id']))
                         views.append(build_view(match['name'], view_id))
-                    else:
-                        logger.warning(f"Tag Group '{name}' defined in config but not found in Stash.")
             except Exception as e:
                 logger.error(f"Failed to auto-resolve tag IDs: {e}")
 
@@ -101,8 +90,23 @@ async def endpoint_views(request: Request):
     return JSONResponse({"Items": views, "TotalRecordCount": len(views), "StartIndex": 0})
 
 async def endpoint_virtual_folders(request: Request):
+    # FIX 2: Enforce strict VirtualFolderInfo schema so Fladder doesn't drop the array
     views = await _get_libraries() 
-    return JSONResponse(views)
+    virtual_folders = []
+    
+    for v in views:
+        virtual_folders.append({
+            "Name": v.get("Name"),
+            "Locations": [],
+            "CollectionType": v.get("CollectionType", "movies"),
+            "LibraryOptions": {},
+            "ItemId": v.get("Id"),
+            "PrimaryImageItemId": v.get("Id"),
+            "RefreshProgress": 0,
+            "RefreshStatus": "Idle"
+        })
+        
+    return JSONResponse(virtual_folders)
 
 async def endpoint_items(request: Request):
     parent_id = _get_query_param(request, "ParentId")
@@ -115,7 +119,6 @@ async def endpoint_items(request: Request):
     try: limit = int(_get_query_param(request, "Limit", getattr(config, "DEFAULT_PAGE_SIZE", 50)))
     except: limit = getattr(config, "DEFAULT_PAGE_SIZE", 50)
 
-    # 1. ROOT DIRECTORY INTERCEPT
     search_term = _get_query_param(request, "SearchTerm")
     person_ids = (_get_query_param(request, "ArtistIds") or _get_query_param(request, "PeopleIds") or _get_query_param(request, "PersonIds"))
     tags_param = (_get_query_param(request, "Tags") or _get_query_param(request, "TagIds") or _get_query_param(request, "GenreIds"))
@@ -128,11 +131,9 @@ async def endpoint_items(request: Request):
             views = await _get_libraries()
             return JSONResponse({"Items": views, "TotalRecordCount": len(views), "StartIndex": 0})
 
-    # 2. LEAF NODE TERMINATION
-    if decoded_parent_id and (decoded_parent_id.startswith("scene-") or decoded_parent_id.startswith("person-")):
+    if decoded_parent_id and decoded_parent_id.startswith("scene-"):
         return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": 0})
 
-    # 3. Ids BATCH FETCH (Tunarr/ErsatzTV)
     if ids_param:
         raw_ids = []
         for i in ids_param.split(","):
@@ -172,7 +173,6 @@ async def endpoint_items(request: Request):
                 except Exception: pass
         return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": len(jellyfin_items), "StartIndex": 0})
 
-    # 4. NORMAL SEARCH & FILTER ENGINE
     filter_args = {"sort": "created_at", "direction": "DESC"}
     scene_filter = {} 
     original_limit = limit
@@ -186,7 +186,6 @@ async def endpoint_items(request: Request):
         if raw_p_ids:
             scene_filter["performers"] = {"value": raw_p_ids, "modifier": "INCLUDES"}
 
-    # --- MULTI-LIBRARY DIRECTORY ROUTING ---
     is_folder_override = False
     
     if decoded_parent_id:
@@ -198,17 +197,22 @@ async def endpoint_items(request: Request):
         elif decoded_parent_id == "root-tagged":
             scene_filter["tags"] = {"modifier": "NOT_NULL"}
             is_folder_override = True
-        # --- NEW: DYNAMIC RECENT FILTER ---
         elif decoded_parent_id == "root-recent":
             recent_days = getattr(config, "RECENT_DAYS", 14)
-            # Calculate the exact timestamp from X days ago
             cutoff_date = (datetime.datetime.utcnow() - datetime.timedelta(days=recent_days)).strftime("%Y-%m-%dT%H:%M:%S")
-            # Apply Stash's native Timestamp filter
             scene_filter["created_at"] = {"value": cutoff_date, "modifier": "GREATER_THAN"}
             is_folder_override = True
         elif decoded_parent_id.startswith("tag-"):
             raw_tag_id = decoded_parent_id.replace("tag-", "")
             scene_filter["tags"] = {"value": [raw_tag_id], "modifier": "INCLUDES"}
+            is_folder_override = True
+        elif decoded_parent_id.startswith("person-"):
+            raw_person_id = decoded_parent_id.replace("person-", "")
+            scene_filter["performers"] = {"value": [raw_person_id], "modifier": "INCLUDES"}
+            is_folder_override = True
+        elif decoded_parent_id.startswith("studio-"):
+            raw_studio_id = decoded_parent_id.replace("studio-", "")
+            scene_filter["studios"] = {"value": [raw_studio_id], "modifier": "INCLUDES"}
             is_folder_override = True
 
     if item_types:
@@ -228,20 +232,39 @@ async def endpoint_items(request: Request):
     if _get_query_param(request, "SortOrder", "").lower() == "ascending": filter_args["direction"] = "ASC"
 
     filter_list = [f.strip() for f in filters_string.split(",")] if filters_string else []
-    if "IsUnplayed" in filter_list: scene_filter["play_count"] = {"value": 0, "modifier": "EQUALS"}
-    elif "IsPlayed" in filter_list: scene_filter["play_count"] = {"value": 0, "modifier": "GREATER_THAN"}
-    if "IsFavorite" in filter_list: scene_filter["o_counter"] = {"value": 0, "modifier": "GREATER_THAN"}
+    is_favorite_param = _get_query_param(request, "isFavorite", "").lower()
+    is_played_param = _get_query_param(request, "isPlayed", "").lower()
+    
+    if "IsFavorite" in filter_list or is_favorite_param == "true": 
+        scene_filter["o_counter"] = {"value": 0, "modifier": "GREATER_THAN"}
+    elif is_favorite_param == "false":
+        scene_filter["o_counter"] = {"value": 0, "modifier": "EQUALS"}
+        
+    if "IsUnplayed" in filter_list or is_played_param == "false": 
+        scene_filter["play_count"] = {"value": 0, "modifier": "EQUALS"}
+    elif "IsPlayed" in filter_list or is_played_param == "true": 
+        scene_filter["play_count"] = {"value": 0, "modifier": "GREATER_THAN"}
+
     if "IsResumable" in filter_list:
         filter_args["sort"] = "updated_at" 
         filter_args["direction"] = "DESC"
-        limit = -1 
+        limit = 100 
 
     years = _get_query_param(request, "Years")
     if years:
-        y_l = [int(y) for y in years.split(",") if y.isdigit()]
+        y_l = []
+        for y in years.split(","):
+            dec_y = decode_id(y)
+            match = re.search(r'\d{4}', dec_y)
+            if match: y_l.append(int(match.group()))
         if y_l: scene_filter["date"] = {"value": f"{min(y_l)}-01-01", "value2": f"{max(y_l)}-12-31", "modifier": "BETWEEN"}
+        
     if tags_param:
-        raw_t = [t.replace("tag-", "") for t in tags_param.split(",") if t.replace("tag-", "").isdigit()]
+        raw_t = []
+        for t in tags_param.split(","):
+            dec_t = decode_id(t)
+            match = re.search(r'\d+', dec_t)
+            if match: raw_t.append(match.group())
         if raw_t: scene_filter["tags"] = {"value": raw_t, "modifier": "INCLUDES"}
 
     if search_term: filter_args["q"] = search_term
@@ -283,18 +306,31 @@ async def endpoint_items(request: Request):
 async def endpoint_item_details(request: Request):
     item_id = request.path_params.get("item_id", "")
     decoded_id = decode_id(item_id)
+    cache_version = getattr(config, "CACHE_VERSION", 0)
+    server_id = getattr(config, "SERVER_ID", "stash-proxy")
     
-    # 1. Catch Root Folders and Tags
     if decoded_id.startswith("root-") or decoded_id.startswith("tag-"):
         safe_id = encode_id("root", decoded_id.replace("root-", "")) if decoded_id.startswith("root-") else encode_id("tag", decoded_id.replace("tag-", ""))
-        return JSONResponse({"Name": "Folder", "Id": safe_id, "Type": "CollectionFolder", "IsFolder": True})
+        return JSONResponse({
+            "Name": "Folder", 
+            "SortName": "Folder",
+            "Id": safe_id, 
+            "ServerId": server_id,
+            "Type": "UserView", # FIX: Ensure detail queries for folders also return UserView
+            "IsFolder": True
+        })
 
-    # 2. Catch Studios
     if decoded_id.startswith("studio-"):
         safe_id = encode_id("studio", decoded_id.replace("studio-", ""))
-        return JSONResponse({"Name": "Studio", "Id": safe_id, "Type": "Studio", "IsFolder": True})
+        return JSONResponse({
+            "Name": "Studio", 
+            "SortName": "Studio",
+            "Id": safe_id, 
+            "ServerId": server_id,
+            "Type": "Studio", 
+            "IsFolder": False
+        })
 
-    # 3. Catch Performers (Actors)
     if decoded_id.startswith("person-"):
         raw_id = decoded_id.replace("person-", "")
         stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
@@ -310,20 +346,44 @@ async def endpoint_item_details(request: Request):
                 data = resp.json()
                 if data and "data" in data and data["data"].get("findPerformer"):
                     perf = data["data"]["findPerformer"]
+                    
+                    p_tag = hashlib.md5(f"person-{raw_id}-v{cache_version}".encode()).hexdigest()
+                    perf_name = perf.get("name", "Unknown Person")
+                    
                     return JSONResponse({
-                        "Name": perf.get("name", "Unknown Person"),
+                        "Name": perf_name,
+                        "SortName": perf_name,
                         "Id": item_id,
+                        "ServerId": server_id,
                         "Type": "Person",
-                        "IsFolder": True,
-                        "ImageTags": {"Primary": "primary"} if perf.get("image_path") else {},
-                        "HasPrimaryImage": bool(perf.get("image_path"))
+                        "IsFolder": False,
+                        "ImageTags": {"Primary": p_tag} if perf.get("image_path") else {},
+                        "HasPrimaryImage": bool(perf.get("image_path")),
+                        
+                        "MovieCount": 1,
+                        "ChildCount": 1,
+                        
+                        "UserData": {
+                            "PlaybackPositionTicks": 0,
+                            "PlayCount": 0,
+                            "IsFavorite": False,
+                            "Played": False,
+                            "Key": f"Person-{perf_name}",
+                            "ItemId": item_id
+                        }
                     })
             except Exception as e:
                 logger.error(f"Failed to fetch performer details: {e}")
                 
-        return JSONResponse({"Name": "Person", "Id": item_id, "Type": "Person", "IsFolder": True})
+        return JSONResponse({
+            "Name": "Person", 
+            "SortName": "Person",
+            "Id": item_id, 
+            "ServerId": server_id,
+            "Type": "Person", 
+            "IsFolder": False
+        })
         
-    # 4. Finally, if it's none of the above, it MUST be a Scene.
     number_match = re.search(r'\d+', decoded_id)
     if not number_match:
         return JSONResponse({"error": f"Invalid ID format: {decoded_id}"}, status_code=400)
@@ -355,25 +415,46 @@ async def endpoint_tags(request: Request):
         except Exception:
             stash_tags = []
 
-    jelly_tags = [{"Name": t.get("name"), "Id": f"tag-{t.get('id')}", "Type": item_type} for t in stash_tags]
+    jelly_tags = [{"Name": t.get("name"), "Id": encode_id("tag", str(t.get('id'))), "Type": item_type} for t in stash_tags]
     return JSONResponse({"Items": jelly_tags, "TotalRecordCount": len(jelly_tags), "StartIndex": 0})
 
 async def endpoint_years(request: Request):
     current_year = datetime.datetime.now().year
-    years = [{"Name": str(y), "Id": str(y), "Type": "Year", "ProductionYear": y} for y in range(current_year, 1989, -1)]
+    years = [{"Name": str(y), "Id": encode_id("year", str(y)), "Type": "Year", "ProductionYear": y} for y in range(current_year, 1989, -1)]
     return JSONResponse({"Items": years, "TotalRecordCount": len(years), "StartIndex": 0})
 
 async def endpoint_studios(request: Request):
     studios = stash_client.get_all_studios()
-    img_version = getattr(config, "IMAGE_VERSION", 0)
-    jelly_studios = [{
-        "Name": s.get("name"), "Id": f"studio-{s.get('id')}", "Type": "Studio",
-        "ImageTags": {"Primary": f"s-{s.get('id')}-v{img_version}"}, "HasPrimaryImage": bool(s.get("image_path"))
-    } for s in studios]
+    cache_version = getattr(config, "CACHE_VERSION", 0)
+    
+    jelly_studios = []
+    for s in studios:
+        s_tag = hashlib.md5(f"studio-{s.get('id')}-v{cache_version}".encode()).hexdigest()
+        jelly_studios.append({
+            "Name": s.get("name"), 
+            "Id": encode_id("studio", str(s.get('id'))), 
+            "Type": "Studio",
+            "ImageTags": {"Primary": s_tag}, 
+            "HasPrimaryImage": bool(s.get("image_path"))
+        })
+        
     return JSONResponse({"Items": jelly_studios, "TotalRecordCount": len(jelly_studios), "StartIndex": 0})
 
 async def endpoint_empty_list(request: Request):
     return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": 0})
+
+async def endpoint_empty_array(request: Request):
+    """Provides a raw empty array for endpoints that do not use pagination."""
+    return JSONResponse([])
+
+async def endpoint_filters(request: Request):
+    return JSONResponse({
+        "Tags": [],
+        "Genres": [],
+        "Studios": [],
+        "OfficialRatings": [],
+        "Years": []
+    })
 
 async def endpoint_latest(request: Request):
     parent_id = _get_query_param(request, "ParentId")
@@ -382,7 +463,6 @@ async def endpoint_latest(request: Request):
     scene_filter = {}
     is_folder_override = False
     
-    # Ensure the "Latest" shelf on the home screen respects the folder choice
     if decoded_parent_id:
         if decoded_parent_id == "root-scenes":
             is_folder_override = True
@@ -392,7 +472,6 @@ async def endpoint_latest(request: Request):
         elif decoded_parent_id == "root-tagged":
             scene_filter["tags"] = {"modifier": "NOT_NULL"}
             is_folder_override = True
-        # --- NEW: DYNAMIC RECENT FILTER ---
         elif decoded_parent_id == "root-recent":
             recent_days = getattr(config, "RECENT_DAYS", 14)
             cutoff_date = (datetime.datetime.utcnow() - datetime.timedelta(days=recent_days)).strftime("%Y-%m-%dT%H:%M:%S")
@@ -419,4 +498,4 @@ async def endpoint_latest(request: Request):
         except Exception:
             pass
             
-    return JSONResponse(jellyfin_items)
+    return JSONResponse(jellyfin_items) 

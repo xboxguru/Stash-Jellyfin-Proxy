@@ -150,7 +150,8 @@ async def endpoint_stream(request: Request):
         async for chunk in resp.aiter_bytes(chunk_size=8192):
             yield chunk
 
-    client = httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False))
+    # THE FIX: Disable the httpx timeout for massive continuous downloads!
+    client = httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False), timeout=None)
     try:
         req = client.build_request(request.method, stash_stream_url, headers=headers)
         r = await client.send(req, stream=True)
@@ -163,6 +164,10 @@ async def endpoint_stream(request: Request):
         status_code = r.status_code
         if range_header and status_code == 206 and "content-range" not in resp_headers:
             logger.warning(f"Stash returned 206 but missing Content-Range for scene {raw_id}")
+            
+        # Tell Android to save the file to disk
+        if "download" in request.url.path.lower():
+            resp_headers["Content-Disposition"] = f'attachment; filename="{raw_id}.mp4"'
         
         if request.method == "HEAD":
             await r.aclose()
@@ -353,4 +358,36 @@ async def endpoint_mark_unplayed(request: Request):
         "PlayCount": play_count, 
         "PlaybackPositionTicks": 0, 
         "Key": item_id
+    })
+
+async def endpoint_update_userdata(request: Request):
+    """
+    Satisfies Fladder's aggressive UserData sync requests before downloading,
+    fetching the real data from Stash to ensure offline databases stay perfectly synced.
+    """
+    item_id = decode_id(request.path_params.get("item_id", ""))
+    
+    play_count = 0
+    is_favorite = False
+    played = False
+    resume_ticks = 0
+
+    if item_id.startswith("scene-"):
+        raw_id = item_id.replace("scene-", "")
+        # Fetch the real current stats from Stash
+        scene = stash_client.get_scene(raw_id)
+        
+        if scene:
+            play_count = scene.get("play_count") or 0
+            played = play_count > 0
+            is_favorite = (scene.get("o_counter") or 0) > 0
+            resume_ticks = int((scene.get("resume_time") or 0) * 10000000)
+
+    return JSONResponse({
+        "PlaybackPositionTicks": resume_ticks,
+        "PlayCount": play_count,
+        "IsFavorite": is_favorite,
+        "Played": played,
+        "Key": item_id,
+        "ItemId": item_id
     })

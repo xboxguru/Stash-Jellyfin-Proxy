@@ -49,7 +49,13 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
     
     final_parent_id = parent_id if parent_id else encode_id("root", "scenes")
 
-    # SAFE FALLBACKS: Use 'or 0' instead of '.get(key, 0)' to catch explicit nulls
+    primary_tag = hashlib.md5(f"scene-{raw_id}-v{cache_version}".encode()).hexdigest()
+    backdrop_tag = hashlib.md5(f"backdrop-{raw_id}-v{cache_version}".encode()).hexdigest()
+    etag_hash = hashlib.md5(f"etag-{raw_id}-v{cache_version}".encode()).hexdigest()
+
+    # FIX: A pre-calculated generic valid BlurHash string to prevent Fladder decoder crashes
+    fake_blurhash = "LKO2?U%2Tw=w]~RBVZRi};RPxuwH"
+
     resume_time_seconds = scene.get("resume_time") or 0
     resume_ticks = int(resume_time_seconds * 10000000)
     
@@ -58,6 +64,8 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
     duration_seconds = (files[0].get("duration") or 0) if files else 0
     runtime_ticks = int(duration_seconds * 10000000)
     
+    file_size = int(files[0].get("size") or 0) if files else 0
+
     if path:
         path = path.replace("\\", "/")
 
@@ -82,7 +90,6 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
     tags = scene.get("tags") or []
     performers = scene.get("performers") or []
     
-    # --- SEPARATE WATCHES FROM FAVORITES ---
     play_count = scene.get("play_count") or 0
     o_counter = scene.get("o_counter") or 0
     is_favorite = o_counter > 0
@@ -129,20 +136,27 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
         "Type": "Movie",
         "IsFolder": False,
         "MediaType": "Video",
+        "CanDownload": True,
         "ParentId": final_parent_id,
         "DateLastSaved": now_iso, 
         
         "ChannelId": None,
         "Container": container,
-        "ImageBlurHashes": {},
         
         "HasPrimaryImage": True,
         "HasBackdrop": True,
-        "ImageTags": {"Primary": f"{raw_id}-v{cache_version}"}, 
+        "ImageTags": {"Primary": primary_tag, "Thumb": primary_tag}, 
         "PrimaryImageAspectRatio": 1.777,
         "VideoType": "VideoFile",
         "Protocol": "File",
-        "BackdropImageTags": [f"{raw_id}-v{cache_version}-backdrop"],
+        "BackdropImageTags": [backdrop_tag],
+        
+        # FIX: Populate the BlurHash maps so Flutter doesn't crash on null
+        "ImageBlurHashes": {
+            "Primary": {primary_tag: fake_blurhash},
+            "Thumb": {primary_tag: fake_blurhash},
+            "Backdrop": {backdrop_tag: fake_blurhash}
+        },
         
         "RunTimeTicks": runtime_ticks,
         "OfficialRating": "XXX",
@@ -150,7 +164,7 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
         "Width": width,
         "Height": height,
 
-        "Etag": f"etag-{raw_id}-v{cache_version}",
+        "Etag": etag_hash,
         "Taglines": [],
         "ProviderIds": {},
         "Chapters": [],
@@ -231,34 +245,44 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
             p_name = p.get("name")
             p_id = p.get("id")
             if p_name and p_id:
-                p_tag = f"p-{p_id}-v{cache_version}"
                 has_image = bool(p.get("image_path"))
             
                 person = {
                     "Name": p_name,
                     "Type": "Actor",
-                    "Role": "",
+                    "Role": "Actor",
                     "Id": encode_id("person", str(p_id)),
-                    "PrimaryImageTag": p_tag if has_image else None
+                    "ImageBlurHashes": {}
                 }
+                
                 if has_image:
-                    person["ImageTags"] = {"Primary": p_tag}
+                    p_tag = hashlib.md5(f"person-{p_id}-v{cache_version}".encode()).hexdigest()
+                    person["PrimaryImageTag"] = p_tag
+                    # FIX: Inject the valid BlurHash string so the Dart parser accepts the image
+                    person["ImageBlurHashes"] = {
+                        "Primary": {p_tag: fake_blurhash}
+                    }
+                    
                 people_list.append(person)
         item["People"] = people_list
 
     if studio_obj and studio_name:
         studio_id = studio_obj.get("id")
         has_studio_image = bool(studio_obj.get("image_path"))
-        s_tag = f"s-{studio_id}-v{cache_version}"
         
         studio_item = {
             "Name": studio_name,
-            "Id": encode_id("studio", str(studio_id))
+            "Id": encode_id("studio", str(studio_id)),
+            "ImageBlurHashes": {}
         }
         
         if has_studio_image:
+            s_tag = hashlib.md5(f"studio-{studio_id}-v{cache_version}".encode()).hexdigest()
             studio_item["PrimaryImageTag"] = s_tag
             studio_item["ImageTags"] = {"Primary": s_tag}
+            studio_item["ImageBlurHashes"] = {
+                "Primary": {s_tag: fake_blurhash}
+            }
             
         item["Studios"] = [studio_item]
 
@@ -286,7 +310,8 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
                 "Formats": [],
                 "RequiredHttpHeaders": {},
                 "Name": title,
-                "Size": 0,
+                "Size": file_size,
+                "ETag": etag_hash,
                 
                 "ReadAtNativeFramerate": False,
                 "IgnoreDts": False,

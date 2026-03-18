@@ -42,7 +42,6 @@ logging.basicConfig(
 
 logger = logging.getLogger("proxy_main")
 
-# Define the URL Routes
 routes = [
     # --- UI Routes (Proxy Web Dashboard) ---
     Route("/", ui_routes.serve_index, methods=["GET"]),
@@ -82,6 +81,13 @@ routes = [
     Route("/users/{user_id}/items/latest", library_routes.endpoint_latest, methods=["GET"]),
     Route("/items/latest", library_routes.endpoint_latest, methods=["GET"]),
     Route("/items/suggestions", library_routes.endpoint_empty_list, methods=["GET"]),
+    
+    # --- ANDROID TV & WHOLPHIN STUBS ---
+    Route("/sessions/capabilities", auth_routes.endpoint_system_ping, methods=["POST"]),
+    Route("/movies/recommendations", library_routes.endpoint_empty_array, methods=["GET"]),
+    Route("/items/filters", library_routes.endpoint_filters, methods=["GET"]),
+    Route("/items/filters2", library_routes.endpoint_filters, methods=["GET"]),
+    Route("/mediasegments/{item_id}", library_routes.endpoint_empty_list, methods=["GET"]),
     Route("/shows/nextup", library_routes.endpoint_empty_list, methods=["GET"]),
     Route("/genres", library_routes.endpoint_tags, methods=["GET"]),
     Route("/users/{user_id}/genres", library_routes.endpoint_tags, methods=["GET"]),
@@ -98,6 +104,18 @@ routes = [
     Route("/users/{user_id}/items/{item_id}", library_routes.endpoint_item_details, methods=["GET"]),
     Route("/items/{item_id}", library_routes.endpoint_item_details, methods=["GET"]),
     
+    # Pre-Flight Detail Stubs (Prevents Wholphin Movie 404 Crashes)
+    Route("/users/{user_id}/items/{item_id}/thememedia", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/users/{user_id}/items/{item_id}/themesongs", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/users/{user_id}/items/{item_id}/similar", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/users/{user_id}/items/{item_id}/specialfeatures", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/users/{user_id}/items/{item_id}/intros", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/items/{item_id}/thememedia", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/items/{item_id}/themesongs", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/items/{item_id}/similar", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/items/{item_id}/specialfeatures", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/items/{item_id}/intros", library_routes.endpoint_empty_list, methods=["GET"]),
+    
     # Catch ALL Images (Primary, Backdrop, Thumb, Logo)
     Route("/items/{item_id}/images/{image_type}", image_routes.endpoint_item_image, methods=["GET"]),
     Route("/items/{item_id}/images/{image_type}/{image_index}", image_routes.endpoint_item_image, methods=["GET"]),
@@ -107,6 +125,7 @@ routes = [
     Route("/users/{user_id}/items/{item_id}/images/{image_type}", image_routes.endpoint_item_image, methods=["GET"]),
     
     # --- Playback ---
+    Route("/users/{user_id}/items/{item_id}/playbackinfo", playback_routes.endpoint_playback_info, methods=["POST", "GET"]),
     Route("/items/{item_id}/playbackinfo", playback_routes.endpoint_playback_info, methods=["POST", "GET"]),
     Route("/videos/{item_id}/stream.mp4", playback_routes.endpoint_stream, methods=["GET", "HEAD"]),
     Route("/videos/{item_id}/stream", playback_routes.endpoint_stream, methods=["GET", "HEAD"]),
@@ -114,11 +133,13 @@ routes = [
     Route("/sessions/playing/progress", playback_routes.endpoint_sessions_playing, methods=["POST"]),
     Route("/sessions/playing/stopped", playback_routes.endpoint_sessions_stopped, methods=["POST"]),
     
-    # --- Watched Status (Handles both /users/ID/ and /userplayeditems/ routing patterns) ---
+    # --- Watched Status ---
     Route("/users/{user_id}/playeditems/{item_id}", playback_routes.endpoint_mark_played, methods=["POST"]),
     Route("/users/{user_id}/playeditems/{item_id}", playback_routes.endpoint_mark_unplayed, methods=["DELETE"]),
     Route("/userplayeditems/{item_id}", playback_routes.endpoint_mark_played, methods=["POST"]),
     Route("/userplayeditems/{item_id}", playback_routes.endpoint_mark_unplayed, methods=["DELETE"]),
+    Route("/useritems/{item_id}/userdata", playback_routes.endpoint_update_userdata, methods=["POST"]),
+    Route("/users/{user_id}/items/{item_id}/userdata", playback_routes.endpoint_update_userdata, methods=["POST"]),
     
     # --- Favorites ---
     Route("/users/{user_id}/favoriteitems/{item_id}", playback_routes.endpoint_mark_favorite, methods=["POST"]),
@@ -130,6 +151,10 @@ routes = [
     Route("/users/{user_id}/displaypreferences/{display_id}", library_routes.endpoint_empty_list, methods=["GET"]),
     Route("/users/{user_id}/policy", auth_routes.endpoint_user, methods=["GET"]),
     Route("/users/{user_id}/configuration", auth_routes.endpoint_user, methods=["GET"]),
+
+    # --- Downloads ---
+    Route("/items/{item_id}/download", playback_routes.endpoint_stream, methods=["GET"]),
+    Route("/users/{user_id}/items/{item_id}/download", playback_routes.endpoint_stream, methods=["GET"]),
 ]
 
 # Initialize the Starlette App

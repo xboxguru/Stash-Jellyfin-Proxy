@@ -65,7 +65,7 @@ def _get_full_user():
             "ForceRemoteSourceTranscoding": False,
             "EnableContentDeletion": False,
             "EnableContentDeletionFromFolders": [],
-            "EnableContentDownloading": False,
+            "EnableContentDownloading": True,
             "EnableSyncTranscoding": False,
             "EnableMediaConversion": False,
             "EnabledDevices": [],
@@ -185,10 +185,11 @@ async def endpoint_system_info_public(request: Request):
     return JSONResponse({
         "LocalAddress": f"http://{host}",
         "ServerName": getattr(config, "SERVER_NAME", "Stash Proxy"),
-        "Version": "10.11.6",            # Your client version
-        "ProductName": "Jellyfin Server", # THE KEY
+        "Version": "10.11.6",           
+        "ProductName": "Jellyfin Server", 
         "OperatingSystem": "Linux",
-        "Id": getattr(config, "SERVER_ID", "stash-proxy-unique-id")
+        "Id": getattr(config, "SERVER_ID", "stash-proxy-unique-id"),
+        "StartupWizardCompleted": True   
     })
 
 async def endpoint_system_info(request: Request):
@@ -200,7 +201,8 @@ async def endpoint_system_info(request: Request):
         "Version": "10.11.6",
         "ProductName": "Jellyfin Server",
         "OperatingSystem": "Linux",
-        "Id": getattr(config, "SERVER_ID", "") or "stash-proxy-server-id-01"
+        "Id": getattr(config, "SERVER_ID", "") or "stash-proxy-server-id-01",
+        "StartupWizardCompleted": True   
     })
 
 async def endpoint_quickconnect_enabled(request: Request):
