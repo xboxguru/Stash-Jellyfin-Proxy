@@ -76,16 +76,13 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
     container = (files[0].get("format") or "mp4") if files else "mp4"
     bit_rate = (files[0].get("bit_rate") or 0) if files else 0
 
-    # --- ON-THE-FLY TRANSCODE SPOOFING (TROJAN HLS) ---
+    # --- TRANSCODE DETECTION ---
     safe_codecs = ["h264", "h265", "hevc", "avc", "vp8", "vp9", "av1"]
     safe_containers = ["mp4", "m4v", "mov", "webm"]
     needs_transcode = False
     
     if str(v_codec).lower() not in safe_codecs or str(container).lower() not in safe_containers:
         needs_transcode = True
-        v_codec = "h264"
-        a_codec = "aac"
-        container = "hls" # Force the client to expect an HLS m3u8 playlist
 
     title = scene.get("title") or scene.get("code")
     if not title and path:
@@ -299,55 +296,52 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
         item["Path"] = path
         item["LocationType"] = "FileSystem"
 
-        # --- HLS PIPELINE ROUTING ---
-        stream_url = f"/Videos/{item_id}/stream"
-        media_protocol = "File"
-        supports_direct = True
-        
+        media_source = {
+            "Id": item_id,
+            "Path": path,
+            "Protocol": "File",
+            "Type": "Default",
+            "Container": container,
+            "RunTimeTicks": runtime_ticks, 
+            "IsRemote": False,
+            "SupportsTranscoding": True,
+            "VideoType": "VideoFile",
+            "MediaStreams": media_streams,
+            "MediaAttachments": [],
+            "Formats": [],
+            "RequiredHttpHeaders": {},
+            "Name": title,
+            "Size": file_size,
+            "ETag": etag_hash,
+            "ReadAtNativeFramerate": False,
+            "IgnoreDts": False,
+            "IgnoreIndex": False,
+            "GenPtsInput": False,
+            "IsInfiniteStream": False,
+            "RequiresOpening": False,
+            "RequiresClosing": False,
+            "RequiresLooping": False,
+            "SupportsProbing": True,
+            "HasSegments": False,
+            "UseMostCompatibleTranscodingProfile": False,
+            "DefaultAudioStreamIndex": 1
+        }
+
+        # --- THE STRICT HLS ROUTING ---
         if needs_transcode:
-            stream_url = f"/Videos/{item_id}/master.m3u8"
-            media_protocol = "Http"
-            # FORCE Fladder to abandon the /Download route and use HLS!
-            supports_direct = False 
-        
-        item["MediaSources"] = [
-            {
-                "Id": item_id,
-                "Path": path,
-                "DirectStreamUrl": stream_url,
-                "TranscodingUrl": stream_url if needs_transcode else None,
-                "TranscodingSubProtocol": "hls" if needs_transcode else "http",
-                "Protocol": media_protocol,
-                "Type": "Default",
-                "Container": container,
-                "RunTimeTicks": runtime_ticks, 
-                "IsRemote": False,
-                "SupportsDirectPlay": supports_direct,
-                "SupportsDirectStream": supports_direct,
-                "SupportsTranscoding": True,
-                "VideoType": "VideoFile",
-                "MediaStreams": media_streams,
-                "MediaAttachments": [],
-                "Formats": [],
-                "RequiredHttpHeaders": {},
-                "Name": title,
-                "Size": file_size,
-                "ETag": etag_hash,
-                
-                "ReadAtNativeFramerate": False,
-                "IgnoreDts": False,
-                "IgnoreIndex": False,
-                "GenPtsInput": False,
-                "IsInfiniteStream": False,
-                "RequiresOpening": False,
-                "RequiresClosing": False,
-                "RequiresLooping": False,
-                "SupportsProbing": True,
-                "TranscodingSubProtocol": "http",
-                "HasSegments": False,
-                "UseMostCompatibleTranscodingProfile": False,
-                "DefaultAudioStreamIndex": 1
-            }
-        ]
+            # Emulate the exact Transcode JSON from official Jellyfin
+            media_source["SupportsDirectPlay"] = False
+            media_source["SupportsDirectStream"] = False
+            media_source["TranscodingUrl"] = f"/Videos/{item_id}/master.m3u8"
+            media_source["TranscodingSubProtocol"] = "hls"
+            media_source["TranscodingContainer"] = "ts"
+        else:
+            # Standard MP4 Direct Play
+            media_source["SupportsDirectPlay"] = True
+            media_source["SupportsDirectStream"] = True
+            media_source["DirectStreamUrl"] = f"/Videos/{item_id}/stream"
+            media_source["TranscodingSubProtocol"] = "http"
+
+        item["MediaSources"] = [media_source]
 
     return item
