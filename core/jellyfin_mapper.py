@@ -76,6 +76,20 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
     container = (files[0].get("format") or "mp4") if files else "mp4"
     bit_rate = (files[0].get("bit_rate") or 0) if files else 0
 
+    # --- ON-THE-FLY TRANSCODE SPOOFING ---
+    # If the codec is not natively supported by mobile players (like WMV3, MPEG4, etc),
+    # we lie to the Jellyfin client so it attempts Direct Play, but we append a 
+    # ?transcode=true flag to the URL so our proxy knows to force Stash to transcode it.
+    safe_codecs = ["h264", "h265", "hevc", "avc", "vp8", "vp9", "av1"]
+    safe_containers = ["mp4", "m4v", "mov", "webm"]
+    needs_transcode = False
+    
+    if str(v_codec).lower() not in safe_codecs or str(container).lower() not in safe_containers:
+        needs_transcode = True
+        v_codec = "h264"
+        a_codec = "aac"
+        container = "mp4"
+
     title = scene.get("title") or scene.get("code")
     if not title and path:
         filename = os.path.basename(path)
@@ -289,7 +303,11 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
     if path:
         item["Path"] = path
         item["LocationType"] = "FileSystem"
+
+        # Add the transcode flag if we spoofed the codec
         stream_url = f"/Videos/{item_id}/stream"
+        if needs_transcode:
+            stream_url += f"?transcode=true&height={height}"
         
         item["MediaSources"] = [
             {

@@ -60,3 +60,10 @@ services:
 
 ## Credits
 Originally modified from the Stash-Infuse proxy project to bridge the gap between Stash and linear playout engines.
+
+TODO:
+Add HOST_IP so advertisement can work behind docker network.
+Warning:  X-Forwarded-For header bypasses middleware authentication.  If exposed externally, must strip that. Investigate other options.
+Implement BackgroundTasks in Starlette to execute functions after response has been sent.
+Implement IMAGE_CACHE_MAX_SIZE into lur-cache or disk-cache
+Refactor stash_base into config.py and replace it across all the routes

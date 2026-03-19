@@ -138,19 +138,81 @@ async def endpoint_stream(request: Request):
     stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
     apikey = getattr(config, "STASH_API_KEY", "")
     
+    # Default to the raw stream
     stash_stream_url = f"{stash_base}/scene/{raw_id}/stream"
+
+    # --- THE ON-THE-FLY TRANSCODE INTERCEPT ---
+    graphql_url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
+    gql_headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if apikey:
-        stash_stream_url += f"?apikey={apikey}"
+        gql_headers["ApiKey"] = apikey
+        
+    is_transcoding = False
+    async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as gql_client:
+        try:
+            # Quickly query Stash for the video codec AND container format
+            query = f"""query {{ findScene(id: "{raw_id}") {{ files {{ video_codec format }} }} }}"""
+            resp = await gql_client.post(graphql_url, headers=gql_headers, json={"query": query}, timeout=3.0)
+            if resp.status_code == 200:
+                data = resp.json().get("data", {}).get("findScene", {})
+                if data:
+                    files = data.get("files", [])
+                    v_codec = str(files[0].get("video_codec", "")).lower() if files else ""
+                    container = str(files[0].get("format", "")).lower() if files else ""
+                    
+                    safe_codecs = ["h264", "h265", "hevc", "avc", "vp8", "vp9", "av1"]
+                    safe_containers = ["mp4", "m4v", "mov", "webm"]
+                    
+                    # If it's a legacy codec OR a legacy container, hit the dynamic .mp4 endpoint
+                    if (v_codec and v_codec not in safe_codecs) or (container and container not in safe_containers):
+                        logger.info(f"🎥 Legacy format ({v_codec}/{container}) detected! Triggering Stash live MP4 transcode for scene {raw_id}")
+                        stash_stream_url = f"{stash_base}/scene/{raw_id}/stream.mp4?resolution=ORIGINAL"
+                        is_transcoding = True
+        except Exception as e:
+            logger.warning(f"Failed to check codec for transcode intercept: {e}")
+
+    # --- THE RESUME TRANSLATOR ---
+    # Jellyfin uses 'startTimeTicks' (1 tick = 100ns). Stash uses 'start=<seconds>'
+    start_ticks = None
+    for k, v in request.query_params.items():
+        if k.lower() == "starttimeticks":
+            start_ticks = v
+            break
+            
+    if start_ticks:
+        try:
+            start_sec = float(start_ticks) / 10000000.0
+            if "?" in stash_stream_url:
+                stash_stream_url += f"&start={start_sec}"
+            else:
+                stash_stream_url += f"?start={start_sec}"
+            logger.info(f"⏭️ Translated Jellyfin start time to {start_sec} seconds")
+        except ValueError:
+            pass
+
+    # Append the API key correctly
+    if apikey and "apikey=" not in stash_stream_url.lower():
+        if "?" in stash_stream_url:
+            stash_stream_url += f"&apikey={apikey}"
+        else:
+            stash_stream_url += f"?apikey={apikey}"
 
     headers = dict(request.headers)
     headers.pop("host", None)
-    range_header = headers.get("range")
+    
+    # If we are live transcoding, byte-range headers will break the stream. Strip them!
+    if is_transcoding:
+        headers.pop("range", None)
+        headers.pop("Range", None)
+        range_header = None
+    else:
+        range_header = headers.get("range") or headers.get("Range")
 
     async def stream_generator(resp):
         async for chunk in resp.aiter_bytes(chunk_size=8192):
             yield chunk
 
-    # THE FIX: Disable the httpx timeout for massive continuous downloads!
+    # Disable the httpx timeout for massive continuous downloads!
     client = httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False), timeout=None)
     try:
         req = client.build_request(request.method, stash_stream_url, headers=headers)
@@ -165,7 +227,7 @@ async def endpoint_stream(request: Request):
         if range_header and status_code == 206 and "content-range" not in resp_headers:
             logger.warning(f"Stash returned 206 but missing Content-Range for scene {raw_id}")
             
-        # Tell Android to save the file to disk
+        # Tell Android to save the file to disk if they requested a download
         if "download" in request.url.path.lower():
             resp_headers["Content-Disposition"] = f'attachment; filename="{raw_id}.mp4"'
         
@@ -180,7 +242,7 @@ async def endpoint_stream(request: Request):
     except Exception as e:
         logger.error(f"Stream passthrough failed for scene {raw_id}: {e}")
         return Response(status_code=500)
-
+          
 async def _update_stash_resume_time(raw_id: str, seconds: float):
     """Saves the exact playback position to Stash using its native activity tracker."""
     stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
