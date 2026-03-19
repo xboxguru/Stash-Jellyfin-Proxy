@@ -2,7 +2,7 @@ import logging
 import time
 import asyncio
 import httpx
-from starlette.responses import JSONResponse, Response, StreamingResponse
+from starlette.responses import JSONResponse, Response, StreamingResponse, RedirectResponse
 from starlette.requests import Request
 import config
 from core import stash_client, jellyfin_mapper
@@ -171,15 +171,21 @@ async def endpoint_stream(request: Request):
                     # If it's a legacy codec/container, we must handle it specially
                     if (v_codec and v_codec not in safe_codecs) or (container and container not in safe_containers):
                         
-                        # Fix: If it's a Download, we CANNOT give them an HLS playlist or a chunked MP4 transcode.
-                        # We must give them the raw file so the download manager receives a Content-Length.
                         if "download" in request.url.path.lower():
                             logger.info(f"📥 Download requested for legacy format! Serving RAW file because download managers reject chunked streams.")
-                            # We deliberately DO NOT modify stash_stream_url. It stays as the raw /stream.
                             
-                        # If it's normal playback, serve the Trojan HLS Playlist
                         else:
-                            logger.info(f"🎥 Legacy format ({v_codec}/{container}) detected! Hijacking /stream to serve HLS Playlist for scene {raw_id}")
+                            # --- THE REDIRECT BOUNCE ---
+                            # If the app hits /stream, ExoPlayer will try to parse it as an MP4 and hang.
+                            # We MUST redirect it to a URL ending in .m3u8 so it triggers the HLS engine.
+                            if not request.url.path.lower().endswith(".m3u8"):
+                                logger.info(f"🔄 Redirecting strict client to explicit .m3u8 URL for scene {raw_id}")
+                                new_url = f"/Videos/{item_id}/master.m3u8"
+                                if request.url.query:
+                                    new_url += f"?{request.url.query}"
+                                return RedirectResponse(url=new_url, status_code=302)
+
+                            logger.info(f"🎥 Serving Trojan HLS Playlist for scene {raw_id}")
                             
                             stash_m3u8_url = f"{stash_base}/scene/{raw_id}/stream.m3u8"
                             if apikey:
@@ -190,7 +196,6 @@ async def endpoint_stream(request: Request):
                                 m3u8_text = m3u8_resp.text
                                 rewritten_lines = []
                                 
-                                # Rewrite the .ts segment URLs so the app comes back to the proxy to fetch them
                                 for line in m3u8_text.splitlines():
                                     if line.strip() and not line.startswith("#"):
                                         clean_segment = line.split("?")[0].split("/")[-1]
@@ -199,7 +204,6 @@ async def endpoint_stream(request: Request):
                                     else:
                                         rewritten_lines.append(line)
                                 
-                                # Deliver the rewritten HLS playlist
                                 return Response(
                                     content="\n".join(rewritten_lines), 
                                     media_type="application/x-mpegURL",
