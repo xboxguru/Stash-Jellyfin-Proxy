@@ -76,10 +76,7 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
     container = (files[0].get("format") or "mp4") if files else "mp4"
     bit_rate = (files[0].get("bit_rate") or 0) if files else 0
 
-    # --- ON-THE-FLY TRANSCODE SPOOFING ---
-    # If the codec is not natively supported by mobile players (like WMV3, MPEG4, etc),
-    # we lie to the Jellyfin client so it attempts Direct Play, but we append a 
-    # ?transcode=true flag to the URL so our proxy knows to force Stash to transcode it.
+    # --- ON-THE-FLY TRANSCODE SPOOFING (TROJAN HLS) ---
     safe_codecs = ["h264", "h265", "hevc", "avc", "vp8", "vp9", "av1"]
     safe_containers = ["mp4", "m4v", "mov", "webm"]
     needs_transcode = False
@@ -88,7 +85,7 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
         needs_transcode = True
         v_codec = "h264"
         a_codec = "aac"
-        container = "mp4"
+        container = "hls" # Force the client to expect an HLS m3u8 playlist
 
     title = scene.get("title") or scene.get("code")
     if not title and path:
@@ -165,7 +162,6 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
         "Protocol": "File",
         "BackdropImageTags": [backdrop_tag],
         
-        # FIX: Populate the BlurHash maps so Flutter doesn't crash on null
         "ImageBlurHashes": {
             "Primary": {primary_tag: fake_blurhash},
             "Thumb": {primary_tag: fake_blurhash},
@@ -272,7 +268,6 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
                 if has_image:
                     p_tag = hashlib.md5(f"person-{p_id}-v{cache_version}".encode()).hexdigest()
                     person["PrimaryImageTag"] = p_tag
-                    # FIX: Inject the valid BlurHash string so the Dart parser accepts the image
                     person["ImageBlurHashes"] = {
                         "Primary": {p_tag: fake_blurhash}
                     }
@@ -304,23 +299,31 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
         item["Path"] = path
         item["LocationType"] = "FileSystem"
 
-        # Add the transcode flag if we spoofed the codec
+        # --- HLS PIPELINE ROUTING ---
         stream_url = f"/Videos/{item_id}/stream"
+        media_protocol = "File"
+        supports_direct = True
+        
         if needs_transcode:
-            stream_url += f"?transcode=true&height={height}"
+            stream_url = f"/Videos/{item_id}/master.m3u8"
+            media_protocol = "Http"
+            # FORCE Fladder to abandon the /Download route and use HLS!
+            supports_direct = False 
         
         item["MediaSources"] = [
             {
                 "Id": item_id,
                 "Path": path,
                 "DirectStreamUrl": stream_url,
-                "Protocol": "File",
+                "TranscodingUrl": stream_url if needs_transcode else None,
+                "TranscodingSubProtocol": "hls" if needs_transcode else "http",
+                "Protocol": media_protocol,
                 "Type": "Default",
                 "Container": container,
                 "RunTimeTicks": runtime_ticks, 
                 "IsRemote": False,
-                "SupportsDirectPlay": True,
-                "SupportsDirectStream": True,
+                "SupportsDirectPlay": supports_direct,
+                "SupportsDirectStream": supports_direct,
                 "SupportsTranscoding": True,
                 "VideoType": "VideoFile",
                 "MediaStreams": media_streams,

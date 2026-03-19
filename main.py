@@ -127,6 +127,12 @@ routes = [
     # --- Playback ---
     Route("/users/{user_id}/items/{item_id}/playbackinfo", playback_routes.endpoint_playback_info, methods=["POST", "GET"]),
     Route("/items/{item_id}/playbackinfo", playback_routes.endpoint_playback_info, methods=["POST", "GET"]),
+    
+    # HLS Segment Pipeline
+    Route("/videos/{item_id}/hls/{segment}", playback_routes.endpoint_hls_segment, methods=["GET"]),
+    Route("/videos/{item_id}/master.m3u8", playback_routes.endpoint_stream, methods=["GET", "HEAD"]),
+    Route("/videos/{item_id}/main.m3u8", playback_routes.endpoint_stream, methods=["GET", "HEAD"]),
+    
     Route("/videos/{item_id}/stream.mp4", playback_routes.endpoint_stream, methods=["GET", "HEAD"]),
     Route("/videos/{item_id}/stream", playback_routes.endpoint_stream, methods=["GET", "HEAD"]),
     Route("/sessions/playing", playback_routes.endpoint_sessions_playing, methods=["POST"]),

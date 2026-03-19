@@ -132,7 +132,7 @@ async def endpoint_sessions_stopped(request: Request):
     return JSONResponse({}, status_code=204)
 
 async def endpoint_stream(request: Request):
-    """Pipes the video stream directly from Stash, fully supporting byte-range seeking."""
+    """Pipes the video stream directly from Stash, supporting DirectPlay and Trojan HLS Playlists."""
     item_id = decode_id(request.path_params.get("item_id", ""))
     raw_id = item_id.replace("scene-", "")
     stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
@@ -141,13 +141,15 @@ async def endpoint_stream(request: Request):
     # Default to the raw stream
     stash_stream_url = f"{stash_base}/scene/{raw_id}/stream"
 
-    # --- THE ON-THE-FLY TRANSCODE INTERCEPT ---
+    # --- THE ON-THE-FLY HLS INTERCEPT (THE TROJAN PLAYLIST) ---
     graphql_url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
     gql_headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if apikey:
         gql_headers["ApiKey"] = apikey
         
     is_transcoding = False
+    download_ext = "mp4" # Fallback extension
+    
     async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as gql_client:
         try:
             # Quickly query Stash for the video codec AND container format
@@ -160,19 +162,58 @@ async def endpoint_stream(request: Request):
                     v_codec = str(files[0].get("video_codec", "")).lower() if files else ""
                     container = str(files[0].get("format", "")).lower() if files else ""
                     
+                    if container:
+                        download_ext = container
+                    
                     safe_codecs = ["h264", "h265", "hevc", "avc", "vp8", "vp9", "av1"]
                     safe_containers = ["mp4", "m4v", "mov", "webm"]
                     
-                    # If it's a legacy codec OR a legacy container, hit the dynamic .mp4 endpoint
+                    # If it's a legacy codec/container, we must handle it specially
                     if (v_codec and v_codec not in safe_codecs) or (container and container not in safe_containers):
-                        logger.info(f"🎥 Legacy format ({v_codec}/{container}) detected! Triggering Stash live MP4 transcode for scene {raw_id}")
-                        stash_stream_url = f"{stash_base}/scene/{raw_id}/stream.mp4?resolution=ORIGINAL"
-                        is_transcoding = True
+                        
+                        # Fix: If it's a Download, we CANNOT give them an HLS playlist or a chunked MP4 transcode.
+                        # We must give them the raw file so the download manager receives a Content-Length.
+                        if "download" in request.url.path.lower():
+                            logger.info(f"📥 Download requested for legacy format! Serving RAW file because download managers reject chunked streams.")
+                            # We deliberately DO NOT modify stash_stream_url. It stays as the raw /stream.
+                            
+                        # If it's normal playback, serve the Trojan HLS Playlist
+                        else:
+                            logger.info(f"🎥 Legacy format ({v_codec}/{container}) detected! Hijacking /stream to serve HLS Playlist for scene {raw_id}")
+                            
+                            stash_m3u8_url = f"{stash_base}/scene/{raw_id}/stream.m3u8"
+                            if apikey:
+                                stash_m3u8_url += f"?apikey={apikey}"
+                            
+                            m3u8_resp = await gql_client.get(stash_m3u8_url, timeout=10.0)
+                            if m3u8_resp.status_code == 200:
+                                m3u8_text = m3u8_resp.text
+                                rewritten_lines = []
+                                
+                                # Rewrite the .ts segment URLs so the app comes back to the proxy to fetch them
+                                for line in m3u8_text.splitlines():
+                                    if line.strip() and not line.startswith("#"):
+                                        clean_segment = line.split("?")[0].split("/")[-1]
+                                        proxy_segment_url = f"/Videos/{item_id}/hls/{clean_segment}"
+                                        rewritten_lines.append(proxy_segment_url)
+                                    else:
+                                        rewritten_lines.append(line)
+                                
+                                # Deliver the rewritten HLS playlist
+                                return Response(
+                                    content="\n".join(rewritten_lines), 
+                                    media_type="application/x-mpegURL",
+                                    headers={"Access-Control-Allow-Origin": "*"}
+                                )
+                            else:
+                                logger.error(f"❌ Failed to fetch HLS playlist from Stash: HTTP {m3u8_resp.status_code}")
+                            
         except Exception as e:
-            logger.warning(f"Failed to check codec for transcode intercept: {e}")
+            logger.warning(f"Failed to check codec for HLS intercept: {e}")
 
-    # --- THE RESUME TRANSLATOR ---
-    # Jellyfin uses 'startTimeTicks' (1 tick = 100ns). Stash uses 'start=<seconds>'
+    # --- NORMAL MP4 PASSTHROUGH LOGIC ---
+    
+    # The Resume Translator
     start_ticks = None
     for k, v in request.query_params.items():
         if k.lower() == "starttimeticks":
@@ -200,7 +241,7 @@ async def endpoint_stream(request: Request):
     headers = dict(request.headers)
     headers.pop("host", None)
     
-    # If we are live transcoding, byte-range headers will break the stream. Strip them!
+    # Only strip Range headers if we are forcing a live transcode pipe (which we currently aren't doing anymore, but good to keep safe)
     if is_transcoding:
         headers.pop("range", None)
         headers.pop("Range", None)
@@ -229,7 +270,8 @@ async def endpoint_stream(request: Request):
             
         # Tell Android to save the file to disk if they requested a download
         if "download" in request.url.path.lower():
-            resp_headers["Content-Disposition"] = f'attachment; filename="{raw_id}.mp4"'
+            # Dynamically set the extension based on the actual container so the file saves correctly
+            resp_headers["Content-Disposition"] = f'attachment; filename="{raw_id}.{download_ext}"'
         
         if request.method == "HEAD":
             await r.aclose()
@@ -241,6 +283,45 @@ async def endpoint_stream(request: Request):
 
     except Exception as e:
         logger.error(f"Stream passthrough failed for scene {raw_id}: {e}")
+        return Response(status_code=500)
+    
+async def endpoint_hls_segment(request: Request):
+    """Pipes the individual .ts HLS segments from Stash to the client."""
+    item_id = decode_id(request.path_params.get("item_id", ""))
+    raw_id = item_id.replace("scene-", "")
+    segment = request.path_params.get("segment", "")
+    
+    stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+    apikey = getattr(config, "STASH_API_KEY", "")
+    
+    # Construct the exact URL Stash expects for the segment
+    stash_segment_url = f"{stash_base}/scene/{raw_id}/stream.m3u8/{segment}"
+    if apikey:
+        stash_segment_url += f"?apikey={apikey}"
+        
+    client = httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False), timeout=None)
+    headers = dict(request.headers)
+    headers.pop("host", None)
+    
+    async def stream_generator(resp):
+        async for chunk in resp.aiter_bytes(chunk_size=8192):
+            yield chunk
+
+    try:
+        req = client.build_request(request.method, stash_segment_url, headers=headers)
+        r = await client.send(req, stream=True)
+
+        resp_headers = dict(r.headers)
+        resp_headers.pop("content-encoding", None)
+        resp_headers.pop("transfer-encoding", None)
+        resp_headers.pop("connection", None)
+        
+        response = StreamingResponse(stream_generator(r), status_code=r.status_code, headers=resp_headers)
+        response.background = r.aclose
+        return response
+
+    except Exception as e:
+        logger.error(f"Stream segment passthrough failed for scene {raw_id} segment {segment}: {e}")
         return Response(status_code=500)
           
 async def _update_stash_resume_time(raw_id: str, seconds: float):
