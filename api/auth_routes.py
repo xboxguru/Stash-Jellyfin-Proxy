@@ -34,22 +34,22 @@ def _get_full_user():
             "EnableLocalPassword": False,
             "OrderedViews": [],
             "LatestItemsExcludes": [],
-            "MyMediaExcludes": [],  # Fixed from MyViewsExcludes
+            "MyMediaExcludes": [],  
             "HidePlayedInLatest": True,
             "RememberAudioSelections": True,
             "RememberSubtitleSelections": True,
             "EnableNextEpisodeAutoPlay": True,
-            "CastReceiverId": "F007D354" # Added from real server
+            "CastReceiverId": "F007D354" 
         },
         "Policy": {
             "IsAdministrator": True,
             "IsHidden": False,
-            "EnableCollectionManagement": False, # Added
-            "EnableSubtitleManagement": False,   # Added
-            "EnableLyricManagement": False,      # Added
+            "EnableCollectionManagement": False, 
+            "EnableSubtitleManagement": False,   
+            "EnableLyricManagement": False,      
             "IsDisabled": False,
             "BlockedTags": [],
-            "AllowedTags": [],                   # Added
+            "AllowedTags": [],                   
             "EnableUserPreferenceAccess": True,
             "AccessSchedules": [],
             "BlockUnratedItems": [],
@@ -58,10 +58,14 @@ def _get_full_user():
             "EnableRemoteAccess": True,
             "EnableLiveTvManagement": False,
             "EnableLiveTvAccess": False,
+            
+            # --- THE FIX: Tell strict clients they are allowed to use Transcodes! ---
             "EnableMediaPlayback": True,
-            "EnableAudioPlaybackTranscoding": False,
-            "EnableVideoPlaybackTranscoding": False,
-            "EnablePlaybackRemuxing": False,
+            "EnableAudioPlaybackTranscoding": True,
+            "EnableVideoPlaybackTranscoding": True,
+            "EnablePlaybackRemuxing": True,
+            # ------------------------------------------------------------------------
+            
             "ForceRemoteSourceTranscoding": False,
             "EnableContentDeletion": False,
             "EnableContentDeletionFromFolders": [],
@@ -75,13 +79,12 @@ def _get_full_user():
             "EnabledFolders": [],
             "EnableAllFolders": True,
             "InvalidLoginAttemptCount": 0,
-            "LoginAttemptsBeforeLockout": -1, # Matched to real
+            "LoginAttemptsBeforeLockout": -1, 
             "MaxActiveSessions": 0,
             "EnablePublicSharing": False,
             "BlockedMediaFolders": [],
             "BlockedChannels": [],
             "RemoteClientBitrateLimit": 0,
-            # FIXED: Changed from Emby to Jellyfin namespaces
             "AuthenticationProviderId": "Jellyfin.Server.Implementations.Users.DefaultAuthenticationProvider",
             "PasswordResetProviderId": "Jellyfin.Server.Implementations.Users.DefaultPasswordResetProvider",
             "SyncPlayAccess": "CreateAndJoinGroups"
@@ -145,14 +148,14 @@ async def endpoint_authenticate_by_name(request: Request):
                 "IsPaused": False,
                 "IsMuted": False,
                 "RepeatMode": "RepeatNone",
-                "PlaybackOrder": "Default" # Added
+                "PlaybackOrder": "Default"
             },
             "AdditionalUsers": [],
             "Capabilities": {
                 "PlayableMediaTypes": [],
                 "SupportedCommands": [],
                 "SupportsMediaControl": False,
-                "SupportsPersistentIdentifier": True # Matched to real
+                "SupportsPersistentIdentifier": True
             },
             "RemoteEndPoint": request.client.host if request.client else "127.0.0.1",
             "PlayableMediaTypes": [],
@@ -161,7 +164,7 @@ async def endpoint_authenticate_by_name(request: Request):
             "UserName": fake_user["Name"],
             "Client": data.get("Client", "Findroid"),
             "LastActivityDate": "2026-01-01T00:00:00.0000000Z",
-            "LastPlaybackCheckIn": "0001-01-01T00:00:00.0000000Z", # Added
+            "LastPlaybackCheckIn": "0001-01-01T00:00:00.0000000Z",
             "DeviceName": data.get("Device", "Device"),
             "DeviceId": data.get("DeviceId", "12345"),
             "ApplicationVersion": data.get("Version", "1.0.0"),
@@ -169,7 +172,7 @@ async def endpoint_authenticate_by_name(request: Request):
             "SupportsMediaControl": False,
             "SupportsRemoteControl": False,
             "NowPlayingQueue": [],
-            "NowPlayingQueueFullItems": [], # Added
+            "NowPlayingQueueFullItems": [],
             "HasCustomDeviceName": False,
             "ServerId": server_id,
             "SupportedCommands": []
@@ -179,7 +182,6 @@ async def endpoint_authenticate_by_name(request: Request):
     })
 
 async def endpoint_system_info_public(request: Request):
-    # Use the HOST from the header to ensure the app sees the IP it expects
     host = request.headers.get("host", "192.168.0.21:8096") 
     
     return JSONResponse({

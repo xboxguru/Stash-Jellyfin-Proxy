@@ -76,6 +76,14 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
     container = (files[0].get("format") or "mp4") if files else "mp4"
     bit_rate = (files[0].get("bit_rate") or 0) if files else 0
 
+    # --- TRANSCODE DETECTION ---
+    safe_codecs = ["h264", "h265", "hevc", "avc", "vp8", "vp9", "av1"]
+    safe_containers = ["mp4", "m4v", "mov", "webm"]
+    needs_transcode = False
+    
+    if str(v_codec).lower() not in safe_codecs or str(container).lower() not in safe_containers:
+        needs_transcode = True
+
     title = scene.get("title") or scene.get("code")
     if not title and path:
         filename = os.path.basename(path)
@@ -151,7 +159,6 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
         "Protocol": "File",
         "BackdropImageTags": [backdrop_tag],
         
-        # FIX: Populate the BlurHash maps so Flutter doesn't crash on null
         "ImageBlurHashes": {
             "Primary": {primary_tag: fake_blurhash},
             "Thumb": {primary_tag: fake_blurhash},
@@ -258,7 +265,6 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
                 if has_image:
                     p_tag = hashlib.md5(f"person-{p_id}-v{cache_version}".encode()).hexdigest()
                     person["PrimaryImageTag"] = p_tag
-                    # FIX: Inject the valid BlurHash string so the Dart parser accepts the image
                     person["ImageBlurHashes"] = {
                         "Primary": {p_tag: fake_blurhash}
                     }
@@ -289,44 +295,53 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
     if path:
         item["Path"] = path
         item["LocationType"] = "FileSystem"
-        stream_url = f"/Videos/{item_id}/stream"
-        
-        item["MediaSources"] = [
-            {
-                "Id": item_id,
-                "Path": path,
-                "DirectStreamUrl": stream_url,
-                "Protocol": "File",
-                "Type": "Default",
-                "Container": container,
-                "RunTimeTicks": runtime_ticks, 
-                "IsRemote": False,
-                "SupportsDirectPlay": True,
-                "SupportsDirectStream": True,
-                "SupportsTranscoding": True,
-                "VideoType": "VideoFile",
-                "MediaStreams": media_streams,
-                "MediaAttachments": [],
-                "Formats": [],
-                "RequiredHttpHeaders": {},
-                "Name": title,
-                "Size": file_size,
-                "ETag": etag_hash,
-                
-                "ReadAtNativeFramerate": False,
-                "IgnoreDts": False,
-                "IgnoreIndex": False,
-                "GenPtsInput": False,
-                "IsInfiniteStream": False,
-                "RequiresOpening": False,
-                "RequiresClosing": False,
-                "RequiresLooping": False,
-                "SupportsProbing": True,
-                "TranscodingSubProtocol": "http",
-                "HasSegments": False,
-                "UseMostCompatibleTranscodingProfile": False,
-                "DefaultAudioStreamIndex": 1
-            }
-        ]
+
+        media_source = {
+            "Id": item_id,
+            "Path": path,
+            "Protocol": "File",
+            "Type": "Default",
+            "Container": container,
+            "RunTimeTicks": runtime_ticks, 
+            "IsRemote": False,
+            "SupportsTranscoding": True,
+            "VideoType": "VideoFile",
+            "MediaStreams": media_streams,
+            "MediaAttachments": [],
+            "Formats": [],
+            "RequiredHttpHeaders": {},
+            "Name": title,
+            "Size": file_size,
+            "ETag": etag_hash,
+            "ReadAtNativeFramerate": False,
+            "IgnoreDts": False,
+            "IgnoreIndex": False,
+            "GenPtsInput": False,
+            "IsInfiniteStream": False,
+            "RequiresOpening": False,
+            "RequiresClosing": False,
+            "RequiresLooping": False,
+            "SupportsProbing": True,
+            "HasSegments": False,
+            "UseMostCompatibleTranscodingProfile": False,
+            "DefaultAudioStreamIndex": 1
+        }
+
+        # --- THE STRICT HLS ROUTING ---
+        if needs_transcode:
+            # Emulate the exact Transcode JSON from official Jellyfin
+            media_source["SupportsDirectPlay"] = False
+            media_source["SupportsDirectStream"] = False
+            media_source["TranscodingUrl"] = f"/Videos/{item_id}/master.m3u8"
+            media_source["TranscodingSubProtocol"] = "hls"
+            media_source["TranscodingContainer"] = "ts"
+        else:
+            # Standard MP4 Direct Play
+            media_source["SupportsDirectPlay"] = True
+            media_source["SupportsDirectStream"] = True
+            media_source["DirectStreamUrl"] = f"/Videos/{item_id}/stream"
+            media_source["TranscodingSubProtocol"] = "http"
+
+        item["MediaSources"] = [media_source]
 
     return item

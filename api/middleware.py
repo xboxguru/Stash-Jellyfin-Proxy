@@ -14,7 +14,6 @@ PUBLIC_ENDPOINTS = {
     "/public/system/info",
     "/web/index.html", 
     "/health", 
-    "/", 
     "/users/authenticatebyname", 
     "/system/ping",
     "/users/public",
