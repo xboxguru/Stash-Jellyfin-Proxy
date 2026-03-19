@@ -6,7 +6,6 @@ A high-performance Jellyfin API emulation proxy for Stash. This project is a hea
 * **On-The-Fly HLS Transcoding:** Automatically intercepts legacy, unsupported codecs (like WMV) and forces Stash to transcode them into an HLS (`.m3u8`) stream. This allows native scrubbing, seeking, and resuming on mobile clients without requiring background pre-transcoding!
 * **ErsatzTV Optimized:** Custom mappings for `o_counter` (play counts) and `created_at` timestamps ensure accurate library sorting.
 * **Content Firewall:** Automatically assigns a content rating of `XXX` to all scenes to keep them isolated from mainstream movie libraries.
-* **Dynamic Network Icons:** Proxies Stash Studio logos as Jellyfin "Studios" for use as watermarks/icons in linear playouts.
 * **Concurrent Fetching:** Uses `httpx` and `asyncio` to handle bulk metadata requests from ErsatzTV without timeouts.
 * **Web Configuration:** Manage settings, monitor active streams, and bust image caches from a built-in dashboard.
 
