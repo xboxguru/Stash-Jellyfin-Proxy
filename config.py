@@ -32,7 +32,6 @@ LIBRARY_TYPE = "movies"
 RECENT_DAYS = 14
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 200
-IMAGE_CACHE_MAX_SIZE = 100
 ENABLE_FILTERS = True
 ENABLE_IMAGE_RESIZE = True
 ENABLE_TAG_FILTERS = False
@@ -75,7 +74,7 @@ def save_config():
         "STASH_TIMEOUT", "STASH_RETRIES", "STASH_GRAPHQL_PATH", "STASH_VERIFY_TLS",
         "SYNC_LEVEL", "ENABLE_FILTERS", "ENABLE_IMAGE_RESIZE", "ENABLE_TAG_FILTERS", 
         "ENABLE_ALL_TAGS", "CACHE_VERSION", "DEFAULT_PAGE_SIZE", "MAX_PAGE_SIZE",
-        "IMAGE_CACHE_MAX_SIZE", "REQUIRE_AUTH_FOR_CONFIG", "LOG_DIR", "LOG_FILE", 
+        "REQUIRE_AUTH_FOR_CONFIG", "LOG_DIR", "LOG_FILE", 
         "LOG_LEVEL", "LOG_MAX_SIZE_MB", "LOG_BACKUP_COUNT", "BAN_THRESHOLD", 
         "BAN_WINDOW_MINUTES", "BANNED_IPS", "RECENT_DAYS"
     ]
@@ -114,7 +113,7 @@ def load_config_file():
                     v = v.strip().strip('"').strip("'")
                     
                     if k in ["CACHE_VERSION", "PROXY_PORT", "UI_PORT", "DEFAULT_PAGE_SIZE", "MAX_PAGE_SIZE", 
-                             "STASH_TIMEOUT", "STASH_RETRIES", "IMAGE_CACHE_MAX_SIZE", "LOG_MAX_SIZE_MB", 
+                             "STASH_TIMEOUT", "STASH_RETRIES", "LOG_MAX_SIZE_MB", 
                              "LOG_BACKUP_COUNT", "BAN_THRESHOLD", "BAN_WINDOW_MINUTES", "RECENT_DAYS"]:
                         try: v = int(v)
                         except ValueError: continue

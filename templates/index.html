@@ -647,10 +647,6 @@
                                 <input type="checkbox" name="ENABLE_ALL_TAGS">
                                 Enable 'All Tags' Subfolder
                             </label>
-                            <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
-                                <input type="checkbox" name="ENABLE_IMAGE_RESIZE" checked>
-                                Auto-Resize Studio Logos
-                            </label>
                         </div>
                         
                         <div class="form-group" style="margin-bottom: 0;">
@@ -811,7 +807,6 @@
             ENABLE_TAG_FILTERS: false,
             ENABLE_ALL_TAGS: false,
             REQUIRE_AUTH_FOR_CONFIG: false,
-            IMAGE_CACHE_MAX_SIZE: 1000,
             DEFAULT_PAGE_SIZE: 50,
             MAX_PAGE_SIZE: 200,
             LOG_LEVEL: 'INFO',
@@ -1063,7 +1058,7 @@
             e.preventDefault();
             const formData = new FormData(e.target);
             const data = {};
-            const intFields = ['PROXY_PORT', 'UI_PORT', 'STASH_TIMEOUT', 'STASH_RETRIES', 'RECENT_DAYS', 'LOG_MAX_SIZE_MB', 'LOG_BACKUP_COUNT', 'DEFAULT_PAGE_SIZE', 'MAX_PAGE_SIZE', 'IMAGE_CACHE_MAX_SIZE', 'BAN_THRESHOLD', 'BAN_WINDOW_MINUTES'];
+            const intFields = ['PROXY_PORT', 'UI_PORT', 'STASH_TIMEOUT', 'STASH_RETRIES', 'RECENT_DAYS', 'LOG_MAX_SIZE_MB', 'LOG_BACKUP_COUNT', 'DEFAULT_PAGE_SIZE', 'MAX_PAGE_SIZE', 'BAN_THRESHOLD', 'BAN_WINDOW_MINUTES'];
             
             formData.forEach((value, key) => {
                 if (key === 'TAG_GROUPS' || key === 'LATEST_GROUPS' || key === 'AUTHENTICATED_IPS') {
