@@ -35,7 +35,25 @@ async def endpoint_sessions_playing(request: Request):
         
         playback_ticks = float(data.get("PlaybackPositionTicks") or data.get("PositionTicks") or 0)
         runtime_ticks = float(data.get("RunTimeTicks") or data.get("Item", {}).get("RunTimeTicks") or 0)
-        title = data.get("Item", {}).get("Name") or "Unknown Scene"
+        title = data.get("Item", {}).get("Name")
+        performer = "Unknown"
+        
+        # --- THE FIX: Fetch missing metadata directly from Stash ---
+        if item_id.startswith("scene-"):
+            raw_id = item_id.replace("scene-", "")
+            scene = stash_client.get_scene(raw_id)
+            if scene:
+                if not title or title == "Unknown Scene":
+                    title = scene.get("title") or scene.get("code") or f"Scene {raw_id}"
+                
+                if scene.get("performers"):
+                    performer = ", ".join([p.get("name") for p in scene["performers"]])
+                    
+                if runtime_ticks <= 0 and scene.get("files"):
+                    duration_seconds = scene["files"][0].get("duration", 0)
+                    runtime_ticks = float(duration_seconds * 10000000)
+
+        title = title or "Unknown Scene"
         
         if not hasattr(state, "active_streams"):
             state.active_streams = []
@@ -43,11 +61,12 @@ async def endpoint_sessions_playing(request: Request):
         stream = next((s for s in state.active_streams if s.get("id") == session_id), None)
         
         if not stream:
-            logger.info(f"▶️ PLAYBACK STARTED: Session {session_id} for Item {item_id}")
+            logger.info(f"▶️ PLAYBACK STARTED: Session {session_id} for Item {item_id} ({title})")
             stream_info = {
                 "id": session_id,
                 "item_id": item_id,
                 "title": title,
+                "performer": performer,
                 "runtime_ticks": runtime_ticks,
                 "last_ticks": playback_ticks,
                 "started": int(time.time())
@@ -58,7 +77,7 @@ async def endpoint_sessions_playing(request: Request):
             state.stats["total_streams"] += 1
             scene_id = item_id if item_id else "unknown"
             if scene_id not in state.stats["top_played"]:
-                state.stats["top_played"][scene_id] = {"title": title, "performer": "Unknown", "count": 0}
+                state.stats["top_played"][scene_id] = {"title": title, "performer": performer, "count": 0}
             state.stats["top_played"][scene_id]["count"] += 1
         else:
             stream["last_ticks"] = max(stream.get("last_ticks", 0), playback_ticks)

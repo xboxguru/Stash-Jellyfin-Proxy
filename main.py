@@ -105,15 +105,16 @@ routes = [
     Route("/items/{item_id}", library_routes.endpoint_item_details, methods=["GET"]),
     
     # Pre-Flight Detail Stubs (Prevents Wholphin Movie 404 Crashes)
-    Route("/users/{user_id}/items/{item_id}/thememedia", library_routes.endpoint_empty_list, methods=["GET"]),
-    Route("/users/{user_id}/items/{item_id}/themesongs", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/users/{user_id}/items/{item_id}/thememedia", library_routes.endpoint_theme_songs, methods=["GET"]),
+    Route("/users/{user_id}/items/{item_id}/themesongs", library_routes.endpoint_theme_songs, methods=["GET"]),
     Route("/users/{user_id}/items/{item_id}/similar", library_routes.endpoint_empty_list, methods=["GET"]),
-    Route("/users/{user_id}/items/{item_id}/specialfeatures", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/users/{user_id}/items/{item_id}/specialfeatures", library_routes.endpoint_empty_array, methods=["GET"]),
     Route("/users/{user_id}/items/{item_id}/intros", library_routes.endpoint_empty_list, methods=["GET"]),
-    Route("/items/{item_id}/thememedia", library_routes.endpoint_empty_list, methods=["GET"]),
-    Route("/items/{item_id}/themesongs", library_routes.endpoint_empty_list, methods=["GET"]),
+    
+    Route("/items/{item_id}/thememedia", library_routes.endpoint_theme_songs, methods=["GET"]),
+    Route("/items/{item_id}/themesongs", library_routes.endpoint_theme_songs, methods=["GET"]),
     Route("/items/{item_id}/similar", library_routes.endpoint_empty_list, methods=["GET"]),
-    Route("/items/{item_id}/specialfeatures", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/items/{item_id}/specialfeatures", library_routes.endpoint_empty_array, methods=["GET"]),
     Route("/items/{item_id}/intros", library_routes.endpoint_empty_list, methods=["GET"]),
     
     # Catch ALL Images (Primary, Backdrop, Thumb, Logo)
@@ -161,6 +162,9 @@ routes = [
     # --- Downloads ---
     Route("/items/{item_id}/download", playback_routes.endpoint_stream, methods=["GET"]),
     Route("/users/{user_id}/items/{item_id}/download", playback_routes.endpoint_stream, methods=["GET"]),
+
+    # --- Logs ---
+    Route("/clientlog/document", auth_routes.endpoint_client_log, methods=["POST"]),
 ]
 
 # Initialize the Starlette App

@@ -20,7 +20,8 @@ PUBLIC_ENDPOINTS = {
     "/quickconnect/initiate",
     "/quickconnect/enabled",
     "/favicon.ico",
-    "/branding/configuration"
+    "/branding/configuration",
+    "/clientlog/document"
 }
 PUBLIC_PREFIXES = ["/web/", "/assets/", "/api/"]
 

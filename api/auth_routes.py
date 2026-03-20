@@ -2,6 +2,8 @@ import logging
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.requests import Request
 import config
+import os
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -219,3 +221,27 @@ async def endpoint_system_ping(request: Request):
 async def endpoint_branding_configuration(request: Request):
     """Feeds native clients an empty branding config so they don't panic."""
     return JSONResponse({})
+
+async def endpoint_client_log(request: Request):
+    """Intercepts client application logs and saves them to disk for debugging."""
+    try:
+        # Jellyfin clients usually send the log as raw text/plain or multipart/form-data
+        body = await request.body()
+        client_ip = request.client.host if request.client else "unknown"
+        
+        # Create a 'client_logs' folder inside your mapped config directory
+        log_dir = os.path.join(getattr(config, "LOG_DIR", "."), "client_logs")
+        os.makedirs(log_dir, exist_ok=True)
+        
+        # Save it with a timestamp
+        filename = os.path.join(log_dir, f"wholphin_{client_ip}_{int(time.time())}.log")
+        
+        with open(filename, "wb") as f:
+            f.write(body)
+            
+        logger.info(f"📥 Client log successfully caught and saved to {filename}")
+        
+    except Exception as e:
+        logger.error(f"Failed to save client log: {e}")
+        
+    return PlainTextResponse("OK")

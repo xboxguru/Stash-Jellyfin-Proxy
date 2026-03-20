@@ -25,7 +25,7 @@ async def serve_index(request: Request):
             
         server_name = getattr(config, "SERVER_NAME", "Stash Media Server")
         html_content = html_content.replace("{{SERVER_NAME}}", server_name)
-        html_content = html_content.replace("{{VERSION}}", "Modular v2")
+        html_content = html_content.replace("{{VERSION}}", getattr(config, "APP_VERSION", "v2.1-dev"))
         
         return HTMLResponse(html_content)
     except Exception as e:
@@ -52,7 +52,7 @@ async def api_get_config(request: Request):
         "ENABLE_TAG_FILTERS": getattr(config, "ENABLE_TAG_FILTERS", False),
         "ENABLE_ALL_TAGS": getattr(config, "ENABLE_ALL_TAGS", False),
         "STASH_VERIFY_TLS": getattr(config, "STASH_VERIFY_TLS", False),
-        "IMAGE_VERSION": getattr(config, "IMAGE_VERSION", 0),
+        "CACHE_VERSION": getattr(config, "CACHE_VERSION", 0),
         "TAG_GROUPS": getattr(config, "TAG_GROUPS", []),
         "LATEST_GROUPS": getattr(config, "LATEST_GROUPS", ["Scenes"]),
         "SYNC_LEVEL": getattr(config, "SYNC_LEVEL", "Everything"),
@@ -144,7 +144,7 @@ async def api_get_status(request: Request):
         "running": True, 
         "stashConnected": stash_ok,
         "stashVersion": "0.27+",
-        "version": "Modular v2",
+        "version": getattr(config, "APP_VERSION", "v2.1-dev"),
         "uptime": 0
     })
 

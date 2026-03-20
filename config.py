@@ -14,6 +14,7 @@ else:
     CONFIG_FILE = os.path.join(SCRIPT_DIR, "stash_jellyfin_proxy.conf")
 
 # Default Configuration
+APP_VERSION = os.getenv("APP_VERSION", "v2.1-dev")
 STASH_URL = "https://stash:9999"
 STASH_API_KEY = ""
 PROXY_API_KEY = ""  

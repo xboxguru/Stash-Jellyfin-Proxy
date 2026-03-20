@@ -4,6 +4,9 @@ LABEL maintainer="xboxguru"
 LABEL description="Jellyfin API emulation proxy for Stash"
 LABEL version="2.0.0"
 
+ARG BUILD_VERSION="v2.1-dev"
+ENV APP_VERSION=$BUILD_VERSION
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
