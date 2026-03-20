@@ -38,7 +38,33 @@ async def endpoint_sessions_playing(request: Request):
         title = data.get("Item", {}).get("Name")
         performer = "Unknown"
         
-        # --- THE FIX: Fetch missing metadata directly from Stash ---
+        # --- 1. EXTRACT CLIENT METADATA ---
+        client_ip = request.client.host if request.client else "Unknown"
+        user_agent = request.headers.get("user-agent", "")
+        
+        # Respect Reverse Proxies (Docker / Nginx)
+        x_forwarded = request.headers.get("x-forwarded-for")
+        if x_forwarded:
+            client_ip = x_forwarded.split(",")[0].strip()
+        elif request.headers.get("x-real-ip"):
+            client_ip = request.headers.get("x-real-ip")
+            
+        # Parse Client Type from User-Agent
+        if "Infuse" in user_agent: client_type = "Infuse"
+        elif "Wholphin" in user_agent: client_type = "Wholphin"
+        elif "Findroid" in user_agent: client_type = "Findroid"
+        elif "Fladder" in user_agent: client_type = "Fladder"
+        elif "ErsatzTV" in user_agent: client_type = "ErsatzTV"
+        elif "VLC" in user_agent: client_type = "VLC"
+        elif "Jellyfin" in user_agent: client_type = "Jellyfin"
+        else: client_type = user_agent.split("/")[0][:20] if user_agent else "Unknown"
+        
+        # Try to get User from payload, fallback to Config
+        user = data.get("UserId") or getattr(config, "SJS_USER", "Admin")
+        if not user: user = "Admin"
+        # ----------------------------------
+        
+        # Fetch missing metadata directly from Stash
         if item_id.startswith("scene-"):
             raw_id = item_id.replace("scene-", "")
             scene = stash_client.get_scene(raw_id)
@@ -61,7 +87,7 @@ async def endpoint_sessions_playing(request: Request):
         stream = next((s for s in state.active_streams if s.get("id") == session_id), None)
         
         if not stream:
-            logger.info(f"▶️ PLAYBACK STARTED: Session {session_id} for Item {item_id} ({title})")
+            logger.info(f"▶️ PLAYBACK STARTED: Session {session_id} for Item {item_id} ({title}) from {client_ip}")
             stream_info = {
                 "id": session_id,
                 "item_id": item_id,
@@ -69,7 +95,12 @@ async def endpoint_sessions_playing(request: Request):
                 "performer": performer,
                 "runtime_ticks": runtime_ticks,
                 "last_ticks": playback_ticks,
-                "started": int(time.time())
+                "started": int(time.time()),
+                
+                # --- 2. INJECT INTO ACTIVE STREAMS CACHE ---
+                "user": user,
+                "clientIp": client_ip,
+                "clientType": client_type
             }
             state.active_streams.append(stream_info)
             
