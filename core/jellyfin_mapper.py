@@ -26,7 +26,7 @@ def decode_id(encoded_id: str) -> str:
         decoded_bytes = bytes.fromhex(clean_id)
         decoded_str = decoded_bytes.decode('utf-8').rstrip('\x00')
         
-        if "scene-" in decoded_str or "person-" in decoded_str or "studio-" in decoded_str or "tag-" in decoded_str or "root-" in decoded_str:
+        if "scene-" in decoded_str or "person-" in decoded_str or "studio-" in decoded_str or "tag-" in decoded_str or "root-" in decoded_str or "filter-" in decoded_str or "year-" in decoded_str:
             return decoded_str.strip()
     except Exception:
         pass
