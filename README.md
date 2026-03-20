@@ -48,5 +48,62 @@ services:
 3. Access the Web UI at `http://YOUR_IP:8097` to configure your Stash URL and API Key.
 4. In ErsatzTV or your Jellyfin client, add a new **Jellyfin** server using `http://YOUR_IP:8096` and the **Proxy API Key** found in the Web UI settings as the password/token.
 
+## Environment Variables
+
+Every setting in the proxy can be configured via Docker environment variables. Variables set in the environment will lock the corresponding field in the Web UI to prevent accidental overwrites.
+
+### Server & Network
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `PROXY_BIND` | `0.0.0.0` | The network interface the proxy listens on. |
+| `PROXY_PORT` | `8096` | The port used for Jellyfin API emulation. |
+| `UI_PORT` | `8097` | The port used for the Web Dashboard. |
+| `HOST_IP` | *(Auto)* | Set explicitly if UDP auto-discovery fails across Docker network bridges. |
+| `SERVER_NAME` | `Stash Media Server` | The display name shown in Jellyfin clients. |
+| `SERVER_ID` | *(Auto-generated)* | Unique hardware identifier. Changing this breaks client pairings. |
+
+### Stash Connection
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `STASH_URL` | `http://localhost:9999` | The full URL (including port) of your Stash instance. |
+| `STASH_API_KEY` | *(None)* | Found in Stash Settings -> Security. |
+| `STASH_GRAPHQL_PATH`| `/graphql` | The path to the Stash GraphQL endpoint. |
+| `STASH_TIMEOUT` | `30` | Seconds before a Stash query times out. |
+| `STASH_RETRIES` | `3` | Number of times to retry a failed Stash request. |
+| `STASH_VERIFY_TLS` | `False` | Set to `True` if using a strict HTTPS reverse proxy for Stash. |
+
+### Security & Authentication
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `PROXY_API_KEY` | *(Auto-generated)* | The Token/Password clients use to access the proxy. |
+| `SJS_USER` | *(None)* | Username for the Web UI Dashboard. |
+| `SJS_PASSWORD` | *(None)* | Password for the Web UI Dashboard. |
+| `REQUIRE_AUTH_FOR_CONFIG` | `False` | Require login to view the UI. |
+| `BAN_THRESHOLD` | `10` | Failed logins before an IP is banned. |
+| `BAN_WINDOW_MINUTES` | `15` | How long failed attempts are remembered. |
+| `BANNED_IPS` | *(None)* | Comma-separated list of permanently banned IPs. |
+
+### Library & Organization
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `SYNC_LEVEL` | `Everything` | Set to `Organized` or `Tagged` to restrict the scenes exposed. |
+| `TAG_GROUPS` | *(None)* | Comma-separated list of Stash tags to turn into virtual folders. |
+| `LATEST_GROUPS` | `Scenes` | Which libraries appear on the client's home screen. |
+| `RECENT_DAYS` | `14` | The cutoff window for the "Recently Added" library. `0` disables it. |
+| `ENABLE_FILTERS` | `True` | Exposes Saved Filters from Stash as folders. |
+| `ENABLE_TAG_FILTERS` | `False` | Exposes a 'Tags' folder. |
+| `ENABLE_ALL_TAGS` | `False` | Lists every single tag in a sub-folder. |
+| `DEFAULT_PAGE_SIZE`| `50` | Pagination size for clients. |
+| `MAX_PAGE_SIZE` | `200` | Absolute ceiling for pagination requests (prevents proxy timeouts). |
+
+### Logging
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `LOG_LEVEL` | `INFO` | Set to `DEBUG`, `INFO`, `WARNING`, or `ERROR`. |
+| `LOG_DIR` | `/config` | The mounted volume directory where the log file is written. |
+| `LOG_FILE` | `stash_jellyfin_proxy.log` | Name of the active log file. |
+| `LOG_MAX_SIZE_MB` | `10` | Triggers a file rotation when exceeded. |
+| `LOG_BACKUP_COUNT` | `3` | How many historical log files to retain. |
+
 ## Credits
 Originally modified from the Stash-Infuse proxy project to bridge the gap between Stash, linear playout engines, and native mobile clients.

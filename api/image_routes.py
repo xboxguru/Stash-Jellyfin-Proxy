@@ -23,56 +23,47 @@ async def endpoint_item_image(request: Request):
     
     logger.info(f"📸 IMAGE REQUEST DETECTED | Raw ID: '{raw_item_id}' | Decoded ID: '{item_id}' | Type: '{image_type}'")
 
-    # 3. Handle Root Libraries & Tags (Return custom Stash logo)
-    if item_id.startswith("root-") or item_id.startswith("tag-") or item_id == raw_item_id:
-        # If it didn't decode into a scene/person (meaning it's likely a user avatar or a root folder)
-        logo_path = os.path.join(os.getcwd(), "logo.png")
-        logger.info(f"🖼️ ROUTING TO LOGO: {item_id} -> Looking for file at: {logo_path}")
-        
-        if os.path.exists(logo_path):
-            return FileResponse(logo_path, media_type="image/png")
-        else:
-            logger.error(f"❌ LOGO NOT FOUND on disk at: {logo_path}")
-            return Response(status_code=404)
+    # ... [Keep lines 1-13 the same] ...
+    
+    logger.info(f"📸 IMAGE REQUEST DETECTED | Raw ID: '{raw_item_id}' | Decoded ID: '{item_id}' | Type: '{image_type}'")
+
+    # 3. Handle Scenes (Movies) First!
+    if item_id.startswith("scene-"):
+        raw_id = item_id.replace("scene-", "")
+        stash_base = config.get_stash_base()
+        apikey = getattr(config, "STASH_API_KEY", "")
+        stash_img_url = f"{stash_base}/scene/{raw_id}/screenshot"
+        if apikey: stash_img_url += f"?apikey={apikey}"
+        logger.info(f"🖼️ ROUTING TO SCENE: {item_id} ({image_type}) -> {stash_img_url}")
+        return await _proxy_image(stash_img_url)
 
     # 4. Handle Performers (Actors)
     if item_id.startswith("person-"):
         raw_id = item_id.replace("person-", "")
-        stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+        stash_base = config.get_stash_base()
         apikey = getattr(config, "STASH_API_KEY", "")
         stash_img_url = f"{stash_base}/performer/{raw_id}/image"
-        if apikey:
-            stash_img_url += f"?apikey={apikey}"
-            
+        if apikey: stash_img_url += f"?apikey={apikey}"
         logger.info(f"🖼️ ROUTING TO PERFORMER: {item_id} -> {stash_img_url}")
         return await _proxy_image(stash_img_url)
 
     # 5. Handle Studios
     if item_id.startswith("studio-"):
         raw_id = item_id.replace("studio-", "")
-        stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+        stash_base = config.get_stash_base()
         apikey = getattr(config, "STASH_API_KEY", "")
         stash_img_url = f"{stash_base}/studio/{raw_id}/image"
-        if apikey:
-            stash_img_url += f"?apikey={apikey}"
-            
+        if apikey: stash_img_url += f"?apikey={apikey}"
         logger.info(f"🖼️ ROUTING TO STUDIO: {item_id} -> {stash_img_url}")
         return await _proxy_image(stash_img_url)
 
-    # 6. Handle Scenes (Movies)
-    if item_id.startswith("scene-"):
-        raw_id = item_id.replace("scene-", "")
-        stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
-        apikey = getattr(config, "STASH_API_KEY", "")
-        
-        # Default to screenshot (Primary / Backdrop / Thumb)
-        stash_img_url = f"{stash_base}/scene/{raw_id}/screenshot"
-        
-        if apikey:
-            stash_img_url += f"?apikey={apikey}"
-            
-        logger.info(f"🖼️ ROUTING TO SCENE: {item_id} ({image_type}) -> {stash_img_url}")
-        return await _proxy_image(stash_img_url)
+    # 6. Handle Root Libraries & Tags (Fallback to Logo)
+    if item_id.startswith("root-") or item_id.startswith("tag-") or item_id.startswith("filter-") or item_id == raw_item_id:
+        logo_path = os.path.join(os.getcwd(), "logo.png")
+        if os.path.exists(logo_path):
+            return FileResponse(logo_path, media_type="image/png")
+        else:
+            return Response(status_code=404)
 
     logger.warning(f"⚠️ UNHANDLED IMAGE REQUEST: {item_id} | Returning 404")
     return Response(status_code=404)

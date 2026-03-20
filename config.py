@@ -14,13 +14,15 @@ else:
     CONFIG_FILE = os.path.join(SCRIPT_DIR, "stash_jellyfin_proxy.conf")
 
 # Default Configuration
+APP_VERSION = os.getenv("APP_VERSION", "v2.1-dev")
 STASH_URL = "https://stash:9999"
 STASH_API_KEY = ""
-PROXY_API_KEY = ""  # Configurable Proxy API Key for ErsatzTV
-SYNC_LEVEL = "Everything"  # Options: Everything, Organized, Tagged
+PROXY_API_KEY = ""  
+SYNC_LEVEL = "Everything"  
 PROXY_BIND = "0.0.0.0"
 PROXY_PORT = 8096
 UI_PORT = 8097
+HOST_IP = ""  # NEW: For UDP discovery behind Docker networks
 SJS_USER = ""
 SJS_PASSWORD = ""
 TAG_GROUPS = []
@@ -31,9 +33,7 @@ LIBRARY_TYPE = "movies"
 RECENT_DAYS = 14
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 200
-IMAGE_CACHE_MAX_SIZE = 100
 ENABLE_FILTERS = True
-ENABLE_IMAGE_RESIZE = True
 ENABLE_TAG_FILTERS = False
 ENABLE_ALL_TAGS = False
 REQUIRE_AUTH_FOR_CONFIG = False
@@ -49,9 +49,8 @@ LOG_BACKUP_COUNT = 3
 BANNED_IPS = set()
 BAN_THRESHOLD = 10
 BAN_WINDOW_MINUTES = 15
-CACHE_VERSION = 0 # Cache busting
+CACHE_VERSION = 0 
 
-# Tracking variables for UI integration
 config_defined_keys = set()
 env_overrides = []
 
@@ -62,16 +61,20 @@ def normalize_path(path, default="/graphql"):
     if len(p) > 1 and p.endswith('/'): p = p.rstrip('/')
     return p
 
+# NEW: Centralized Stash Base URL generator
+def get_stash_base():
+    """Returns the Stash URL stripped of trailing slashes."""
+    return getattr(sys.modules[__name__], "STASH_URL", "http://localhost:9999").rstrip('/')
+
 # --- 2. DYNAMIC SAVE FUNCTION ---
 def save_config():
-    """Dynamically writes all tracked settings to the configuration file."""
     keys_to_save = [
-        "STASH_URL", "STASH_API_KEY", "PROXY_BIND", "PROXY_PORT", "UI_PORT", "PROXY_API_KEY",
+        "STASH_URL", "STASH_API_KEY", "PROXY_BIND", "PROXY_PORT", "UI_PORT", "HOST_IP", "PROXY_API_KEY",
         "SJS_USER", "SJS_PASSWORD", "SERVER_ID", "SERVER_NAME", "TAG_GROUPS", "LATEST_GROUPS",
         "STASH_TIMEOUT", "STASH_RETRIES", "STASH_GRAPHQL_PATH", "STASH_VERIFY_TLS",
-        "SYNC_LEVEL", "ENABLE_FILTERS", "ENABLE_IMAGE_RESIZE", "ENABLE_TAG_FILTERS", 
+        "SYNC_LEVEL", "ENABLE_FILTERS", "ENABLE_TAG_FILTERS", 
         "ENABLE_ALL_TAGS", "CACHE_VERSION", "DEFAULT_PAGE_SIZE", "MAX_PAGE_SIZE",
-        "IMAGE_CACHE_MAX_SIZE", "REQUIRE_AUTH_FOR_CONFIG", "LOG_DIR", "LOG_FILE", 
+        "REQUIRE_AUTH_FOR_CONFIG", "LOG_DIR", "LOG_FILE", 
         "LOG_LEVEL", "LOG_MAX_SIZE_MB", "LOG_BACKUP_COUNT", "BAN_THRESHOLD", 
         "BAN_WINDOW_MINUTES", "BANNED_IPS", "RECENT_DAYS"
     ]
@@ -82,7 +85,6 @@ def save_config():
             for key in keys_to_save:
                 val = getattr(sys.modules[__name__], key, "")
                 
-                # Format correctly for the file
                 if isinstance(val, bool):
                     val_str = str(val).lower()
                 elif isinstance(val, (list, set)):
@@ -96,7 +98,6 @@ def save_config():
 
 # --- 3. ROBUST LOAD FUNCTION ---
 def load_config_file():
-    """Reads the config file and strictly enforces data types."""
     if not os.path.exists(CONFIG_FILE):
         return
         
@@ -109,67 +110,68 @@ def load_config_file():
                 if '=' in line:
                     k, v = line.split('=', 1)
                     k = k.strip()
-                    v = v.strip().strip('"').strip("'") # Clean quotes and spaces
+                    v = v.strip().strip('"').strip("'")
                     
-                    # Enforce Integers
                     if k in ["CACHE_VERSION", "PROXY_PORT", "UI_PORT", "DEFAULT_PAGE_SIZE", "MAX_PAGE_SIZE", 
-                             "STASH_TIMEOUT", "STASH_RETRIES", "IMAGE_CACHE_MAX_SIZE", "LOG_MAX_SIZE_MB", 
+                             "STASH_TIMEOUT", "STASH_RETRIES", "LOG_MAX_SIZE_MB", 
                              "LOG_BACKUP_COUNT", "BAN_THRESHOLD", "BAN_WINDOW_MINUTES", "RECENT_DAYS"]:
-                        try:
-                            v = int(v)
-                        except ValueError:
-                            continue
-                            
-                    # Enforce Booleans
-                    elif k in ["ENABLE_FILTERS", "ENABLE_IMAGE_RESIZE", "ENABLE_TAG_FILTERS", "ENABLE_ALL_TAGS", "REQUIRE_AUTH_FOR_CONFIG", "STASH_VERIFY_TLS"]:
+                        try: v = int(v)
+                        except ValueError: continue
+                    elif k in ["ENABLE_FILTERS", "ENABLE_TAG_FILTERS", "ENABLE_ALL_TAGS", "REQUIRE_AUTH_FOR_CONFIG", "STASH_VERIFY_TLS"]:
                         v = str(v).lower() in ['true', '1', 'yes', 'on']
-                        
-                    # Enforce Lists
                     elif k in ["TAG_GROUPS", "LATEST_GROUPS"]:
                         v = [x.strip() for x in v.split(",") if x.strip()]
-
-                    # Enforce Sets
                     elif k in ["BANNED_IPS"]:
                         v = set(x.strip() for x in v.split(",") if x.strip())
-
-                    # Force Log Level to Uppercase
                     elif k == "LOG_LEVEL":
                         v = str(v).upper()
-                        
-                    # Normalize Paths
                     elif k == "STASH_GRAPHQL_PATH":
                         v = normalize_path(v)
                         
                     setattr(sys.modules[__name__], k, v)
                     
-                    # Track that this key came from the file (for the UI)
                     if hasattr(sys.modules[__name__], "config_defined_keys"):
                         getattr(sys.modules[__name__], "config_defined_keys").add(k)
                         
     except Exception as e:
         logger.error(f"Config load error: {e}")
 
-# Load settings from the .conf file into memory
 load_config_file()
 
 # --- 4. ENVIRONMENT VARIABLES OVERRIDE ---
-env_map = {
-    "STASH_URL": "STASH_URL", "STASH_API_KEY": "STASH_API_KEY", "PROXY_API_KEY": "PROXY_API_KEY",
-    "PROXY_BIND": "PROXY_BIND", "SJS_USER": "SJS_USER", "SJS_PASSWORD": "SJS_PASSWORD",
-    "SERVER_ID": "SERVER_ID", "LOG_DIR": "LOG_DIR", "SYNC_LEVEL": "SYNC_LEVEL"
-}
+# Dynamically check all supported configuration keys against the environment
+_supported_keys = [
+    "STASH_URL", "STASH_API_KEY", "PROXY_BIND", "PROXY_PORT", "UI_PORT", "HOST_IP", "PROXY_API_KEY",
+    "SJS_USER", "SJS_PASSWORD", "SERVER_ID", "SERVER_NAME", "TAG_GROUPS", "LATEST_GROUPS",
+    "STASH_TIMEOUT", "STASH_RETRIES", "STASH_GRAPHQL_PATH", "STASH_VERIFY_TLS",
+    "SYNC_LEVEL", "ENABLE_FILTERS", "ENABLE_TAG_FILTERS", 
+    "ENABLE_ALL_TAGS", "CACHE_VERSION", "DEFAULT_PAGE_SIZE", "MAX_PAGE_SIZE",
+    "REQUIRE_AUTH_FOR_CONFIG", "LOG_DIR", "LOG_FILE", 
+    "LOG_LEVEL", "LOG_MAX_SIZE_MB", "LOG_BACKUP_COUNT", "BAN_THRESHOLD", 
+    "BAN_WINDOW_MINUTES", "BANNED_IPS", "RECENT_DAYS"
+]
 
-for env_key, var_name in env_map.items():
-    if os.getenv(env_key):
-        globals()[var_name] = os.getenv(env_key)
-        env_overrides.append(env_key)
-
-if os.getenv("PROXY_PORT"): 
-    globals()["PROXY_PORT"] = int(os.getenv("PROXY_PORT"))
-    env_overrides.append("PROXY_PORT")
-if os.getenv("UI_PORT"): 
-    globals()["UI_PORT"] = int(os.getenv("UI_PORT"))
-    env_overrides.append("UI_PORT")
+for k in _supported_keys:
+    val = os.getenv(k)
+    if val is not None:
+        if k in ["CACHE_VERSION", "PROXY_PORT", "UI_PORT", "DEFAULT_PAGE_SIZE", "MAX_PAGE_SIZE", 
+                 "STASH_TIMEOUT", "STASH_RETRIES", "LOG_MAX_SIZE_MB", 
+                 "LOG_BACKUP_COUNT", "BAN_THRESHOLD", "BAN_WINDOW_MINUTES", "RECENT_DAYS"]:
+            try: val = int(val)
+            except ValueError: continue
+        elif k in ["ENABLE_FILTERS", "ENABLE_TAG_FILTERS", "ENABLE_ALL_TAGS", "REQUIRE_AUTH_FOR_CONFIG", "STASH_VERIFY_TLS"]:
+            val = str(val).lower() in ['true', '1', 'yes', 'on']
+        elif k in ["TAG_GROUPS", "LATEST_GROUPS"]:
+            val = [x.strip() for x in val.split(",") if x.strip()]
+        elif k in ["BANNED_IPS"]:
+            val = set(x.strip() for x in val.split(",") if x.strip())
+        elif k == "LOG_LEVEL":
+            val = str(val).upper()
+        elif k == "STASH_GRAPHQL_PATH":
+            val = normalize_path(val)
+            
+        globals()[k] = val
+        env_overrides.append(k)
 
 # --- 5. AUTO-GENERATE MISSING KEYS ---
 needs_save = False

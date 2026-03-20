@@ -27,20 +27,64 @@ def _get_query_param(request: Request, param_name: str, default=None):
         
     return default
 
+def _transform_saved_filter(object_filter):
+    """Translates Stash UI filter definitions into Stash Backend GraphQL definitions."""
+    if not object_filter or not isinstance(object_filter, dict): return {}
+    result = {}
+    for key, value in object_filter.items():
+        if value is None: continue
+        
+        if key in ('AND', 'OR', 'NOT'):
+            if isinstance(value, list):
+                result[key] = [_transform_saved_filter(v) for v in value if v]
+            elif isinstance(value, dict):
+                result[key] = _transform_saved_filter(value)
+            continue
+            
+        if isinstance(value, dict):
+            modifier = value.get('modifier')
+            val = value.get('value')
+            
+            # Extract nested UI item arrays into flat value arrays
+            if 'items' in value:
+                ids = [item.get('id') for item in value['items'] if isinstance(item, dict) and item.get('id')]
+                excludes = value.get('excluded', [])
+                if isinstance(excludes, list):
+                    excludes = [e.get('id') if isinstance(e, dict) else e for e in excludes]
+                result[key] = {'value': ids, 'modifier': modifier, 'depth': value.get('depth', 0), 'excludes': excludes}
+                continue
+                
+            if modifier in ('IS_NULL', 'NOT_NULL'):
+                result[key] = {'value': '', 'modifier': modifier}
+                continue
+                
+            if isinstance(val, dict) and 'value' in val:
+                val = val['value']
+                
+            if modifier and val is not None:
+                transformed = {'modifier': modifier, 'value': val}
+                for k, v in value.items():
+                    if k not in ('modifier', 'value'): transformed[k] = v
+                result[key] = transformed
+                continue
+                
+        result[key] = value
+    return result
+
 async def _get_libraries():
     server_id = getattr(config, "SERVER_ID", "stash-proxy")
     cache_version = getattr(config, "CACHE_VERSION", 0)
     
-    def build_view(name, view_id):
+    def build_view(name, view_id, is_standard_folder=False):
         logo_hash = hashlib.md5(f"stash-logo-{cache_version}".encode()).hexdigest()
         
         return {
             "Name": name, "ServerId": server_id, "Id": view_id, "ItemId": view_id,
             "ChannelId": None, "IsFolder": True, 
-            "Type": "UserView", # FIX 1: Enforce strict UserView type for Fladder
+            "Type": "Folder" if is_standard_folder else "UserView", 
             "UserData": {"PlaybackPositionTicks": 0, "PlayCount": 0, "IsFavorite": False, "Played": False, "Key": hyphens(view_id), "ItemId": view_id},
             "PrimaryImageAspectRatio": 1.7777777777777777, 
-            "CollectionType": "movies",
+            "CollectionType": "folders" if is_standard_folder else "movies",
             "LibraryOptions": {"PathInfos": []}, "Locations": [],
             "ImageTags": {"Primary": logo_hash, "Thumb": logo_hash}, 
             "HasPrimaryImage": True, 
@@ -59,10 +103,17 @@ async def _get_libraries():
     recent_days = getattr(config, "RECENT_DAYS", 14)
     if recent_days > 0:
         views.insert(1, build_view(f"Recently Added ({recent_days} Days)", encode_id("root", "recent")))
+            
+    # --- EXPERIMENT: Set standard folders to True ---
+    if getattr(config, "ENABLE_FILTERS", True):
+        views.append(build_view("Saved Filters", encode_id("root", "filters"), is_standard_folder=True))
+            
+    if getattr(config, "ENABLE_TAG_FILTERS", False):
+        views.append(build_view("Tags", encode_id("root", "tags"), is_standard_folder=True))
     
     tag_names = getattr(config, "TAG_GROUPS", [])
     if tag_names:
-        stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+        stash_base = config.get_stash_base()
         url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
         headers = {"Content-Type": "application/json"}
         if getattr(config, "STASH_API_KEY", ""):
@@ -79,7 +130,8 @@ async def _get_libraries():
                     match = next((t for t in all_tags if t['name'].strip().lower() == search_name), None)
                     if match:
                         view_id = encode_id("tag", str(match['id']))
-                        views.append(build_view(match['name'], view_id))
+                        # Ensure custom tag root folders are standard folders too
+                        views.append(build_view(match['name'], view_id, is_standard_folder=True))
             except Exception as e:
                 logger.error(f"Failed to auto-resolve tag IDs: {e}")
 
@@ -90,7 +142,6 @@ async def endpoint_views(request: Request):
     return JSONResponse({"Items": views, "TotalRecordCount": len(views), "StartIndex": 0})
 
 async def endpoint_virtual_folders(request: Request):
-    # FIX 2: Enforce strict VirtualFolderInfo schema so Fladder doesn't drop the array
     views = await _get_libraries() 
     virtual_folders = []
     
@@ -136,41 +187,74 @@ async def endpoint_items(request: Request):
 
     if ids_param:
         raw_ids = []
+        jellyfin_items = []
+        server_id = getattr(config, "SERVER_ID", "stash-proxy")
+        
         for i in ids_param.split(","):
             dec_i = decode_id(i)
+            
+            # --- FLADDER FIX: Intercept Folders before they are treated as Scenes ---
+            if dec_i.startswith("root-") or dec_i.startswith("tag-") or dec_i.startswith("filter-"):
+                is_root = dec_i.startswith("root-")
+                is_nav_folder = dec_i in ["root-filters", "root-tags", "root-alltags"]
+                
+                if is_root: safe_id = encode_id("root", dec_i.replace("root-", ""))
+                elif dec_i.startswith("tag-"): safe_id = encode_id("tag", dec_i.replace("tag-", ""))
+                elif dec_i.startswith("filter-"): safe_id = encode_id("filter", dec_i.replace("filter-", ""))
+                else: safe_id = i
+                
+                is_collection = is_root and not is_nav_folder
+                
+                folder_item = {
+                    "Name": "Folder", 
+                    "SortName": "Folder",
+                    "Id": safe_id, 
+                    "ServerId": server_id,
+                    "Type": "CollectionFolder" if is_collection else "Folder",
+                    "IsFolder": True
+                }
+                
+                if is_collection:
+                    folder_item["CollectionType"] = "movies"
+                    
+                jellyfin_items.append(folder_item)
+                continue
+            # ------------------------------------------------------------------------
+
             match = re.search(r'\d+', dec_i)
             if match: raw_ids.append(match.group())
-                
-        jellyfin_items = []
-        stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
-        url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
-        headers = {"Content-Type": "application/json", "Accept": "application/json"}
-        if getattr(config, "STASH_API_KEY", ""):
-            headers["ApiKey"] = config.STASH_API_KEY
-        
-        semaphore = asyncio.Semaphore(10)
-        async def fetch_single_scene(client, raw_id):
-            async with semaphore:
-                query = f"query FindScene($id: ID!) {{ findScene(id: $id) {{ {stash_client.SCENE_FIELDS} }} }}"
-                try:
-                    resp = await client.post(url, headers=headers, json={"query": query, "variables": {"id": raw_id}}, timeout=10.0)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        if data and "data" in data and data["data"].get("findScene"):
-                            return data["data"]["findScene"]
-                except Exception: pass
-                return None
-
-        async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
-            tasks = [fetch_single_scene(client, rid) for rid in raw_ids]
-            results = await asyncio.gather(*tasks)
             
-        for scene in results:
-            if scene:
-                try:
-                    safe_root = encode_id("root", "scenes")
-                    jellyfin_items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=parent_id or safe_root))
-                except Exception: pass
+        if raw_ids:
+            stash_base = config.get_stash_base()
+            url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
+            headers = {"Content-Type": "application/json", "Accept": "application/json"}
+            if getattr(config, "STASH_API_KEY", ""):
+                headers["ApiKey"] = config.STASH_API_KEY
+            
+            semaphore = asyncio.Semaphore(10)
+            async def fetch_single_scene(client, raw_id):
+                async with semaphore:
+                    query = f"query FindScene($id: ID!) {{ findScene(id: $id) {{ {stash_client.SCENE_FIELDS} }} }}"
+                    try:
+                        resp = await client.post(url, headers=headers, json={"query": query, "variables": {"id": raw_id}}, timeout=10.0)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            if data and "data" in data and data["data"].get("findScene"):
+                                return data["data"]["findScene"]
+                    except Exception: pass
+                    return None
+
+            async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
+                tasks = [fetch_single_scene(client, rid) for rid in raw_ids]
+                results = await asyncio.gather(*tasks)
+                
+            for scene in results:
+                if scene:
+                    try:
+                        safe_root = encode_id("root", "scenes")
+                        jellyfin_items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=parent_id or safe_root))
+                    except Exception: pass
+                    
         return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": len(jellyfin_items), "StartIndex": 0})
 
     filter_args = {"sort": "created_at", "direction": "DESC"}
@@ -189,6 +273,70 @@ async def endpoint_items(request: Request):
     is_folder_override = False
     
     if decoded_parent_id:
+        if decoded_parent_id in ["root-filters", "root-tags", "root-alltags"]:
+            jellyfin_items = []
+            server_id = getattr(config, "SERVER_ID", "stash-proxy")
+            stash_base = config.get_stash_base()
+            url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
+            headers = {"Content-Type": "application/json", "Accept": "application/json"}
+            if getattr(config, "STASH_API_KEY", ""): headers["ApiKey"] = config.STASH_API_KEY
+            
+            async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
+                if decoded_parent_id == "root-filters":
+                    query = "query { findSavedFilters(mode: SCENES) { id name } }"
+                    try:
+                        resp = await client.post(url, headers=headers, json={"query": query}, timeout=10.0)
+                        filters = resp.json().get("data", {}).get("findSavedFilters", [])
+                        for f in filters:
+                            # FIX: Removed CollectionFolder logic so they don't spawn 4 inner tabs!
+                            jellyfin_items.append({
+                                "Name": f.get("name"), "Id": encode_id("filter", str(f.get("id"))),
+                                "Type": "Folder", "IsFolder": True, "ServerId": server_id
+                            })
+                    except Exception as e: logger.error(f"Failed to fetch filters: {e}")
+                    
+                elif decoded_parent_id == "root-tags":
+                    tag_names = getattr(config, "TAG_GROUPS", [])
+                    if tag_names:
+                        query = "query { allTags { id name } }"
+                        try:
+                            resp = await client.post(url, headers=headers, json={"query": query}, timeout=10.0)
+                            all_tags = resp.json().get("data", {}).get("allTags", [])
+                            for name in tag_names:
+                                search_name = name.strip().lower()
+                                match = next((t for t in all_tags if t['name'].strip().lower() == search_name), None)
+                                if match:
+                                    jellyfin_items.append({
+                                        "Name": match['name'], "Id": encode_id("tag", str(match['id'])),
+                                        "Type": "Folder", "IsFolder": True, "ServerId": server_id
+                                    })
+                        except Exception as e: logger.error(f"Failed to fetch tags: {e}")
+                        
+                    if getattr(config, "ENABLE_ALL_TAGS", False):
+                        jellyfin_items.append({
+                            "Name": "All Tags", "Id": encode_id("root", "alltags"),
+                            "Type": "Folder", "IsFolder": True, "ServerId": server_id
+                        })
+                        
+                elif decoded_parent_id == "root-alltags":
+                    query = """query { findTags(filter: {per_page: -1, sort: "name", direction: ASC}) { tags { id name } } }"""
+                    try:
+                        resp = await client.post(url, headers=headers, json={"query": query}, timeout=15.0)
+                        tags = resp.json().get("data", {}).get("findTags", {}).get("tags", [])
+                        for t in tags:
+                            jellyfin_items.append({
+                                "Name": t.get("name"), "Id": encode_id("tag", str(t.get("id"))),
+                                "Type": "Folder", "IsFolder": True, "ServerId": server_id
+                            })
+                    except Exception as e: logger.error(f"Failed to fetch all tags: {e}")
+                    
+            total_record_count = len(jellyfin_items)
+            if original_limit > 0 and decoded_parent_id == "root-alltags":
+                jellyfin_items = jellyfin_items[start_index : start_index + original_limit]
+                
+            return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": total_record_count, "StartIndex": start_index})
+
+        # --- STANDARD SCENE ROUTING ---
         if decoded_parent_id == "root-scenes":
             is_folder_override = True
         elif decoded_parent_id == "root-organized":
@@ -214,6 +362,48 @@ async def endpoint_items(request: Request):
             raw_studio_id = decoded_parent_id.replace("studio-", "")
             scene_filter["studios"] = {"value": [raw_studio_id], "modifier": "INCLUDES"}
             is_folder_override = True
+        elif decoded_parent_id.startswith("filter-"):
+            raw_filter_id = decoded_parent_id.replace("filter-", "")
+            is_folder_override = True
+            
+            stash_base = config.get_stash_base()
+            url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
+            headers = {"Content-Type": "application/json", "Accept": "application/json"}
+            if getattr(config, "STASH_API_KEY", ""): headers["ApiKey"] = config.STASH_API_KEY
+            
+            # FIX: Dual-fallback query to bypass strict schema errors in newer Stash versions
+            query_modern = """query FindSavedFilter($id: ID!) { findSavedFilter(id: $id) { find_filter { q sort direction } object_filter } }"""
+            query_legacy = """query FindSavedFilter($id: ID!) { findSavedFilter(id: $id) { filter find_filter { q sort direction } } }"""
+            
+            async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
+                try:
+                    resp = await client.post(url, headers=headers, json={"query": query_modern, "variables": {"id": raw_filter_id}}, timeout=5.0)
+                    resp_json = resp.json()
+                    
+                    if "errors" in resp_json:
+                        resp = await client.post(url, headers=headers, json={"query": query_legacy, "variables": {"id": raw_filter_id}}, timeout=5.0)
+                        resp_json = resp.json()
+                        
+                    data = resp_json.get("data", {}).get("findSavedFilter", {})
+                    
+                    if data:
+                        if data.get("object_filter"):
+                            scene_filter.update(_transform_saved_filter(data["object_filter"]))
+                        elif data.get("filter"):
+                            import json
+                            parsed = json.loads(data["filter"])
+                            if "scene_filter" in parsed:
+                                scene_filter.update(_transform_saved_filter(parsed["scene_filter"]))
+                            if "q" in parsed: filter_args["q"] = parsed["q"]
+                            if "sort" in parsed: filter_args["sort"] = parsed["sort"]
+                            if "direction" in parsed: filter_args["direction"] = parsed["direction"]
+                            
+                        if data.get("find_filter"):
+                            if "q" in data["find_filter"]: filter_args["q"] = data["find_filter"]["q"]
+                            if "sort" in data["find_filter"]: filter_args["sort"] = data["find_filter"]["sort"]
+                            if "direction" in data["find_filter"]: filter_args["direction"] = data["find_filter"]["direction"]
+                except Exception as e:
+                    logger.error(f"Failed to apply saved filter {raw_filter_id}: {e}")
 
     if item_types:
         allowed = False
@@ -309,16 +499,29 @@ async def endpoint_item_details(request: Request):
     cache_version = getattr(config, "CACHE_VERSION", 0)
     server_id = getattr(config, "SERVER_ID", "stash-proxy")
     
-    if decoded_id.startswith("root-") or decoded_id.startswith("tag-"):
-        safe_id = encode_id("root", decoded_id.replace("root-", "")) if decoded_id.startswith("root-") else encode_id("tag", decoded_id.replace("tag-", ""))
-        return JSONResponse({
+    if decoded_id.startswith("root-") or decoded_id.startswith("tag-") or decoded_id.startswith("filter-"):
+        is_root = decoded_id.startswith("root-")
+        is_nav_folder = decoded_id in ["root-filters", "root-tags", "root-alltags"]
+        
+        if is_root: safe_id = encode_id("root", decoded_id.replace("root-", ""))
+        elif decoded_id.startswith("tag-"): safe_id = encode_id("tag", decoded_id.replace("tag-", ""))
+        elif decoded_id.startswith("filter-"): safe_id = encode_id("filter", decoded_id.replace("filter-", ""))
+        
+        is_collection = is_root and not is_nav_folder
+        
+        response_dict = {
             "Name": "Folder", 
             "SortName": "Folder",
             "Id": safe_id, 
             "ServerId": server_id,
-            "Type": "UserView", # FIX: Ensure detail queries for folders also return UserView
+            "Type": "CollectionFolder" if is_collection else "Folder",
             "IsFolder": True
-        })
+        }
+        
+        if is_collection:
+            response_dict["CollectionType"] = "movies"
+            
+        return JSONResponse(response_dict)
 
     if decoded_id.startswith("studio-"):
         safe_id = encode_id("studio", decoded_id.replace("studio-", ""))
@@ -333,7 +536,7 @@ async def endpoint_item_details(request: Request):
 
     if decoded_id.startswith("person-"):
         raw_id = decoded_id.replace("person-", "")
-        stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+        stash_base = config.get_stash_base()
         url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if getattr(config, "STASH_API_KEY", ""):
@@ -401,7 +604,7 @@ async def endpoint_tags(request: Request):
     is_genre = "genre" in request.url.path.lower()
     item_type = "Genre" if is_genre else "Tag"
 
-    stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+    stash_base = config.get_stash_base()
     url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if getattr(config, "STASH_API_KEY", ""):
@@ -499,3 +702,20 @@ async def endpoint_latest(request: Request):
             pass
             
     return JSONResponse(jellyfin_items) 
+
+async def endpoint_theme_songs(request: Request):
+    """Satisfies strict Kotlin SDKs (Wholphin/Findroid) looking for Theme Songs."""
+    item_id = request.path_params.get("item_id", "unknown")
+    
+    # The Kotlin SDK strictly requires the OwnerId field to be present
+    return JSONResponse({
+        "OwnerId": item_id,
+        "Items": [],
+        "TotalRecordCount": 0,
+        "StartIndex": 0
+    })
+
+async def endpoint_special_features(request: Request):
+    """Satisfies strict Kotlin SDKs looking for Special Features."""
+    # The Kotlin SDK strictly expects a raw JSON Array, NOT an object containing an 'Items' array!
+    return JSONResponse([])

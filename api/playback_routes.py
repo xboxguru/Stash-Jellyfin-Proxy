@@ -4,6 +4,7 @@ import asyncio
 import httpx
 from starlette.responses import JSONResponse, Response, StreamingResponse, RedirectResponse
 from starlette.requests import Request
+from starlette.background import BackgroundTask, BackgroundTasks
 import config
 from core import stash_client, jellyfin_mapper
 from core.jellyfin_mapper import decode_id
@@ -34,7 +35,51 @@ async def endpoint_sessions_playing(request: Request):
         
         playback_ticks = float(data.get("PlaybackPositionTicks") or data.get("PositionTicks") or 0)
         runtime_ticks = float(data.get("RunTimeTicks") or data.get("Item", {}).get("RunTimeTicks") or 0)
-        title = data.get("Item", {}).get("Name") or "Unknown Scene"
+        title = data.get("Item", {}).get("Name")
+        performer = "Unknown"
+        
+        # --- 1. EXTRACT CLIENT METADATA ---
+        client_ip = request.client.host if request.client else "Unknown"
+        user_agent = request.headers.get("user-agent", "")
+        
+        # Respect Reverse Proxies (Docker / Nginx)
+        x_forwarded = request.headers.get("x-forwarded-for")
+        if x_forwarded:
+            client_ip = x_forwarded.split(",")[0].strip()
+        elif request.headers.get("x-real-ip"):
+            client_ip = request.headers.get("x-real-ip")
+            
+        # Parse Client Type from User-Agent
+        if "Infuse" in user_agent: client_type = "Infuse"
+        elif "Wholphin" in user_agent: client_type = "Wholphin"
+        elif "Findroid" in user_agent: client_type = "Findroid"
+        elif "Fladder" in user_agent: client_type = "Fladder"
+        elif "ErsatzTV" in user_agent: client_type = "ErsatzTV"
+        elif "VLC" in user_agent: client_type = "VLC"
+        elif "Jellyfin" in user_agent: client_type = "Jellyfin"
+        else: client_type = user_agent.split("/")[0][:20] if user_agent else "Unknown"
+        
+        # Try to get User from payload, fallback to Config
+        user = data.get("UserId") or getattr(config, "SJS_USER", "Admin")
+        if not user: user = "Admin"
+        # ----------------------------------
+        
+        # Fetch missing metadata directly from Stash
+        if item_id.startswith("scene-"):
+            raw_id = item_id.replace("scene-", "")
+            scene = stash_client.get_scene(raw_id)
+            if scene:
+                if not title or title == "Unknown Scene":
+                    title = scene.get("title") or scene.get("code") or f"Scene {raw_id}"
+                
+                if scene.get("performers"):
+                    performer = ", ".join([p.get("name") for p in scene["performers"]])
+                    
+                if runtime_ticks <= 0 and scene.get("files"):
+                    duration_seconds = scene["files"][0].get("duration", 0)
+                    runtime_ticks = float(duration_seconds * 10000000)
+
+        title = title or "Unknown Scene"
         
         if not hasattr(state, "active_streams"):
             state.active_streams = []
@@ -42,14 +87,20 @@ async def endpoint_sessions_playing(request: Request):
         stream = next((s for s in state.active_streams if s.get("id") == session_id), None)
         
         if not stream:
-            logger.info(f"▶️ PLAYBACK STARTED: Session {session_id} for Item {item_id}")
+            logger.info(f"▶️ PLAYBACK STARTED: Session {session_id} for Item {item_id} ({title}) from {client_ip}")
             stream_info = {
                 "id": session_id,
                 "item_id": item_id,
                 "title": title,
+                "performer": performer,
                 "runtime_ticks": runtime_ticks,
                 "last_ticks": playback_ticks,
-                "started": int(time.time())
+                "started": int(time.time()),
+                
+                # --- 2. INJECT INTO ACTIVE STREAMS CACHE ---
+                "user": user,
+                "clientIp": client_ip,
+                "clientType": client_type
             }
             state.active_streams.append(stream_info)
             
@@ -57,7 +108,7 @@ async def endpoint_sessions_playing(request: Request):
             state.stats["total_streams"] += 1
             scene_id = item_id if item_id else "unknown"
             if scene_id not in state.stats["top_played"]:
-                state.stats["top_played"][scene_id] = {"title": title, "performer": "Unknown", "count": 0}
+                state.stats["top_played"][scene_id] = {"title": title, "performer": performer, "count": 0}
             state.stats["top_played"][scene_id]["count"] += 1
         else:
             stream["last_ticks"] = max(stream.get("last_ticks", 0), playback_ticks)
@@ -71,6 +122,8 @@ async def endpoint_sessions_playing(request: Request):
 
 async def endpoint_sessions_stopped(request: Request):
     """Receives playback stopped reports to clear active streams and sync watch status."""
+    bg_tasks = BackgroundTasks()
+    
     try:
         data = await request.json()
         session_id = data.get("PlaySessionId") or data.get("SessionId") or "unknown_session"
@@ -103,22 +156,22 @@ async def endpoint_sessions_stopped(request: Request):
                             
                             if percentage >= 0.90:
                                 logger.info(f"✅ Playback reached 90%! Syncing to Stash Play History...")
-                                asyncio.create_task(_increment_stash_playcount(raw_id))
-                                asyncio.create_task(_update_stash_resume_time(raw_id, 0))
+                                bg_tasks.add_task(_increment_stash_playcount, raw_id)
+                                bg_tasks.add_task(_update_stash_resume_time, raw_id, 0)
                             elif percentage > 0.01:
                                 resume_seconds = playback_ticks / 10000000.0
                                 logger.info(f"⏸️ Playback paused at {percentage*100:.1f}%. Saving resume time...")
-                                asyncio.create_task(_update_stash_resume_time(raw_id, resume_seconds))
+                                bg_tasks.add_task(_update_stash_resume_time, raw_id, resume_seconds)
                             else:
                                 logger.info(f"❌ Playback stopped at beginning. Clearing resume time.")
-                                asyncio.create_task(_update_stash_resume_time(raw_id, 0))
+                                bg_tasks.add_task(_update_stash_resume_time, raw_id, 0)
                         else:
                             logger.warning(f"Could not determine total duration. Falling back to raw resume time save.")
                             if playback_ticks > 10000000: # > 1 second
                                 resume_seconds = playback_ticks / 10000000.0
-                                asyncio.create_task(_update_stash_resume_time(raw_id, resume_seconds))
+                                bg_tasks.add_task(_update_stash_resume_time, raw_id, resume_seconds)
                             else:
-                                asyncio.create_task(_update_stash_resume_time(raw_id, 0))
+                                bg_tasks.add_task(_update_stash_resume_time, raw_id, 0)
                             
                     except (ValueError, TypeError) as e:
                         logger.error(f"Failed to calculate playback percentage: {e}")
@@ -129,13 +182,13 @@ async def endpoint_sessions_stopped(request: Request):
     except Exception as e:
         logger.error(f"Error processing stopped session: {e}")
 
-    return JSONResponse({}, status_code=204)
+    return JSONResponse({}, status_code=204, background=bg_tasks)
 
 async def endpoint_stream(request: Request):
     """Pipes the video stream directly from Stash, supporting DirectPlay and Trojan HLS Playlists."""
     item_id = decode_id(request.path_params.get("item_id", ""))
     raw_id = item_id.replace("scene-", "")
-    stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+    stash_base = config.get_stash_base()
     apikey = getattr(config, "STASH_API_KEY", "")
     
     # Default to the raw stream
@@ -245,7 +298,6 @@ async def endpoint_stream(request: Request):
     headers = dict(request.headers)
     headers.pop("host", None)
     
-    # Only strip Range headers if we are forcing a live transcode pipe (which we currently aren't doing anymore, but good to keep safe)
     if is_transcoding:
         headers.pop("range", None)
         headers.pop("Range", None)
@@ -257,7 +309,6 @@ async def endpoint_stream(request: Request):
         async for chunk in resp.aiter_bytes(chunk_size=8192):
             yield chunk
 
-    # Disable the httpx timeout for massive continuous downloads!
     client = httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False), timeout=None)
     try:
         req = client.build_request(request.method, stash_stream_url, headers=headers)
@@ -272,9 +323,7 @@ async def endpoint_stream(request: Request):
         if range_header and status_code == 206 and "content-range" not in resp_headers:
             logger.warning(f"Stash returned 206 but missing Content-Range for scene {raw_id}")
             
-        # Tell Android to save the file to disk if they requested a download
         if "download" in request.url.path.lower():
-            # Dynamically set the extension based on the actual container so the file saves correctly
             resp_headers["Content-Disposition"] = f'attachment; filename="{raw_id}.{download_ext}"'
         
         if request.method == "HEAD":
@@ -295,10 +344,9 @@ async def endpoint_hls_segment(request: Request):
     raw_id = item_id.replace("scene-", "")
     segment = request.path_params.get("segment", "")
     
-    stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+    stash_base = config.get_stash_base()
     apikey = getattr(config, "STASH_API_KEY", "")
     
-    # Construct the exact URL Stash expects for the segment
     stash_segment_url = f"{stash_base}/scene/{raw_id}/stream.m3u8/{segment}"
     if apikey:
         stash_segment_url += f"?apikey={apikey}"
@@ -329,8 +377,7 @@ async def endpoint_hls_segment(request: Request):
         return Response(status_code=500)
           
 async def _update_stash_resume_time(raw_id: str, seconds: float):
-    """Saves the exact playback position to Stash using its native activity tracker."""
-    stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+    stash_base = config.get_stash_base()
     url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if getattr(config, "STASH_API_KEY", ""):
@@ -353,8 +400,7 @@ async def _update_stash_resume_time(raw_id: str, seconds: float):
             logger.error(f"Failed to communicate with Stash to update resume time: {e}")
 
 async def _increment_stash_playcount(raw_id: str):
-    """Logs a play in Stash using the official native player mutation."""
-    stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+    stash_base = config.get_stash_base()
     url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if getattr(config, "STASH_API_KEY", ""):
@@ -369,8 +415,7 @@ async def _increment_stash_playcount(raw_id: str):
             logger.error(f"Failed to increment play count for Scene {raw_id}: {e}")
 
 async def _increment_stash_o_counter(raw_id: str):
-    """Logs an 'O' in Stash using the modern SceneAddO mutation."""
-    stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+    stash_base = config.get_stash_base()
     url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if getattr(config, "STASH_API_KEY", ""):
@@ -378,7 +423,6 @@ async def _increment_stash_o_counter(raw_id: str):
         
     async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
         try:
-            # Using the exact payload format from the Stash Web UI
             query_o = """
             mutation SceneAddO($id: ID!, $times: [Timestamp!]) {
               sceneAddO(id: $id, times: $times) {
@@ -386,12 +430,7 @@ async def _increment_stash_o_counter(raw_id: str):
               }
             }
             """
-            payload = {
-                "operationName": "SceneAddO",
-                "variables": {"id": raw_id},
-                "query": query_o
-            }
-            
+            payload = {"operationName": "SceneAddO", "variables": {"id": raw_id}, "query": query_o}
             resp = await client.post(url, headers=headers, json=payload, timeout=10.0)
             data = resp.json()
             
@@ -404,19 +443,19 @@ async def _increment_stash_o_counter(raw_id: str):
             logger.error(f"Failed to increment O counter for Scene {raw_id}: {e}")
 
 async def endpoint_mark_played(request: Request):
-    """Fired when a user clicks 'Mark as Watched' in a Jellyfin client."""
     item_id = decode_id(request.path_params.get("item_id", ""))
     play_count = 1
+    task = None
     
     if item_id.startswith("scene-"):
         raw_id = item_id.replace("scene-", "")
         logger.info(f"✅ 'Mark as Watched' (ON) triggered for {item_id}. Incrementing Play Count.")
-        asyncio.create_task(_increment_stash_playcount(raw_id))
         
-        # Fetch the real watch status to pass back to the UI
+        # Enqueue the background task
+        task = BackgroundTask(_increment_stash_playcount, raw_id)
+        
         scene = stash_client.get_scene(raw_id)
         if scene:
-            # We add +1 because the async background task hasn't finished saving to Stash yet
             play_count = (scene.get("play_count") or 0) + 1
             
     return JSONResponse({
@@ -424,22 +463,21 @@ async def endpoint_mark_played(request: Request):
         "PlayCount": play_count, 
         "PlaybackPositionTicks": 0, 
         "Key": item_id
-    })
+    }, background=task)
 
 async def endpoint_mark_favorite(request: Request):
-    """Fired when a user clicks the Heart/Favorite icon to turn it ON."""
     item_id = decode_id(request.path_params.get("item_id", ""))
-    
     played = False
     play_count = 0
     resume_ticks = 0
+    task = None
     
     if item_id.startswith("scene-"):
         raw_id = item_id.replace("scene-", "")
         logger.info(f"💖 Favorite (ON) triggered for {item_id}. Incrementing O-Counter.")
-        asyncio.create_task(_increment_stash_o_counter(raw_id))
         
-        # Fetch the REAL watch status so Fladder doesn't fake a checkmark
+        task = BackgroundTask(_increment_stash_o_counter, raw_id)
+        
         scene = stash_client.get_scene(raw_id)
         if scene:
             play_count = scene.get("play_count") or 0
@@ -452,22 +490,21 @@ async def endpoint_mark_favorite(request: Request):
         "PlayCount": play_count,
         "PlaybackPositionTicks": resume_ticks,
         "Key": item_id
-    })
+    }, background=task)
 
 async def endpoint_unmark_favorite(request: Request):
-    """Fired when a user clicks the Heart/Favorite icon to turn it OFF."""
     item_id = decode_id(request.path_params.get("item_id", ""))
-    
     played = False
     play_count = 0
     resume_ticks = 0
+    task = None
     
     if item_id.startswith("scene-"):
         raw_id = item_id.replace("scene-", "")
         logger.info(f"💖 Favorite (OFF) triggered for {item_id}. REPURPOSED: Incrementing O-Counter anyway!")
-        asyncio.create_task(_increment_stash_o_counter(raw_id))
         
-        # Fetch the REAL watch status so Fladder doesn't fake a checkmark
+        task = BackgroundTask(_increment_stash_o_counter, raw_id)
+        
         scene = stash_client.get_scene(raw_id)
         if scene:
             play_count = scene.get("play_count") or 0
@@ -480,40 +517,33 @@ async def endpoint_unmark_favorite(request: Request):
         "PlayCount": play_count,
         "PlaybackPositionTicks": resume_ticks,
         "Key": item_id
-    })
+    }, background=task)
 
 async def endpoint_mark_unplayed(request: Request):
-    """Fired when a user clicks the Checkmark to un-watch an item."""
     item_id = decode_id(request.path_params.get("item_id", ""))
     play_count = 1
+    task = None
     
     if item_id.startswith("scene-"):
         raw_id = item_id.replace("scene-", "")
         logger.info(f"❌ 'Mark as Unwatched' (OFF) triggered for {item_id}. REPURPOSED: Incrementing Play Count anyway!")
         
-        # REPURPOSED: We call the INCREMENT function here too!
-        asyncio.create_task(_increment_stash_playcount(raw_id))
+        task = BackgroundTask(_increment_stash_playcount, raw_id)
         
         scene = stash_client.get_scene(raw_id)
         if scene:
             play_count = (scene.get("play_count") or 0) + 1
             
-    # We still return Played: False to Jellyfin so the UI checkmark toggles off, 
-    # allowing the user to click it again.
     return JSONResponse({
         "Played": False, 
         "PlayCount": play_count, 
         "PlaybackPositionTicks": 0, 
         "Key": item_id
-    })
+    }, background=task)
 
 async def endpoint_update_userdata(request: Request):
-    """
-    Satisfies Fladder's aggressive UserData sync requests before downloading,
-    fetching the real data from Stash to ensure offline databases stay perfectly synced.
-    """
+    """Satisfies Fladder's aggressive UserData sync requests before downloading."""
     item_id = decode_id(request.path_params.get("item_id", ""))
-    
     play_count = 0
     is_favorite = False
     played = False
@@ -521,9 +551,7 @@ async def endpoint_update_userdata(request: Request):
 
     if item_id.startswith("scene-"):
         raw_id = item_id.replace("scene-", "")
-        # Fetch the real current stats from Stash
         scene = stash_client.get_scene(raw_id)
-        
         if scene:
             play_count = scene.get("play_count") or 0
             played = play_count > 0

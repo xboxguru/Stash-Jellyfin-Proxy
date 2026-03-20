@@ -31,3 +31,5 @@ jobs:
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/stash-jellyfin-proxy:latest
             ${{ secrets.DOCKERHUB_USERNAME }}/stash-jellyfin-proxy:${{ github.sha }}
+          build-args: |
+            BUILD_VERSION=v2.1-b${{ github.run_number }}
