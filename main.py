@@ -124,6 +124,7 @@ routes = [
     # Fladder Specific: Catch User Profile Avatar Image & Prefixed item images
     Route("/users/{item_id}/images/{image_type}", image_routes.endpoint_item_image, methods=["GET"]),
     Route("/users/{user_id}/items/{item_id}/images/{image_type}", image_routes.endpoint_item_image, methods=["GET"]),
+    Route("/videos/{item_id}/trickplay/{width}/{file_name}", image_routes.endpoint_trickplay_image, methods=["GET"]),
     
     # --- Playback ---
     Route("/users/{user_id}/items/{item_id}/playbackinfo", playback_routes.endpoint_playback_info, methods=["POST", "GET"]),

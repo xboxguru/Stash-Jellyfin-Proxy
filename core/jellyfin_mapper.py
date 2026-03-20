@@ -136,6 +136,32 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
 
     media_streams = [video_stream, audio_stream]
 
+    trickplay_dict = {}
+    if runtime_ticks > 0 and files:
+        video_width = files[0].get("width", 1920)
+        video_height = files[0].get("height", 1080)
+        aspect_ratio = video_width / video_height if video_height > 0 else 1.777
+        
+        actual_width = 160
+        actual_height = int(actual_width / aspect_ratio)
+        
+        thumbnail_count = 81
+        interval_ms = int((runtime_ticks / 10000) / thumbnail_count)
+        
+        trickplay_dict = {
+            item_id: {
+                str(actual_width): {  
+                    "Width": actual_width,
+                    "Height": actual_height,
+                    "TileWidth": 9,
+                    "TileHeight": 9,
+                    "ThumbnailCount": thumbnail_count,
+                    "Interval": interval_ms,
+                    "Bandwidth": 0
+                }
+            }
+        }
+
     item = {
         "Name": title,
         "SortName": title,
@@ -173,6 +199,7 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
 
         "Etag": etag_hash,
         "Taglines": [],
+        "Trickplay": trickplay_dict,
         "ProviderIds": {},
         "Chapters": [],
         "Overview": "",

@@ -109,7 +109,7 @@ async def _get_libraries():
         views.append(build_view("Saved Filters", encode_id("root", "filters"), is_standard_folder=True))
             
     if getattr(config, "ENABLE_TAG_FILTERS", False):
-        views.append(build_view("Tags", encode_id("root", "tags"), is_standard_folder=True))
+        views.append(build_view("Stash Tags", encode_id("root", "stashtags"), is_standard_folder=True))
     
     tag_names = getattr(config, "TAG_GROUPS", [])
     if tag_names:
@@ -273,7 +273,7 @@ async def endpoint_items(request: Request):
     is_folder_override = False
     
     if decoded_parent_id:
-        if decoded_parent_id in ["root-filters", "root-tags", "root-alltags"]:
+        if decoded_parent_id in ["root-filters", "root-tags", "root-stashtags", "root-alltags"]:
             jellyfin_items = []
             server_id = getattr(config, "SERVER_ID", "stash-proxy")
             stash_base = config.get_stash_base()
@@ -295,7 +295,7 @@ async def endpoint_items(request: Request):
                             })
                     except Exception as e: logger.error(f"Failed to fetch filters: {e}")
                     
-                elif decoded_parent_id == "root-tags":
+                elif decoded_parent_id in ["root-tags", "root-stashtags"]:
                     tag_names = getattr(config, "TAG_GROUPS", [])
                     if tag_names:
                         query = "query { allTags { id name } }"
@@ -331,7 +331,7 @@ async def endpoint_items(request: Request):
                     except Exception as e: logger.error(f"Failed to fetch all tags: {e}")
                     
             total_record_count = len(jellyfin_items)
-            if original_limit > 0 and decoded_parent_id == "root-alltags":
+            if original_limit > 0:
                 jellyfin_items = jellyfin_items[start_index : start_index + original_limit]
                 
             return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": total_record_count, "StartIndex": start_index})
@@ -501,7 +501,7 @@ async def endpoint_item_details(request: Request):
     
     if decoded_id.startswith("root-") or decoded_id.startswith("tag-") or decoded_id.startswith("filter-"):
         is_root = decoded_id.startswith("root-")
-        is_nav_folder = decoded_id in ["root-filters", "root-tags", "root-alltags"]
+        is_nav_folder = decoded_id in ["root-filters", "root-tags", "root-stashtags", "root-alltags"]
         
         if is_root: safe_id = encode_id("root", decoded_id.replace("root-", ""))
         elif decoded_id.startswith("tag-"): safe_id = encode_id("tag", decoded_id.replace("tag-", ""))
@@ -603,12 +603,12 @@ async def endpoint_item_details(request: Request):
 async def endpoint_tags(request: Request):
     is_genre = "genre" in request.url.path.lower()
     item_type = "Genre" if is_genre else "Tag"
+    server_id = getattr(config, "SERVER_ID", "stash-proxy")
 
     stash_base = config.get_stash_base()
     url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
-    if getattr(config, "STASH_API_KEY", ""):
-        headers["ApiKey"] = config.STASH_API_KEY
+    if getattr(config, "STASH_API_KEY", ""): headers["ApiKey"] = config.STASH_API_KEY
         
     query = """query { findTags(filter: {per_page: -1, sort: "name", direction: ASC}) { tags { id name } } }"""
     async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
@@ -618,17 +618,19 @@ async def endpoint_tags(request: Request):
         except Exception:
             stash_tags = []
 
-    jelly_tags = [{"Name": t.get("name"), "Id": encode_id("tag", str(t.get('id'))), "Type": item_type} for t in stash_tags]
+    jelly_tags = [{"Name": t.get("name"), "Id": encode_id("tag", str(t.get('id'))), "Type": item_type, "ServerId": server_id, "IsFolder": False} for t in stash_tags]
     return JSONResponse({"Items": jelly_tags, "TotalRecordCount": len(jelly_tags), "StartIndex": 0})
 
 async def endpoint_years(request: Request):
     current_year = datetime.datetime.now().year
-    years = [{"Name": str(y), "Id": encode_id("year", str(y)), "Type": "Year", "ProductionYear": y} for y in range(current_year, 1989, -1)]
+    server_id = getattr(config, "SERVER_ID", "stash-proxy")
+    years = [{"Name": str(y), "Id": encode_id("year", str(y)), "Type": "Year", "ProductionYear": y, "ServerId": server_id, "IsFolder": False} for y in range(current_year, 1989, -1)]
     return JSONResponse({"Items": years, "TotalRecordCount": len(years), "StartIndex": 0})
 
 async def endpoint_studios(request: Request):
     studios = stash_client.get_all_studios()
     cache_version = getattr(config, "CACHE_VERSION", 0)
+    server_id = getattr(config, "SERVER_ID", "stash-proxy")
     
     jelly_studios = []
     for s in studios:
@@ -637,6 +639,8 @@ async def endpoint_studios(request: Request):
             "Name": s.get("name"), 
             "Id": encode_id("studio", str(s.get('id'))), 
             "Type": "Studio",
+            "ServerId": server_id,
+            "IsFolder": False, # <-- Changed to False
             "ImageTags": {"Primary": s_tag}, 
             "HasPrimaryImage": bool(s.get("image_path"))
         })
