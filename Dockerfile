@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install modular dependencies
 RUN pip install --no-cache-dir \
-    hypercorn starlette requests httpx Pillow
+    hypercorn starlette requests httpx
 
 RUN mkdir -p /app /config && chmod 755 /app /config
 

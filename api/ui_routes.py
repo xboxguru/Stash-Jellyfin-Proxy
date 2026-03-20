@@ -50,7 +50,6 @@ async def api_get_config(request: Request):
         "RECENT_DAYS": getattr(config, "RECENT_DAYS", 14),
         "ENABLE_FILTERS": getattr(config, "ENABLE_FILTERS", True),
         "ENABLE_TAG_FILTERS": getattr(config, "ENABLE_TAG_FILTERS", False),
-        "ENABLE_IMAGE_RESIZE": getattr(config, "ENABLE_IMAGE_RESIZE", True),
         "ENABLE_ALL_TAGS": getattr(config, "ENABLE_ALL_TAGS", False),
         "STASH_VERIFY_TLS": getattr(config, "STASH_VERIFY_TLS", False),
         "IMAGE_VERSION": getattr(config, "IMAGE_VERSION", 0),
