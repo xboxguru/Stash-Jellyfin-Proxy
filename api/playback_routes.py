@@ -135,7 +135,7 @@ async def endpoint_stream(request: Request):
     """Pipes the video stream directly from Stash, supporting DirectPlay and Trojan HLS Playlists."""
     item_id = decode_id(request.path_params.get("item_id", ""))
     raw_id = item_id.replace("scene-", "")
-    stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+    stash_base = config.get_stash_base()
     apikey = getattr(config, "STASH_API_KEY", "")
     
     # Default to the raw stream
@@ -295,7 +295,7 @@ async def endpoint_hls_segment(request: Request):
     raw_id = item_id.replace("scene-", "")
     segment = request.path_params.get("segment", "")
     
-    stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+    stash_base = config.get_stash_base()
     apikey = getattr(config, "STASH_API_KEY", "")
     
     # Construct the exact URL Stash expects for the segment
@@ -330,7 +330,7 @@ async def endpoint_hls_segment(request: Request):
           
 async def _update_stash_resume_time(raw_id: str, seconds: float):
     """Saves the exact playback position to Stash using its native activity tracker."""
-    stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+    stash_base = config.get_stash_base()
     url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if getattr(config, "STASH_API_KEY", ""):
@@ -354,7 +354,7 @@ async def _update_stash_resume_time(raw_id: str, seconds: float):
 
 async def _increment_stash_playcount(raw_id: str):
     """Logs a play in Stash using the official native player mutation."""
-    stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+    stash_base = config.get_stash_base()
     url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if getattr(config, "STASH_API_KEY", ""):
@@ -370,7 +370,7 @@ async def _increment_stash_playcount(raw_id: str):
 
 async def _increment_stash_o_counter(raw_id: str):
     """Logs an 'O' in Stash using the modern SceneAddO mutation."""
-    stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+    stash_base = config.get_stash_base()
     url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if getattr(config, "STASH_API_KEY", ""):

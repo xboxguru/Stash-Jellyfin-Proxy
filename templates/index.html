@@ -546,11 +546,17 @@
 
                     <div class="card">
                         <h3 class="card-title">Proxy Server & Identity</h3>
-                        <div class="form-row three-col">
+                        <div class="form-row">
                             <div class="form-group">
                                 <label class="form-label">Bind Address <span class="badge-warning">Restart</span></label>
                                 <input type="text" class="form-input" name="PROXY_BIND" placeholder="0.0.0.0">
                             </div>
+                            <div class="form-group">
+                                <label class="form-label">Host IP (Docker Discovery)</label>
+                                <input type="text" class="form-input" name="HOST_IP" placeholder="Leave blank to auto-detect">
+                            </div>
+                        </div>
+                        <div class="form-row">
                             <div class="form-group">
                                 <label class="form-label">API Port <span class="badge-warning">Restart</span></label>
                                 <input type="number" class="form-input" name="PROXY_PORT" placeholder="8096">
@@ -788,6 +794,7 @@
             STASH_GRAPHQL_PATH: '/graphql',
             STASH_VERIFY_TLS: false,
             PROXY_BIND: '0.0.0.0',
+            HOST_IP: '',
             PROXY_PORT: 8096,
             UI_PORT: 8097,
             SJS_USER: '',

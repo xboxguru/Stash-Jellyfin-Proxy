@@ -38,7 +38,7 @@ async def endpoint_item_image(request: Request):
     # 4. Handle Performers (Actors)
     if item_id.startswith("person-"):
         raw_id = item_id.replace("person-", "")
-        stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+        stash_base = config.get_stash_base()
         apikey = getattr(config, "STASH_API_KEY", "")
         stash_img_url = f"{stash_base}/performer/{raw_id}/image"
         if apikey:
@@ -50,7 +50,7 @@ async def endpoint_item_image(request: Request):
     # 5. Handle Studios
     if item_id.startswith("studio-"):
         raw_id = item_id.replace("studio-", "")
-        stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+        stash_base = config.get_stash_base()
         apikey = getattr(config, "STASH_API_KEY", "")
         stash_img_url = f"{stash_base}/studio/{raw_id}/image"
         if apikey:
@@ -62,7 +62,7 @@ async def endpoint_item_image(request: Request):
     # 6. Handle Scenes (Movies)
     if item_id.startswith("scene-"):
         raw_id = item_id.replace("scene-", "")
-        stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+        stash_base = config.get_stash_base()
         apikey = getattr(config, "STASH_API_KEY", "")
         
         # Default to screenshot (Primary / Backdrop / Thumb)

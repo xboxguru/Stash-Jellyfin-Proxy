@@ -186,29 +186,31 @@ class JellyfinDiscoveryProtocol(asyncio.DatagramProtocol):
     def datagram_received(self, data, addr):
         message = data.decode('utf-8', errors='ignore').strip()
         
-        # Jellyfin clients broadcast "who is JellyfinServer?"
         if "who is" in message.lower():
-            # Figure out our actual local network IP (so we don't send 0.0.0.0 back)
-            try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.connect(("8.8.8.8", 80))
-                local_ip = s.getsockname()[0]
-                s.close()
-            except Exception:
-                local_ip = getattr(config, "PROXY_BIND", "127.0.0.1")
-                if local_ip == "0.0.0.0":
-                    local_ip = "127.0.0.1"
+            # NEW: Check if the user specified a manual Host IP for Docker bridging
+            local_ip = getattr(config, "HOST_IP", "").strip()
+            
+            # If not defined, fallback to network auto-detection
+            if not local_ip:
+                try:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    s.connect(("8.8.8.8", 80))
+                    local_ip = s.getsockname()[0]
+                    s.close()
+                except Exception:
+                    local_ip = getattr(config, "PROXY_BIND", "127.0.0.1")
+                    if local_ip == "0.0.0.0":
+                        local_ip = "127.0.0.1"
 
-            # Build the exact JSON payload Jellycon expects
             response = {
                 "Address": f"http://{local_ip}:{getattr(config, 'PROXY_PORT', 8096)}",
                 "EndpointAddress": f"http://{local_ip}:{getattr(config, 'PROXY_PORT', 8096)}",
                 "Id": getattr(config, "SERVER_ID", "stash-proxy-unique-id"),
                 "Name": getattr(config, "SERVER_NAME", "Stash Proxy"),
-                "Version": "10.11.6" # <--- MATCH HERE TOO
+                "Version": "10.11.6" 
             }
             
-            logger.debug(f"Answering discovery ping from {addr[0]}")
+            logger.debug(f"Answering discovery ping from {addr[0]} with IP {local_ip}")
             self.transport.sendto(json.dumps(response).encode('utf-8'), addr)
 
 async def run_server():

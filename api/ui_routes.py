@@ -39,6 +39,7 @@ async def api_get_config(request: Request):
         "STASH_API_KEY": getattr(config, "STASH_API_KEY", ""),
         "PROXY_API_KEY": getattr(config, "PROXY_API_KEY", ""),
         "PROXY_BIND": getattr(config, "PROXY_BIND", "0.0.0.0"),
+        "HOST_IP": getattr(config, "HOST_IP", ""),
         "PROXY_PORT": getattr(config, "PROXY_PORT", 8096),
         "UI_PORT": getattr(config, "UI_PORT", 8097),
         "SJS_USER": getattr(config, "SJS_USER", ""),

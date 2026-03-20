@@ -62,7 +62,7 @@ async def _get_libraries():
     
     tag_names = getattr(config, "TAG_GROUPS", [])
     if tag_names:
-        stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+        stash_base = config.get_stash_base()
         url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
         headers = {"Content-Type": "application/json"}
         if getattr(config, "STASH_API_KEY", ""):
@@ -142,7 +142,7 @@ async def endpoint_items(request: Request):
             if match: raw_ids.append(match.group())
                 
         jellyfin_items = []
-        stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+        stash_base = config.get_stash_base()
         url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if getattr(config, "STASH_API_KEY", ""):
@@ -333,7 +333,7 @@ async def endpoint_item_details(request: Request):
 
     if decoded_id.startswith("person-"):
         raw_id = decoded_id.replace("person-", "")
-        stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+        stash_base = config.get_stash_base()
         url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if getattr(config, "STASH_API_KEY", ""):
@@ -401,7 +401,7 @@ async def endpoint_tags(request: Request):
     is_genre = "genre" in request.url.path.lower()
     item_type = "Genre" if is_genre else "Tag"
 
-    stash_base = getattr(config, "STASH_URL", "http://localhost:9999").rstrip('/')
+    stash_base = config.get_stash_base()
     url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if getattr(config, "STASH_API_KEY", ""):
