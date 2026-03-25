@@ -70,6 +70,8 @@ async def call_graphql(query: str, variables: Optional[Dict[str, Any]] = None) -
                 if attempt == getattr(config, "STASH_RETRIES", 3):
                     logger.error("Max retries reached. Stash is unreachable.")
                     return None
+                import asyncio
+                await asyncio.sleep(1.0)
 
 async def get_scene(scene_id: str) -> Optional[Dict[str, Any]]:
     """Fetch a single scene by ID asynchronously."""

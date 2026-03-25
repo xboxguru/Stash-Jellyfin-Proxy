@@ -306,6 +306,7 @@ async def endpoint_stream(request: Request):
         
         if request.method == "HEAD":
             await r.aclose()
+            await client.aclose()
             return Response(status_code=status_code, headers=resp_headers)
 
         async def cleanup():

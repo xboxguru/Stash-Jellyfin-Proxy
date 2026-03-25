@@ -169,15 +169,7 @@ async def endpoint_trickplay_image(request: Request):
             if apikey and "apikey=" not in stash_sprite_url:
                 stash_sprite_url += f"&apikey={apikey}" if "?" in stash_sprite_url else f"?apikey={apikey}"
 
-            async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
-                try:
-                    resp = await client.get(stash_sprite_url, timeout=10.0)
-                    if resp.status_code == 200:
-                        return Response(content=resp.content, media_type="image/jpeg")
-                    else:
-                        logger.warning(f"⚠️ Stash returned {resp.status_code} for resolved Sprite URL: {stash_sprite_url}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Trickplay Fetch Error: {e}")
+            return await _proxy_image(stash_sprite_url)
 
         # --- THE SHOCK ABSORBER ---
         logger.info(f"🛡️ SPRITE MISSING FOR {raw_id}: Returning 1x1 Black JPEG Fallback")

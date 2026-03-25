@@ -50,6 +50,7 @@ def get_local_ip():
         # 2. Try to automatically detect the network IP
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(1.0)
             s.connect(("8.8.8.8", 80))
             local_ip = s.getsockname()[0]
             s.close()
