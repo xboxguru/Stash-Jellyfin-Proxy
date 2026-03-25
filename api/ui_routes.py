@@ -141,7 +141,7 @@ async def api_clear_logs(request: Request):
     return JSONResponse({"status": "cleared"})
 
 async def api_get_status(request: Request):
-    stash_ok = stash_client.test_stash_connection()
+    stash_ok = await stash_client.test_stash_connection()
     return JSONResponse({
         "running": True, 
         "stashConnected": stash_ok,
@@ -160,7 +160,7 @@ async def api_get_streams(request: Request):
 
 async def api_get_stats(request: Request):
     """Combines Stash library counts with Proxy usage stats."""
-    stash_stats = stash_client.get_stash_stats()
+    stash_stats = await stash_client.get_stash_stats()
     current_day = datetime.datetime.now().strftime("%Y-%m-%d")
     
     if getattr(state, "day_tracker", "") != current_day:
