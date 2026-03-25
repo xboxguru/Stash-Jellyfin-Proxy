@@ -18,7 +18,6 @@ from api.middleware import AuthenticationMiddleware
 from api import ui_routes, auth_routes, library_routes, playback_routes, image_routes
 
 # Configure Logging with Log Rotation (Max 5MB, keeps 2 backups)
-# Create log directory if it doesn't exist to prevent silent write failures
 if not os.path.exists(config.LOG_DIR):
     try:
         os.makedirs(config.LOG_DIR, exist_ok=True)
@@ -41,6 +40,23 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger("proxy_main")
+
+# --- STATIC IP CACHER (Prevents UDP Blocking) ---
+def get_local_ip():
+    local_ip = getattr(config, "HOST_IP", "").strip()
+    if not local_ip:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+        except Exception:
+            local_ip = getattr(config, "PROXY_BIND", "127.0.0.1")
+            if local_ip == "0.0.0.0":
+                local_ip = "127.0.0.1"
+    return local_ip
+
+CACHED_LOCAL_IP = get_local_ip()
 
 routes = [
     # --- UI Routes (Proxy Web Dashboard) ---
@@ -175,7 +191,7 @@ app = Starlette(debug=(config.LOG_LEVEL == "DEBUG"), routes=routes)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # In a production environment, you might restrict this
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -192,39 +208,20 @@ class JellyfinDiscoveryProtocol(asyncio.DatagramProtocol):
 
     def datagram_received(self, data, addr):
         message = data.decode('utf-8', errors='ignore').strip()
-        
         if "who is" in message.lower():
-            # NEW: Check if the user specified a manual Host IP for Docker bridging
-            local_ip = getattr(config, "HOST_IP", "").strip()
-            
-            # If not defined, fallback to network auto-detection
-            if not local_ip:
-                try:
-                    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                    s.connect(("8.8.8.8", 80))
-                    local_ip = s.getsockname()[0]
-                    s.close()
-                except Exception:
-                    local_ip = getattr(config, "PROXY_BIND", "127.0.0.1")
-                    if local_ip == "0.0.0.0":
-                        local_ip = "127.0.0.1"
-
             response = {
-                "Address": f"http://{local_ip}:{getattr(config, 'PROXY_PORT', 8096)}",
-                "EndpointAddress": f"http://{local_ip}:{getattr(config, 'PROXY_PORT', 8096)}",
+                "Address": f"http://{CACHED_LOCAL_IP}:{getattr(config, 'PROXY_PORT', 8096)}",
+                "EndpointAddress": f"http://{CACHED_LOCAL_IP}:{getattr(config, 'PROXY_PORT', 8096)}",
                 "Id": getattr(config, "SERVER_ID", "stash-proxy-unique-id"),
                 "Name": getattr(config, "SERVER_NAME", "Stash Proxy"),
                 "Version": "10.11.6" 
             }
-            
-            logger.debug(f"Answering discovery ping from {addr[0]} with IP {local_ip}")
+            logger.debug(f"Answering discovery ping from {addr[0]} with cached IP {CACHED_LOCAL_IP}")
             self.transport.sendto(json.dumps(response).encode('utf-8'), addr)
 
 async def run_server():
     """Configures and runs the Hypercorn ASGI server."""
     hypercorn_config = Config()
-    
-    # Bind the ports (Proxy Port for ErsatzTV, UI Port for your browser)
     hypercorn_config.bind = [f"{config.PROXY_BIND}:{config.PROXY_PORT}"]
     if hasattr(config, "UI_PORT") and config.UI_PORT != config.PROXY_PORT:
         hypercorn_config.bind.append(f"{config.PROXY_BIND}:{config.UI_PORT}")
@@ -237,8 +234,6 @@ async def run_server():
     logger.info("=" * 50)
     
     loop = asyncio.get_running_loop()
-    
-    # --- NEW: START UDP DISCOVERY ---
     try:
         discovery_transport, _ = await loop.create_datagram_endpoint(
             lambda: JellyfinDiscoveryProtocol(),
@@ -252,22 +247,31 @@ async def run_server():
     shutdown_event = asyncio.Event()
     
     async def watch_for_restart():
-        """Background task that watches for the UI restart flag."""
+        """Background task that watches for the UI restart flag and prunes zombie streams."""
+        import state
         while True:
             if ui_routes.RESTART_REQUESTED:
                 logger.info("Restart flag detected. Initiating graceful shutdown...")
                 shutdown_event.set()
                 break
-            await asyncio.sleep(1)
+                
+            current_time = time.time()
+            if hasattr(state, "active_streams"):
+                original_count = len(state.active_streams)
+                # Prune if last_ping is older than 15 minutes (900 seconds)
+                state.active_streams = [
+                    s for s in state.active_streams 
+                    if current_time - s.get("last_ping", s.get("started", current_time)) < 900
+                ]
+                if len(state.active_streams) < original_count:
+                    logger.info(f"🧹 Pruned {original_count - len(state.active_streams)} zombie streams from memory.")
+                    
+            await asyncio.sleep(60)
 
-    # Start the watcher task alongside the server
     watch_task = asyncio.create_task(watch_for_restart())
-    
-    # Start Hypercorn
     await serve(asgi_app, hypercorn_config, shutdown_trigger=shutdown_event.wait)
     watch_task.cancel()
     
-    # Clean up the UDP socket on shutdown
     if discovery_transport:
         discovery_transport.close()
 
@@ -282,13 +286,9 @@ def main():
         logger.error(f"Fatal server error: {e}")
         sys.exit(1)
         
-    # --- RESTART LOGIC ---
     if ui_routes.RESTART_REQUESTED:
         logger.info("Executing in-place server restart...")
-        time.sleep(1)  # Brief pause to ensure network ports are fully released
-        
-        # os.execv replaces the current process with a new one. 
-        # In Docker, this keeps PID 1 alive so the container doesn't shut down.
+        time.sleep(1) 
         try:
             os.execv(sys.executable, [sys.executable] + sys.argv)
         except Exception as e:

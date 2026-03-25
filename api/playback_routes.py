@@ -1,6 +1,5 @@
 import logging
 import time
-import asyncio
 import httpx
 from starlette.responses import JSONResponse, Response, StreamingResponse, RedirectResponse
 from starlette.requests import Request
@@ -16,7 +15,7 @@ async def endpoint_playback_info(request: Request):
     """Provides playback info using the robust metadata already built by the mapper."""
     item_id = decode_id(request.path_params.get("item_id", ""))
     raw_id = item_id.replace("scene-", "")
-    scene = stash_client.get_scene(raw_id)
+    scene = await stash_client.get_scene(raw_id)
     if not scene:
         return JSONResponse({"error": "Item not found"}, status_code=404)
         
@@ -42,14 +41,12 @@ async def endpoint_sessions_playing(request: Request):
         client_ip = request.client.host if request.client else "Unknown"
         user_agent = request.headers.get("user-agent", "")
         
-        # Respect Reverse Proxies (Docker / Nginx)
         x_forwarded = request.headers.get("x-forwarded-for")
         if x_forwarded:
             client_ip = x_forwarded.split(",")[0].strip()
         elif request.headers.get("x-real-ip"):
             client_ip = request.headers.get("x-real-ip")
             
-        # Parse Client Type from User-Agent
         if "Infuse" in user_agent: client_type = "Infuse"
         elif "Wholphin" in user_agent: client_type = "Wholphin"
         elif "Findroid" in user_agent: client_type = "Findroid"
@@ -59,15 +56,13 @@ async def endpoint_sessions_playing(request: Request):
         elif "Jellyfin" in user_agent: client_type = "Jellyfin"
         else: client_type = user_agent.split("/")[0][:20] if user_agent else "Unknown"
         
-        # Try to get User from payload, fallback to Config
         user = data.get("UserId") or getattr(config, "SJS_USER", "Admin")
         if not user: user = "Admin"
-        # ----------------------------------
         
         # Fetch missing metadata directly from Stash
         if item_id.startswith("scene-"):
             raw_id = item_id.replace("scene-", "")
-            scene = stash_client.get_scene(raw_id)
+            scene = await stash_client.get_scene(raw_id)
             if scene:
                 if not title or title == "Unknown Scene":
                     title = scene.get("title") or scene.get("code") or f"Scene {raw_id}"
@@ -96,8 +91,7 @@ async def endpoint_sessions_playing(request: Request):
                 "runtime_ticks": runtime_ticks,
                 "last_ticks": playback_ticks,
                 "started": int(time.time()),
-                
-                # --- 2. INJECT INTO ACTIVE STREAMS CACHE ---
+                "last_ping": int(time.time()), 
                 "user": user,
                 "clientIp": client_ip,
                 "clientType": client_type
@@ -112,6 +106,7 @@ async def endpoint_sessions_playing(request: Request):
             state.stats["top_played"][scene_id]["count"] += 1
         else:
             stream["last_ticks"] = max(stream.get("last_ticks", 0), playback_ticks)
+            stream["last_ping"] = int(time.time())
             if not stream.get("runtime_ticks") and runtime_ticks > 0:
                 stream["runtime_ticks"] = runtime_ticks
 
@@ -145,7 +140,7 @@ async def endpoint_sessions_stopped(request: Request):
                         
                         if runtime_ticks <= 0:
                             logger.info(f"Client didn't provide RunTimeTicks. Fetching directly from Stash...")
-                            scene = stash_client.get_scene(raw_id)
+                            scene = await stash_client.get_scene(raw_id)
                             if scene and scene.get("files"):
                                 duration_seconds = scene["files"][0].get("duration", 0)
                                 runtime_ticks = float(duration_seconds * 10000000)
@@ -191,21 +186,18 @@ async def endpoint_stream(request: Request):
     stash_base = config.get_stash_base()
     apikey = getattr(config, "STASH_API_KEY", "")
     
-    # Default to the raw stream
     stash_stream_url = f"{stash_base}/scene/{raw_id}/stream"
 
-    # --- THE ON-THE-FLY HLS INTERCEPT (THE TROJAN PLAYLIST) ---
     graphql_url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
     gql_headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if apikey:
         gql_headers["ApiKey"] = apikey
         
     is_transcoding = False
-    download_ext = "mp4" # Fallback extension
+    download_ext = "mp4" 
     
     async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as gql_client:
         try:
-            # Quickly query Stash for the video codec AND container format
             query = f"""query {{ findScene(id: "{raw_id}") {{ files {{ video_codec format }} }} }}"""
             resp = await gql_client.post(graphql_url, headers=gql_headers, json={"query": query}, timeout=3.0)
             if resp.status_code == 200:
@@ -221,16 +213,10 @@ async def endpoint_stream(request: Request):
                     safe_codecs = ["h264", "h265", "hevc", "avc", "vp8", "vp9", "av1"]
                     safe_containers = ["mp4", "m4v", "mov", "webm"]
                     
-                    # If it's a legacy codec/container, we must handle it specially
                     if (v_codec and v_codec not in safe_codecs) or (container and container not in safe_containers):
-                        
                         if "download" in request.url.path.lower():
                             logger.info(f"📥 Download requested for legacy format! Serving RAW file because download managers reject chunked streams.")
-                            
                         else:
-                            # --- THE REDIRECT BOUNCE ---
-                            # If the app hits /stream, ExoPlayer will try to parse it as an MP4 and hang.
-                            # We MUST redirect it to a URL ending in .m3u8 so it triggers the HLS engine.
                             if not request.url.path.lower().endswith(".m3u8"):
                                 logger.info(f"🔄 Redirecting strict client to explicit .m3u8 URL for scene {raw_id}")
                                 new_url = f"/Videos/{item_id}/master.m3u8"
@@ -239,16 +225,13 @@ async def endpoint_stream(request: Request):
                                 return RedirectResponse(url=new_url, status_code=302)
 
                             logger.info(f"🎥 Serving Trojan HLS Playlist for scene {raw_id}")
-                            
                             stash_m3u8_url = f"{stash_base}/scene/{raw_id}/stream.m3u8"
-                            if apikey:
-                                stash_m3u8_url += f"?apikey={apikey}"
+                            if apikey: stash_m3u8_url += f"?apikey={apikey}"
                             
                             m3u8_resp = await gql_client.get(stash_m3u8_url, timeout=10.0)
                             if m3u8_resp.status_code == 200:
                                 m3u8_text = m3u8_resp.text
                                 rewritten_lines = []
-                                
                                 for line in m3u8_text.splitlines():
                                     if line.strip() and not line.startswith("#"):
                                         clean_segment = line.split("?")[0].split("/")[-1]
@@ -256,7 +239,6 @@ async def endpoint_stream(request: Request):
                                         rewritten_lines.append(proxy_segment_url)
                                     else:
                                         rewritten_lines.append(line)
-                                
                                 return Response(
                                     content="\n".join(rewritten_lines), 
                                     media_type="application/x-mpegURL",
@@ -268,9 +250,6 @@ async def endpoint_stream(request: Request):
         except Exception as e:
             logger.warning(f"Failed to check codec for HLS intercept: {e}")
 
-    # --- NORMAL MP4 PASSTHROUGH LOGIC ---
-    
-    # The Resume Translator
     start_ticks = None
     for k, v in request.query_params.items():
         if k.lower() == "starttimeticks":
@@ -288,7 +267,6 @@ async def endpoint_stream(request: Request):
         except ValueError:
             pass
 
-    # Append the API key correctly
     if apikey and "apikey=" not in stash_stream_url.lower():
         if "?" in stash_stream_url:
             stash_stream_url += f"&apikey={apikey}"
@@ -442,26 +420,6 @@ async def _increment_stash_o_counter(raw_id: str):
         except Exception as e:
             logger.error(f"Failed to increment O counter for Scene {raw_id}: {e}")
 
-async def _decrement_stash_o_counter(raw_id: str):
-    """Currently unused"""
-    stash_base = config.get_stash_base()
-    url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
-    headers = {"Content-Type": "application/json", "Accept": "application/json"}
-    if getattr(config, "STASH_API_KEY", ""):
-        headers["ApiKey"] = config.STASH_API_KEY
-        
-    async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
-        try:
-            query = "mutation($id: ID!) { sceneDecrementO(id: $id) }"
-            resp = await client.post(url, headers=headers, json={"query": query, "variables": {"id": raw_id}}, timeout=10.0)
-            data = resp.json()
-            if "errors" in data:
-                logger.error(f"❌ Stash rejected the O-Counter decrement: {data['errors']}")
-            else:
-                logger.info(f"✅ Two-Way Sync: Decremented 'O' event for Scene {raw_id}.")
-        except Exception as e:
-            logger.error(f"Failed to decrement O counter for Scene {raw_id}: {e}")
-
 async def _update_stash_rating(raw_id: str, rating100: int):
     stash_base = config.get_stash_base()
     url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
@@ -490,10 +448,9 @@ async def endpoint_mark_played(request: Request):
         raw_id = item_id.replace("scene-", "")
         logger.info(f"✅ 'Mark as Watched' (ON) triggered for {item_id}. Incrementing Play Count.")
         
-        # Enqueue the background task
         task = BackgroundTask(_increment_stash_playcount, raw_id)
         
-        scene = stash_client.get_scene(raw_id)
+        scene = await stash_client.get_scene(raw_id)
         if scene:
             play_count = (scene.get("play_count") or 0) + 1
             
@@ -516,13 +473,12 @@ async def endpoint_mark_favorite(request: Request):
         action = getattr(config, "FAVORITE_ACTION", "o_counter").lower()
         logger.info(f"💖 Favorite (ON) triggered for {item_id}. Action: {action}")
         
-        # Queue up the requested actions based on the config file
         if action in ["o_counter", "both"]:
             bg_tasks.add_task(_increment_stash_o_counter, raw_id)
         if action in ["rating", "both"]:
             bg_tasks.add_task(_update_stash_rating, raw_id, 100)
         
-        scene = stash_client.get_scene(raw_id)
+        scene = await stash_client.get_scene(raw_id)
         if scene:
             play_count = scene.get("play_count") or 0
             played = play_count > 0
@@ -547,27 +503,22 @@ async def endpoint_unmark_favorite(request: Request):
         raw_id = item_id.replace("scene-", "")
         action = getattr(config, "FAVORITE_ACTION", "o_counter").lower()
         
-        # 1. The Repurposed "Every Tap is an O" Logic
         if action in ["o_counter", "both"]:
             logger.info(f"💖 Favorite (OFF) intercepted for {item_id}. REPURPOSED: Incrementing O-Counter!")
             bg_tasks.add_task(_increment_stash_o_counter, raw_id)
             
-        # 2. The Rating Logic
         if action == "both":
-            # Don't lose the rating just because we logged another O!
             bg_tasks.add_task(_update_stash_rating, raw_id, 100)
         elif action == "rating":
-            # Strict flip/flop toggle for Rating-Only mode
             logger.info(f"💔 Favorite (OFF) triggered for {item_id}. Removing 5-Star Rating.")
             bg_tasks.add_task(_update_stash_rating, raw_id, 0)
         
-        scene = stash_client.get_scene(raw_id)
+        scene = await stash_client.get_scene(raw_id)
         if scene:
             play_count = scene.get("play_count") or 0
             played = play_count > 0
             resume_ticks = int((scene.get("resume_time") or 0) * 10000000)
             
-    # Keep the heart filled in the UI if we are just using it as an incrementer!
     stays_favorite = action in ["o_counter", "both"]
         
     return JSONResponse({
@@ -589,7 +540,7 @@ async def endpoint_mark_unplayed(request: Request):
         
         task = BackgroundTask(_increment_stash_playcount, raw_id)
         
-        scene = stash_client.get_scene(raw_id)
+        scene = await stash_client.get_scene(raw_id)
         if scene:
             play_count = (scene.get("play_count") or 0) + 1
             
@@ -610,11 +561,17 @@ async def endpoint_update_userdata(request: Request):
 
     if item_id.startswith("scene-"):
         raw_id = item_id.replace("scene-", "")
-        scene = stash_client.get_scene(raw_id)
+        scene = await stash_client.get_scene(raw_id)
         if scene:
             play_count = scene.get("play_count") or 0
             played = play_count > 0
-            is_favorite = (scene.get("o_counter") or 0) > 0
+            
+            fav_action = getattr(config, "FAVORITE_ACTION", "o_counter").lower()
+            if fav_action == "rating":
+                is_favorite = (scene.get("rating100") or 0) > 0
+            else:
+                is_favorite = (scene.get("o_counter") or 0) > 0
+                
             resume_ticks = int((scene.get("resume_time") or 0) * 10000000)
 
     return JSONResponse({

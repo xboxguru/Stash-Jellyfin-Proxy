@@ -1,5 +1,5 @@
 import logging
-import requests
+import httpx
 from typing import Dict, Any, Optional
 import config
 
@@ -21,63 +21,58 @@ def get_stash_headers() -> Dict[str, str]:
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
-    if config.STASH_API_KEY:
+    if getattr(config, "STASH_API_KEY", ""):
         headers["ApiKey"] = config.STASH_API_KEY
     return headers
 
-def test_stash_connection() -> bool:
-    """Check if Stash is online and reachable."""
-    url = f"{config.STASH_URL.rstrip('/')}{config.STASH_GRAPHQL_PATH}"
+async def test_stash_connection() -> bool:
+    """Check if Stash is online and reachable using Async httpx."""
+    url = f"{config.get_stash_base()}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
     query = {"query": "{ version { version } }"}
-    try:
-        response = requests.post(
-            url, 
-            headers=get_stash_headers(), 
-            json=query, 
-            timeout=10, 
-            verify=config.STASH_VERIFY_TLS
-        )
-        response.raise_for_status()
-        data = response.json()
-        if "data" in data and "version" in data["data"]:
-            logger.info(f"Successfully connected to Stash (Version: {data['data']['version']['version']})")
-            return True
-        logger.error("Connected to Stash, but received unexpected GraphQL response.")
-        return False
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Failed to connect to Stash at {url}: {e}")
-        return False
+    async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
+        try:
+            response = await client.post(url, headers=get_stash_headers(), json=query, timeout=10.0)
+            response.raise_for_status()
+            data = response.json()
+            if "data" in data and "version" in data["data"]:
+                logger.info(f"Successfully connected to Stash (Version: {data['data']['version']['version']})")
+                return True
+            logger.error("Connected to Stash, but received unexpected GraphQL response.")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to connect to Stash at {url}: {e}")
+            return False
 
-def call_graphql(query: str, variables: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
-    """Execute a GraphQL query against Stash with retry logic."""
-    url = f"{config.STASH_URL.rstrip('/')}{config.STASH_GRAPHQL_PATH}"
+async def call_graphql(query: str, variables: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """Execute an Async GraphQL query against Stash with retry logic."""
+    url = f"{config.get_stash_base()}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
     payload = {"query": query}
     if variables:
         payload["variables"] = variables
 
-    for attempt in range(1, config.STASH_RETRIES + 1):
-        try:
-            response = requests.post(
-                url, 
-                headers=get_stash_headers(), 
-                json=payload, 
-                timeout=config.STASH_TIMEOUT, 
-                verify=config.STASH_VERIFY_TLS
-            )
-            response.raise_for_status()
-            result = response.json()
-            if "errors" in result:
-                logger.error(f"GraphQL Error: {result['errors']}")
-                return None
-            return result.get("data")
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"Stash API request failed (Attempt {attempt}/{config.STASH_RETRIES}): {e}")
-            if attempt == config.STASH_RETRIES:
-                logger.error("Max retries reached. Stash is unreachable.")
-                return None
+    async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
+        for attempt in range(1, getattr(config, "STASH_RETRIES", 3) + 1):
+            try:
+                response = await client.post(
+                    url, 
+                    headers=get_stash_headers(), 
+                    json=payload, 
+                    timeout=getattr(config, "STASH_TIMEOUT", 30)
+                )
+                response.raise_for_status()
+                result = response.json()
+                if "errors" in result:
+                    logger.error(f"GraphQL Error: {result['errors']}")
+                    return None
+                return result.get("data")
+            except Exception as e:
+                logger.warning(f"Stash API request failed (Attempt {attempt}/{getattr(config, 'STASH_RETRIES', 3)}): {e}")
+                if attempt == getattr(config, "STASH_RETRIES", 3):
+                    logger.error("Max retries reached. Stash is unreachable.")
+                    return None
 
-def get_scene(scene_id: str) -> Optional[Dict[str, Any]]:
-    """Fetch a single scene by ID. Does NOT enforce sync filters to allow access from override folders."""
+async def get_scene(scene_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch a single scene by ID asynchronously."""
     query = f"""
     query FindScene($id: ID!) {{
         findScene(id: $id) {{
@@ -85,26 +80,25 @@ def get_scene(scene_id: str) -> Optional[Dict[str, Any]]:
         }}
     }}
     """
-    data = call_graphql(query, {"id": scene_id})
+    data = await call_graphql(query, {"id": scene_id})
     if data and data.get("findScene"):
         return data["findScene"]
         
     return None
 
-def fetch_scenes(filter_args: Dict[str, Any], page: int = 1, per_page: int = 50, scene_filter: Dict[str, Any] = None, ignore_sync_level: bool = False) -> Dict[str, Any]:
-    """Fetch scenes based on SYNC_LEVEL, with an override for specific library folders."""
+async def fetch_scenes(filter_args: Dict[str, Any], page: int = 1, per_page: int = 50, scene_filter: Dict[str, Any] = None, ignore_sync_level: bool = False) -> Dict[str, Any]:
+    """Fetch scenes asynchronously based on SYNC_LEVEL."""
     sf = scene_filter or {}
     
     if "title" in filter_args:
         sf["title"] = filter_args.pop("title")
         
-    # Apply global SYNC_LEVEL filter ONLY if we aren't already filtering by a specific folder
     if not ignore_sync_level:
         sync_mode = getattr(config, "SYNC_LEVEL", "Everything")
         if sync_mode == "Organized":
             sf["organized"] = True 
         elif sync_mode == "Tagged":
-            sf["tags"] = {"modifier": "NOT_NULL"}  # Stash filter for 'has any tag'
+            sf["tags"] = {"modifier": "NOT_NULL"}
 
     query = f"""
     query FindScenes($filter: FindFilterType, $scene_filter: SceneFilterType) {{
@@ -125,11 +119,11 @@ def fetch_scenes(filter_args: Dict[str, Any], page: int = 1, per_page: int = 50,
         "scene_filter": sf
     }
     
-    data = call_graphql(query, variables)
+    data = await call_graphql(query, variables)
     return data.get("findScenes") if data else {"count": 0, "scenes": []}
 
-def get_stash_stats() -> dict:
-    """Fetches total library counts from Stash."""
+async def get_stash_stats() -> dict:
+    """Fetches total library counts from Stash asynchronously."""
     query = """
     query Stats {
         stats {
@@ -141,13 +135,13 @@ def get_stash_stats() -> dict:
         }
     }
     """
-    data = call_graphql(query)
+    data = await call_graphql(query)
     if data and "stats" in data:
         return data["stats"]
     return {}
 
-def get_all_studios():
-    """Fetches all studios from Stash to populate the 'Networks' list in ErsatzTV."""
+async def get_all_studios():
+    """Fetches all studios from Stash asynchronously."""
     query = """
     query AllStudios {
       allStudios {
@@ -157,5 +151,5 @@ def get_all_studios():
       }
     }
     """
-    data = call_graphql(query)
+    data = await call_graphql(query)
     return data.get("allStudios", []) if data else []
