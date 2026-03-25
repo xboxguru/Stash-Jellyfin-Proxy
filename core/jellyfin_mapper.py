@@ -177,6 +177,7 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
         "Type": "Movie",
         "IsFolder": False,
         "MediaType": "Video",
+        "CanDelete": getattr(config, "ALLOW_CLIENT_DELETION", "Disabled").lower() != "disabled",
         "CanDownload": True,
         "ParentId": final_parent_id,
         "DateLastSaved": now_iso, 

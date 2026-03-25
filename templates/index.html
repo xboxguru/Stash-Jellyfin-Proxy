@@ -637,6 +637,8 @@
                                 <input type="number" class="form-input" name="MAX_PAGE_SIZE" placeholder="200">
                                 <div class="form-hint">Hard query limit</div>
                             </div>
+                        </div>
+                        <div class="form-row three-col">
                             <div class="form-group">
                                 <label class="form-label">Recent Days Tag</label>
                                 <input type="number" class="form-input" name="RECENT_DAYS" placeholder="14">
@@ -650,6 +652,15 @@
                                     <option value="both">Both (O-Counter + Rating)</option>
                                 </select>
                                 <div class="form-hint">What Stash does when favorited</div>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label">Client Deletion</label>
+                                <select class="form-input" name="ALLOW_CLIENT_DELETION">
+                                    <option value="Disabled">Disabled (Hidden in UI)</option>
+                                    <option value="Remove">Remove (Delete from Stash DB only)</option>
+                                    <option value="Delete">Delete (Nuke from Stash & Disk)</option>
+                                </select>
+                                <div class="form-hint">Allow clients to delete scenes</div>
                             </div>
                         </div>
                         <div class="form-row">
@@ -833,6 +844,7 @@
             SERVER_NAME: 'Stash Media Server',
             RECENT_DAYS: 14,
             FAVORITE_ACTION: 'o_counter',
+            ALLOW_CLIENT_DELETION: 'Disabled',
             TAG_GROUPS: [],
             LATEST_GROUPS: ['Scenes'],
             STASH_TIMEOUT: 30,

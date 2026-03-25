@@ -102,7 +102,9 @@ routes = [
 
     # --- Item Detail & Image Routes ---
     Route("/users/{user_id}/items/{item_id}", library_routes.endpoint_item_details, methods=["GET"]),
+    Route("/users/{user_id}/items/{item_id}", library_routes.endpoint_delete_item, methods=["DELETE"]),
     Route("/items/{item_id}", library_routes.endpoint_item_details, methods=["GET"]),
+    Route("/items/{item_id}", library_routes.endpoint_delete_item, methods=["DELETE"]),
     
     # Pre-Flight Detail Stubs (Prevents Wholphin Movie 404 Crashes)
     Route("/users/{user_id}/items/{item_id}/thememedia", library_routes.endpoint_theme_songs, methods=["GET"]),

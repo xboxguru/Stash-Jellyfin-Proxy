@@ -49,6 +49,7 @@ async def api_get_config(request: Request):
         "SERVER_ID": getattr(config, "SERVER_ID", ""),
         "RECENT_DAYS": getattr(config, "RECENT_DAYS", 14),
         "FAVORITE_ACTION": getattr(config, "FAVORITE_ACTION", "o_counter"),
+        "ALLOW_CLIENT_DELETION": getattr(config, "ALLOW_CLIENT_DELETION", "Disabled"),
         "ENABLE_FILTERS": getattr(config, "ENABLE_FILTERS", True),
         "ENABLE_TAG_FILTERS": getattr(config, "ENABLE_TAG_FILTERS", False),
         "ENABLE_ALL_TAGS": getattr(config, "ENABLE_ALL_TAGS", False),

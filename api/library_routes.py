@@ -4,7 +4,7 @@ import httpx
 import datetime
 import re
 import hashlib
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.requests import Request
 import config
 from core import stash_client
@@ -723,3 +723,62 @@ async def endpoint_special_features(request: Request):
     """Satisfies strict Kotlin SDKs looking for Special Features."""
     # The Kotlin SDK strictly expects a raw JSON Array, NOT an object containing an 'Items' array!
     return JSONResponse([])
+
+async def endpoint_delete_item(request: Request):
+    """Intercepts Jellyfin delete requests and safely executes them in Stash."""
+    item_id = request.path_params.get("item_id", "")
+    decoded_id = decode_id(item_id)
+    
+    # 1. Check the safety config
+    deletion_mode = getattr(config, "ALLOW_CLIENT_DELETION", "Disabled").lower()
+    if deletion_mode == "disabled":
+        logger.warning(f"🚫 Deletion attempted for {decoded_id}, but it is disabled in the proxy config.")
+        return Response(status_code=403)
+    
+    # 2. Only allow physical Scenes to be targeted (no Tags/Studios)
+    if decoded_id.startswith("scene-"):
+        raw_id = decoded_id.replace("scene-", "")
+        stash_base = config.get_stash_base()
+        
+        url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if getattr(config, "STASH_API_KEY", ""):
+            headers["ApiKey"] = config.STASH_API_KEY
+            
+        # Determine behavior based on config ("delete" nukes the file, "remove" just drops the DB entry)
+        nuke_file = (deletion_mode == "delete")
+        
+        query = """
+        mutation sceneDestroy($input: SceneDestroyInput!) {
+            sceneDestroy(input: $input)
+        }
+        """
+        variables = {
+            "input": {
+                "id": raw_id,
+                "delete_file": nuke_file,
+                "delete_generated": True
+            }
+        }
+        
+        action_text = "NUKING from Disk and Stash DB" if nuke_file else "REMOVING from Stash DB only"
+        logger.info(f"🗑️ DELETE REQUEST: {action_text} for Scene {raw_id}...")
+        
+        async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
+            try:
+                resp = await client.post(url, headers=headers, json={"query": query, "variables": variables}, timeout=10.0)
+                data = resp.json()
+                
+                if "errors" in data:
+                    logger.error(f"❌ STASH DELETION ERROR: {data['errors']}")
+                    return Response(status_code=500)
+                    
+                logger.info(f"✅ SUCCESS: Scene {raw_id} successfully deleted!")
+                return Response(status_code=204) # 204 No Content tells the client to close the modal
+                
+            except Exception as e:
+                logger.error(f"⚠️ Failed to communicate with Stash for deletion: {e}")
+                return Response(status_code=500)
+
+    logger.warning(f"🚫 Denied deletion request for non-scene item: {decoded_id}")
+    return Response(status_code=403)
