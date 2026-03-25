@@ -3,6 +3,8 @@ import logging
 import httpx
 from starlette.responses import FileResponse, Response
 from starlette.requests import Request
+from starlette.background import BackgroundTask
+from starlette.responses import StreamingResponse
 import config
 from core.jellyfin_mapper import decode_id
 
@@ -68,18 +70,37 @@ async def endpoint_item_image(request: Request):
     logger.warning(f"⚠️ UNHANDLED IMAGE REQUEST: {item_id} | Returning 404")
     return Response(status_code=404)
 
+from starlette.background import BackgroundTask
+from starlette.responses import StreamingResponse
+
 async def _proxy_image(url: str):
-    """Helper function to fetch the image from Stash and stream it to the client."""
-    async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
-        try:
-            resp = await client.get(url, timeout=10.0)
-            if resp.status_code == 200:
-                content_type = resp.headers.get("content-type", "image/jpeg")
-                return Response(content=resp.content, media_type=content_type)
-            else:
-                logger.error(f"❌ STASH RETURNED HTTP {resp.status_code} for URL: {url}")
-        except Exception as e:
-            logger.error(f"❌ FAILED TO FETCH IMAGE FROM STASH: {e}")
+    """Helper function to stream the image from Stash without hoarding RAM."""
+    client = httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False))
+    try:
+        req = client.build_request("GET", url)
+        r = await client.send(req, stream=True)
+        
+        if r.status_code == 200:
+            content_type = r.headers.get("content-type", "image/jpeg")
+            
+            async def stream_generator():
+                async for chunk in r.aiter_bytes(chunk_size=8192):
+                    yield chunk
+                    
+            async def cleanup():
+                await r.aclose()
+                await client.aclose()
+
+            return StreamingResponse(stream_generator(), media_type=content_type, background=BackgroundTask(cleanup))
+        else:
+            logger.error(f"❌ STASH RETURNED HTTP {r.status_code} for URL: {url}")
+            await r.aclose()
+            await client.aclose()
+            
+    except Exception as e:
+        logger.error(f"❌ FAILED TO FETCH IMAGE FROM STASH: {e}")
+        await client.aclose()
+        
     return Response(status_code=404)
 
 async def endpoint_trickplay_image(request: Request):
@@ -148,15 +169,7 @@ async def endpoint_trickplay_image(request: Request):
             if apikey and "apikey=" not in stash_sprite_url:
                 stash_sprite_url += f"&apikey={apikey}" if "?" in stash_sprite_url else f"?apikey={apikey}"
 
-            async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
-                try:
-                    resp = await client.get(stash_sprite_url, timeout=10.0)
-                    if resp.status_code == 200:
-                        return Response(content=resp.content, media_type="image/jpeg")
-                    else:
-                        logger.warning(f"⚠️ Stash returned {resp.status_code} for resolved Sprite URL: {stash_sprite_url}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Trickplay Fetch Error: {e}")
+            return await _proxy_image(stash_sprite_url)
 
         # --- THE SHOCK ABSORBER ---
         logger.info(f"🛡️ SPRITE MISSING FOR {raw_id}: Returning 1x1 Black JPEG Fallback")

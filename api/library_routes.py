@@ -4,7 +4,7 @@ import httpx
 import datetime
 import re
 import hashlib
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.requests import Request
 import config
 from core import stash_client
@@ -104,7 +104,6 @@ async def _get_libraries():
     if recent_days > 0:
         views.insert(1, build_view(f"Recently Added ({recent_days} Days)", encode_id("root", "recent")))
             
-    # --- EXPERIMENT: Set standard folders to True ---
     if getattr(config, "ENABLE_FILTERS", True):
         views.append(build_view("Saved Filters", encode_id("root", "filters"), is_standard_folder=True))
             
@@ -130,7 +129,6 @@ async def _get_libraries():
                     match = next((t for t in all_tags if t['name'].strip().lower() == search_name), None)
                     if match:
                         view_id = encode_id("tag", str(match['id']))
-                        # Ensure custom tag root folders are standard folders too
                         views.append(build_view(match['name'], view_id, is_standard_folder=True))
             except Exception as e:
                 logger.error(f"Failed to auto-resolve tag IDs: {e}")
@@ -288,7 +286,6 @@ async def endpoint_items(request: Request):
                         resp = await client.post(url, headers=headers, json={"query": query}, timeout=10.0)
                         filters = resp.json().get("data", {}).get("findSavedFilters", [])
                         for f in filters:
-                            # FIX: Removed CollectionFolder logic so they don't spawn 4 inner tabs!
                             jellyfin_items.append({
                                 "Name": f.get("name"), "Id": encode_id("filter", str(f.get("id"))),
                                 "Type": "Folder", "IsFolder": True, "ServerId": server_id
@@ -347,7 +344,7 @@ async def endpoint_items(request: Request):
             is_folder_override = True
         elif decoded_parent_id == "root-recent":
             recent_days = getattr(config, "RECENT_DAYS", 14)
-            cutoff_date = (datetime.datetime.utcnow() - datetime.timedelta(days=recent_days)).strftime("%Y-%m-%dT%H:%M:%S")
+            cutoff_date = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=recent_days)).strftime("%Y-%m-%dT%H:%M:%S")
             scene_filter["created_at"] = {"value": cutoff_date, "modifier": "GREATER_THAN"}
             is_folder_override = True
         elif decoded_parent_id.startswith("tag-"):
@@ -371,7 +368,6 @@ async def endpoint_items(request: Request):
             headers = {"Content-Type": "application/json", "Accept": "application/json"}
             if getattr(config, "STASH_API_KEY", ""): headers["ApiKey"] = config.STASH_API_KEY
             
-            # FIX: Dual-fallback query to bypass strict schema errors in newer Stash versions
             query_modern = """query FindSavedFilter($id: ID!) { findSavedFilter(id: $id) { find_filter { q sort direction } object_filter } }"""
             query_legacy = """query FindSavedFilter($id: ID!) { findSavedFilter(id: $id) { filter find_filter { q sort direction } } }"""
             
@@ -460,13 +456,13 @@ async def endpoint_items(request: Request):
     if search_term: filter_args["q"] = search_term
 
     if original_limit == 0 and not search_term and "IsResumable" not in filter_list:
-        stash_data = stash_client.fetch_scenes(filter_args, page=1, per_page=1, scene_filter=scene_filter, ignore_sync_level=is_folder_override)
+        stash_data = await stash_client.fetch_scenes(filter_args, page=1, per_page=1, scene_filter=scene_filter, ignore_sync_level=is_folder_override)
         if not stash_data:
             return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": start_index})
         return JSONResponse({"Items": [], "TotalRecordCount": stash_data.get("count", 0), "StartIndex": start_index})
 
     page = (start_index // limit) + 1 if limit > 0 else 1
-    stash_data = stash_client.fetch_scenes(filter_args, page=page, per_page=limit, scene_filter=scene_filter, ignore_sync_level=is_folder_override)
+    stash_data = await stash_client.fetch_scenes(filter_args, page=page, per_page=limit, scene_filter=scene_filter, ignore_sync_level=is_folder_override)
     
     if not stash_data:
         return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": start_index})
@@ -592,7 +588,7 @@ async def endpoint_item_details(request: Request):
         return JSONResponse({"error": f"Invalid ID format: {decoded_id}"}, status_code=400)
         
     raw_id = number_match.group()
-    scene = stash_client.get_scene(raw_id)
+    scene = await stash_client.get_scene(raw_id)
     
     if scene:
         jellyfin_item = jellyfin_mapper.format_jellyfin_item(scene)
@@ -628,7 +624,7 @@ async def endpoint_years(request: Request):
     return JSONResponse({"Items": years, "TotalRecordCount": len(years), "StartIndex": 0})
 
 async def endpoint_studios(request: Request):
-    studios = stash_client.get_all_studios()
+    studios = await stash_client.get_all_studios()
     cache_version = getattr(config, "CACHE_VERSION", 0)
     server_id = getattr(config, "SERVER_ID", "stash-proxy")
     
@@ -640,7 +636,7 @@ async def endpoint_studios(request: Request):
             "Id": encode_id("studio", str(s.get('id'))), 
             "Type": "Studio",
             "ServerId": server_id,
-            "IsFolder": False, # <-- Changed to False
+            "IsFolder": False, 
             "ImageTags": {"Primary": s_tag}, 
             "HasPrimaryImage": bool(s.get("image_path"))
         })
@@ -681,7 +677,7 @@ async def endpoint_latest(request: Request):
             is_folder_override = True
         elif decoded_parent_id == "root-recent":
             recent_days = getattr(config, "RECENT_DAYS", 14)
-            cutoff_date = (datetime.datetime.utcnow() - datetime.timedelta(days=recent_days)).strftime("%Y-%m-%dT%H:%M:%S")
+            cutoff_date = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=recent_days)).strftime("%Y-%m-%dT%H:%M:%S")
             scene_filter["created_at"] = {"value": cutoff_date, "modifier": "GREATER_THAN"}
             is_folder_override = True
         elif decoded_parent_id.startswith("tag-"):
@@ -689,7 +685,7 @@ async def endpoint_latest(request: Request):
             scene_filter["tags"] = {"value": [raw_tag_id], "modifier": "INCLUDES"}
             is_folder_override = True
             
-    stash_data = stash_client.fetch_scenes(
+    stash_data = await stash_client.fetch_scenes(
         {"sort": "created_at", "direction": "DESC"}, 
         page=1, per_page=16, 
         scene_filter=scene_filter,
@@ -708,10 +704,7 @@ async def endpoint_latest(request: Request):
     return JSONResponse(jellyfin_items) 
 
 async def endpoint_theme_songs(request: Request):
-    """Satisfies strict Kotlin SDKs (Wholphin/Findroid) looking for Theme Songs."""
     item_id = request.path_params.get("item_id", "unknown")
-    
-    # The Kotlin SDK strictly requires the OwnerId field to be present
     return JSONResponse({
         "OwnerId": item_id,
         "Items": [],
@@ -720,6 +713,62 @@ async def endpoint_theme_songs(request: Request):
     })
 
 async def endpoint_special_features(request: Request):
-    """Satisfies strict Kotlin SDKs looking for Special Features."""
-    # The Kotlin SDK strictly expects a raw JSON Array, NOT an object containing an 'Items' array!
     return JSONResponse([])
+
+async def endpoint_delete_item(request: Request):
+    """Intercepts Jellyfin delete requests and safely executes them in Stash."""
+    item_id = request.path_params.get("item_id", "")
+    decoded_id = decode_id(item_id)
+    
+    # 1. Check the safety config
+    deletion_mode = getattr(config, "ALLOW_CLIENT_DELETION", "Disabled").lower()
+    if deletion_mode == "disabled":
+        logger.warning(f"🚫 Deletion attempted for {decoded_id}, but it is disabled in the proxy config.")
+        return Response(status_code=403)
+    
+    # 2. Only allow physical Scenes to be targeted
+    if decoded_id.startswith("scene-"):
+        raw_id = decoded_id.replace("scene-", "")
+        stash_base = config.get_stash_base()
+        
+        url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if getattr(config, "STASH_API_KEY", ""):
+            headers["ApiKey"] = config.STASH_API_KEY
+            
+        nuke_file = (deletion_mode == "delete")
+        
+        query = """
+        mutation sceneDestroy($input: SceneDestroyInput!) {
+            sceneDestroy(input: $input)
+        }
+        """
+        variables = {
+            "input": {
+                "id": raw_id,
+                "delete_file": nuke_file,
+                "delete_generated": True
+            }
+        }
+        
+        action_text = "NUKING from Disk and Stash DB" if nuke_file else "REMOVING from Stash DB only"
+        logger.info(f"🗑️ DELETE REQUEST: {action_text} for Scene {raw_id}...")
+        
+        async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
+            try:
+                resp = await client.post(url, headers=headers, json={"query": query, "variables": variables}, timeout=10.0)
+                data = resp.json()
+                
+                if "errors" in data:
+                    logger.error(f"❌ STASH DELETION ERROR: {data['errors']}")
+                    return Response(status_code=500)
+                    
+                logger.info(f"✅ SUCCESS: Scene {raw_id} successfully deleted!")
+                return Response(status_code=204)
+                
+            except Exception as e:
+                logger.error(f"⚠️ Failed to communicate with Stash for deletion: {e}")
+                return Response(status_code=500)
+
+    logger.warning(f"🚫 Denied deletion request for non-scene item: {decoded_id}")
+    return Response(status_code=403)

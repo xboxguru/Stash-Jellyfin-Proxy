@@ -100,9 +100,16 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
     
     play_count = scene.get("play_count") or 0
     o_counter = scene.get("o_counter") or 0
-    is_favorite = o_counter > 0
     
-    now_iso = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
+    # Dynamically check the correct Stash stat based on user config!
+    fav_action = getattr(config, "FAVORITE_ACTION", "o_counter").lower()
+    if fav_action == "rating":
+        # If Stash has a rating > 0, tell Jellyfin the heart is filled
+        is_favorite = (scene.get("rating100") or 0) > 0
+    else:
+        is_favorite = o_counter > 0
+    
+    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
 
     base_stream_flags = {
         "IsInterlaced": False,
@@ -170,6 +177,7 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
         "Type": "Movie",
         "IsFolder": False,
         "MediaType": "Video",
+        "CanDelete": getattr(config, "ALLOW_CLIENT_DELETION", "Disabled").lower() != "disabled",
         "CanDownload": True,
         "ParentId": final_parent_id,
         "DateLastSaved": now_iso, 
@@ -232,11 +240,12 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
         formatted_created = f"{base_time}.0000000Z"
         if recent_days_limit > 0:
             try:
-                dt = datetime.datetime.strptime(base_time, "%Y-%m-%dT%H:%M:%S")
-                if (datetime.datetime.utcnow() - dt).days <= recent_days_limit:
+                # Parse the time and immediately attach UTC timezone info to prevent math crashes
+                dt = datetime.datetime.strptime(base_time, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+                if (datetime.datetime.now(datetime.timezone.utc) - dt).days <= recent_days_limit:
                     item_tags.append("Recently Added")
             except Exception:
-                pass 
+                pass
     else:
         formatted_created = now_iso
 
