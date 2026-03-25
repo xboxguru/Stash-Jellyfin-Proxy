@@ -14,6 +14,7 @@ from starlette.middleware.cors import CORSMiddleware
 
 # Import our custom modules
 import config
+from core import stash_client
 from api.middleware import AuthenticationMiddleware
 from api import ui_routes, auth_routes, library_routes, playback_routes, image_routes
 
@@ -43,14 +44,17 @@ logger = logging.getLogger("proxy_main")
 
 # --- STATIC IP CACHER (Prevents UDP Blocking) ---
 def get_local_ip():
+    # 1. Prioritize explicitly configured Docker Host IP
     local_ip = getattr(config, "HOST_IP", "").strip()
     if not local_ip:
+        # 2. Try to automatically detect the network IP
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
             local_ip = s.getsockname()[0]
             s.close()
         except Exception:
+            # 3. Fall back to the bind address
             local_ip = getattr(config, "PROXY_BIND", "127.0.0.1")
             if local_ip == "0.0.0.0":
                 local_ip = "127.0.0.1"
@@ -232,6 +236,11 @@ async def run_server():
     if config.PROXY_API_KEY:
         logger.info(f"🔑 Proxy API Key Loaded: {config.PROXY_API_KEY}")
     logger.info("=" * 50)
+
+    # Validate Stash Connection on Startup
+    stash_online = await stash_client.test_stash_connection()
+    if not stash_online:
+        logger.warning("⚠️ Warning: Stash is unreachable! Proxy will start, but clients will fail to load data.")
     
     loop = asyncio.get_running_loop()
     try:
@@ -247,7 +256,7 @@ async def run_server():
     shutdown_event = asyncio.Event()
     
     async def watch_for_restart():
-        """Background task that watches for the UI restart flag and prunes zombie streams."""
+        """Background task that watches for the UI restart flag and safely prunes zombie streams."""
         import state
         while True:
             if ui_routes.RESTART_REQUESTED:
@@ -258,11 +267,35 @@ async def run_server():
             current_time = time.time()
             if hasattr(state, "active_streams"):
                 original_count = len(state.active_streams)
-                # Prune if last_ping is older than 15 minutes (900 seconds)
-                state.active_streams = [
-                    s for s in state.active_streams 
-                    if current_time - s.get("last_ping", s.get("started", current_time)) < 900
-                ]
+                surviving_streams = []
+                
+                for s in state.active_streams:
+                    # If it hasn't pinged in 15 minutes (900s), treat it as a crashed client
+                    if current_time - s.get("last_ping", s.get("started", current_time)) >= 900:
+                        item_id = s.get("item_id", "")
+                        if item_id.startswith("scene-"):
+                            raw_id = item_id.replace("scene-", "")
+                            
+                            try:
+                                last_ticks = float(s.get("last_ticks", 0))
+                                runtime_ticks = float(s.get("runtime_ticks", 0))
+                                
+                                # Salvage the resume point or watch state before deleting it from memory!
+                                if runtime_ticks > 0:
+                                    pct = last_ticks / runtime_ticks
+                                    if 0.01 < pct < 0.90:
+                                        resume_seconds = last_ticks / 10000000.0
+                                        logger.info(f"🧟 Salvaging resume point ({resume_seconds}s) for crashed stream {s.get('id')}")
+                                        asyncio.create_task(playback_routes._update_stash_resume_time(raw_id, resume_seconds))
+                                    elif pct >= 0.90:
+                                        logger.info(f"🧟 Salvaging watch status for crashed stream {s.get('id')}")
+                                        asyncio.create_task(playback_routes._increment_stash_playcount(raw_id))
+                            except Exception as e:
+                                logger.error(f"Failed to salvage zombie stream data: {e}")
+                    else:
+                        surviving_streams.append(s)
+                        
+                state.active_streams = surviving_streams
                 if len(state.active_streams) < original_count:
                     logger.info(f"🧹 Pruned {original_count - len(state.active_streams)} zombie streams from memory.")
                     

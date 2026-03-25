@@ -308,8 +308,12 @@ async def endpoint_stream(request: Request):
             await r.aclose()
             return Response(status_code=status_code, headers=resp_headers)
 
+        async def cleanup():
+            await r.aclose()
+            await client.aclose()
+
         response = StreamingResponse(stream_generator(r), status_code=status_code, headers=resp_headers)
-        response.background = r.aclose
+        response.background = BackgroundTask(cleanup)
         return response
 
     except Exception as e:
@@ -346,8 +350,12 @@ async def endpoint_hls_segment(request: Request):
         resp_headers.pop("transfer-encoding", None)
         resp_headers.pop("connection", None)
         
+        async def cleanup():
+            await r.aclose()
+            await client.aclose()
+            
         response = StreamingResponse(stream_generator(r), status_code=r.status_code, headers=resp_headers)
-        response.background = r.aclose
+        response.background = BackgroundTask(cleanup)
         return response
 
     except Exception as e:
