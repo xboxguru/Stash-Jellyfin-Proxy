@@ -442,6 +442,45 @@ async def _increment_stash_o_counter(raw_id: str):
         except Exception as e:
             logger.error(f"Failed to increment O counter for Scene {raw_id}: {e}")
 
+async def _decrement_stash_o_counter(raw_id: str):
+    """Currently unused"""
+    stash_base = config.get_stash_base()
+    url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if getattr(config, "STASH_API_KEY", ""):
+        headers["ApiKey"] = config.STASH_API_KEY
+        
+    async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
+        try:
+            query = "mutation($id: ID!) { sceneDecrementO(id: $id) }"
+            resp = await client.post(url, headers=headers, json={"query": query, "variables": {"id": raw_id}}, timeout=10.0)
+            data = resp.json()
+            if "errors" in data:
+                logger.error(f"❌ Stash rejected the O-Counter decrement: {data['errors']}")
+            else:
+                logger.info(f"✅ Two-Way Sync: Decremented 'O' event for Scene {raw_id}.")
+        except Exception as e:
+            logger.error(f"Failed to decrement O counter for Scene {raw_id}: {e}")
+
+async def _update_stash_rating(raw_id: str, rating100: int):
+    stash_base = config.get_stash_base()
+    url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if getattr(config, "STASH_API_KEY", ""):
+        headers["ApiKey"] = config.STASH_API_KEY
+        
+    async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
+        try:
+            query = "mutation SceneUpdate($input: SceneUpdateInput!) { sceneUpdate(input: $input) { id } }"
+            resp = await client.post(url, headers=headers, json={"query": query, "variables": {"input": {"id": raw_id, "rating100": rating100}}}, timeout=10.0)
+            data = resp.json()
+            if "errors" in data:
+                logger.error(f"❌ Stash rejected the Rating update: {data['errors']}")
+            else:
+                logger.info(f"✅ Two-Way Sync: Updated Rating for Scene {raw_id} to {rating100}")
+        except Exception as e:
+            logger.error(f"Failed to update rating for Scene {raw_id}: {e}")
+
 async def endpoint_mark_played(request: Request):
     item_id = decode_id(request.path_params.get("item_id", ""))
     play_count = 1
@@ -470,13 +509,18 @@ async def endpoint_mark_favorite(request: Request):
     played = False
     play_count = 0
     resume_ticks = 0
-    task = None
+    bg_tasks = BackgroundTasks()
     
     if item_id.startswith("scene-"):
         raw_id = item_id.replace("scene-", "")
-        logger.info(f"💖 Favorite (ON) triggered for {item_id}. Incrementing O-Counter.")
+        action = getattr(config, "FAVORITE_ACTION", "o_counter").lower()
+        logger.info(f"💖 Favorite (ON) triggered for {item_id}. Action: {action}")
         
-        task = BackgroundTask(_increment_stash_o_counter, raw_id)
+        # Queue up the requested actions based on the config file
+        if action in ["o_counter", "both"]:
+            bg_tasks.add_task(_increment_stash_o_counter, raw_id)
+        if action in ["rating", "both"]:
+            bg_tasks.add_task(_update_stash_rating, raw_id, 100)
         
         scene = stash_client.get_scene(raw_id)
         if scene:
@@ -490,34 +534,49 @@ async def endpoint_mark_favorite(request: Request):
         "PlayCount": play_count,
         "PlaybackPositionTicks": resume_ticks,
         "Key": item_id
-    }, background=task)
+    }, background=bg_tasks)
 
 async def endpoint_unmark_favorite(request: Request):
     item_id = decode_id(request.path_params.get("item_id", ""))
     played = False
     play_count = 0
     resume_ticks = 0
-    task = None
+    bg_tasks = BackgroundTasks()
     
     if item_id.startswith("scene-"):
         raw_id = item_id.replace("scene-", "")
-        logger.info(f"💖 Favorite (OFF) triggered for {item_id}. REPURPOSED: Incrementing O-Counter anyway!")
+        action = getattr(config, "FAVORITE_ACTION", "o_counter").lower()
         
-        task = BackgroundTask(_increment_stash_o_counter, raw_id)
+        # 1. The Repurposed "Every Tap is an O" Logic
+        if action in ["o_counter", "both"]:
+            logger.info(f"💖 Favorite (OFF) intercepted for {item_id}. REPURPOSED: Incrementing O-Counter!")
+            bg_tasks.add_task(_increment_stash_o_counter, raw_id)
+            
+        # 2. The Rating Logic
+        if action == "both":
+            # Don't lose the rating just because we logged another O!
+            bg_tasks.add_task(_update_stash_rating, raw_id, 100)
+        elif action == "rating":
+            # Strict flip/flop toggle for Rating-Only mode
+            logger.info(f"💔 Favorite (OFF) triggered for {item_id}. Removing 5-Star Rating.")
+            bg_tasks.add_task(_update_stash_rating, raw_id, 0)
         
         scene = stash_client.get_scene(raw_id)
         if scene:
             play_count = scene.get("play_count") or 0
             played = play_count > 0
             resume_ticks = int((scene.get("resume_time") or 0) * 10000000)
+            
+    # Keep the heart filled in the UI if we are just using it as an incrementer!
+    stays_favorite = action in ["o_counter", "both"]
         
     return JSONResponse({
-        "IsFavorite": False, 
+        "IsFavorite": stays_favorite, 
         "Played": played,
         "PlayCount": play_count,
         "PlaybackPositionTicks": resume_ticks,
         "Key": item_id
-    }, background=task)
+    }, background=bg_tasks)
 
 async def endpoint_mark_unplayed(request: Request):
     item_id = decode_id(request.path_params.get("item_id", ""))

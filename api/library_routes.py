@@ -347,7 +347,7 @@ async def endpoint_items(request: Request):
             is_folder_override = True
         elif decoded_parent_id == "root-recent":
             recent_days = getattr(config, "RECENT_DAYS", 14)
-            cutoff_date = (datetime.datetime.utcnow() - datetime.timedelta(days=recent_days)).strftime("%Y-%m-%dT%H:%M:%S")
+            cutoff_date = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=recent_days)).strftime("%Y-%m-%dT%H:%M:%S")
             scene_filter["created_at"] = {"value": cutoff_date, "modifier": "GREATER_THAN"}
             is_folder_override = True
         elif decoded_parent_id.startswith("tag-"):
@@ -681,7 +681,7 @@ async def endpoint_latest(request: Request):
             is_folder_override = True
         elif decoded_parent_id == "root-recent":
             recent_days = getattr(config, "RECENT_DAYS", 14)
-            cutoff_date = (datetime.datetime.utcnow() - datetime.timedelta(days=recent_days)).strftime("%Y-%m-%dT%H:%M:%S")
+            cutoff_date = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=recent_days)).strftime("%Y-%m-%dT%H:%M:%S")
             scene_filter["created_at"] = {"value": cutoff_date, "modifier": "GREATER_THAN"}
             is_folder_override = True
         elif decoded_parent_id.startswith("tag-"):

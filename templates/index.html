@@ -642,6 +642,15 @@
                                 <input type="number" class="form-input" name="RECENT_DAYS" placeholder="14">
                                 <div class="form-hint">Days to apply 'Recently Added'. 0 disables.</div>
                             </div>
+                            <div class="form-group">
+                                <label class="form-label">Heart Button Action</label>
+                                <select class="form-input" name="FAVORITE_ACTION">
+                                    <option value="o_counter">O-Counter Only</option>
+                                    <option value="rating">5-Star Rating Only</option>
+                                    <option value="both">Both (O-Counter + Rating)</option>
+                                </select>
+                                <div class="form-hint">What Stash does when favorited</div>
+                            </div>
                         </div>
                         <div class="form-row">
                             <div class="form-group">
@@ -823,6 +832,7 @@
             SERVER_ID: '',
             SERVER_NAME: 'Stash Media Server',
             RECENT_DAYS: 14,
+            FAVORITE_ACTION: 'o_counter',
             TAG_GROUPS: [],
             LATEST_GROUPS: ['Scenes'],
             STASH_TIMEOUT: 30,
