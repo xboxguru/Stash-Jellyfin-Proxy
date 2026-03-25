@@ -319,6 +319,7 @@ async def endpoint_stream(request: Request):
 
     except Exception as e:
         logger.error(f"Stream passthrough failed for scene {raw_id}: {e}")
+        await client.aclose()
         return Response(status_code=500)
     
 async def endpoint_hls_segment(request: Request):
@@ -361,6 +362,7 @@ async def endpoint_hls_segment(request: Request):
 
     except Exception as e:
         logger.error(f"Stream segment passthrough failed for scene {raw_id} segment {segment}: {e}")
+        await client.aclose()
         return Response(status_code=500)
           
 async def _update_stash_resume_time(raw_id: str, seconds: float):
