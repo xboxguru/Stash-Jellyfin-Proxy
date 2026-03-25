@@ -155,3 +155,70 @@ async def get_all_studios():
     """
     data = await call_graphql(query)
     return data.get("allStudios", []) if data else []
+
+# =====================================================================
+# MUTATIONS (User Data & Deletion)
+# =====================================================================
+
+async def update_resume_time(scene_id: str, time_seconds: float):
+    """Saves the user's playback progress for a scene."""
+    query = "mutation SceneSaveActivity($id: ID!, $resume_time: Float) { sceneSaveActivity(id: $id, resume_time: $resume_time) }"
+    await call_graphql(query, {"id": scene_id, "resume_time": time_seconds})
+    logger.info(f"✅ Two-Way Sync: Saved resume time ({time_seconds}s) for Scene {scene_id}")
+
+async def increment_play_count(scene_id: str):
+    """Increments the official Stash play count for a scene."""
+    query = "mutation($id: ID!) { sceneIncrementPlayCount(id: $id) }"
+    await call_graphql(query, {"id": scene_id})
+    logger.info(f"✅ Two-Way Sync: Logged official Play event for Scene {scene_id}")
+
+async def increment_o_counter(scene_id: str):
+    """Increments the Stash O-Counter for a scene."""
+    query = "mutation SceneAddO($id: ID!, $times: [Timestamp!]) { sceneAddO(id: $id, times: $times) { count } }"
+    await call_graphql(query, {"id": scene_id})
+    logger.info(f"✅ Two-Way Sync: Added 'O' event for Scene {scene_id}")
+
+async def update_rating(scene_id: str, rating100: int):
+    """Updates the 1-100 star rating for a scene."""
+    query = "mutation SceneUpdate($input: SceneUpdateInput!) { sceneUpdate(input: $input) { id } }"
+    await call_graphql(query, {"input": {"id": scene_id, "rating100": rating100}})
+    logger.info(f"✅ Two-Way Sync: Updated Rating for Scene {scene_id} to {rating100}")
+
+async def destroy_scene(scene_id: str, delete_file: bool = False) -> bool:
+    """Removes a scene from the database, and optionally deletes the physical file."""
+    query = "mutation sceneDestroy($input: SceneDestroyInput!) { sceneDestroy(input: $input) }"
+    variables = {"input": {"id": scene_id, "delete_file": delete_file, "delete_generated": True}}
+    result = await call_graphql(query, variables)
+    return result is not None and result.get("sceneDestroy") is True
+
+# =====================================================================
+# SPECIFIC QUERIES (Metadata & Assets)
+# =====================================================================
+
+async def get_all_tags() -> list:
+    """Fetches all Stash tags."""
+    query = """query { findTags(filter: {per_page: -1, sort: "name", direction: ASC}) { tags { id name } } }"""
+    data = await call_graphql(query)
+    return data.get("findTags", {}).get("tags", []) if data else []
+
+async def get_saved_filters() -> list:
+    """Fetches all saved filters, attempting modern schema first, then legacy."""
+    query_modern = """query { findSavedFilters(mode: SCENES) { id name find_filter { q sort direction } object_filter } }"""
+    data = await call_graphql(query_modern)
+    if data and data.get("findSavedFilters"): return data["findSavedFilters"]
+    
+    query_legacy = """query { findSavedFilters(mode: SCENES) { id name filter find_filter { q sort direction } } }"""
+    data_legacy = await call_graphql(query_legacy)
+    return data_legacy.get("findSavedFilters", []) if data_legacy else []
+
+async def get_performer(performer_id: str) -> dict:
+    """Fetches a specific performer by ID."""
+    query = """query FindPerformer($id: ID!) { findPerformer(id: $id) { id name image_path } }"""
+    data = await call_graphql(query, {"id": performer_id})
+    return data.get("findPerformer", {}) if data else {}
+
+async def get_scene_sprite(scene_id: str) -> str:
+    """Fetches the specific Sprite/Trickplay URL for a scene."""
+    query = """query($id: ID!) { findScene(id: $id) { paths { sprite } } }"""
+    data = await call_graphql(query, {"id": scene_id})
+    return data.get("findScene", {}).get("paths", {}).get("sprite") if data else None

@@ -8,7 +8,8 @@ import json
 from hypercorn.config import Config
 from hypercorn.asyncio import serve
 from starlette.applications import Starlette
-from starlette.routing import Route
+from starlette.routing import Route, WebSocketRoute
+from starlette.websockets import WebSocket
 from logging.handlers import RotatingFileHandler
 from starlette.middleware.cors import CORSMiddleware
 
@@ -16,7 +17,7 @@ from starlette.middleware.cors import CORSMiddleware
 import config
 from core import stash_client
 from api.middleware import AuthenticationMiddleware
-from api import ui_routes, auth_routes, library_routes, playback_routes, image_routes
+from api import ui_routes, auth_routes, library_routes, metadata_routes, stream_routes, userdata_routes, image_routes
 
 # Configure Logging with Log Rotation (Max 5MB, keeps 2 backups)
 if not os.path.exists(config.LOG_DIR):
@@ -62,6 +63,16 @@ def get_local_ip():
     return local_ip
 
 CACHED_LOCAL_IP = get_local_ip()
+
+async def dummy_websocket(websocket: WebSocket):
+    """Holds WebSocket connections open to prevent strict clients (Wholphin) from panicking."""
+    await websocket.accept()
+    try:
+        while True:
+            # We just silently catch and ignore any heartbeats the client sends
+            await websocket.receive_text()
+    except Exception:
+        pass
 
 routes = [
     # --- UI Routes (Proxy Web Dashboard) ---
@@ -110,24 +121,24 @@ routes = [
     Route("/items/filters2", library_routes.endpoint_filters, methods=["GET"]),
     Route("/mediasegments/{item_id}", library_routes.endpoint_empty_list, methods=["GET"]),
     Route("/shows/nextup", library_routes.endpoint_empty_list, methods=["GET"]),
-    Route("/genres", library_routes.endpoint_tags, methods=["GET"]),
-    Route("/users/{user_id}/genres", library_routes.endpoint_tags, methods=["GET"]),
-    Route("/tags", library_routes.endpoint_tags, methods=["GET"]),
-    Route("/users/{user_id}/tags", library_routes.endpoint_tags, methods=["GET"]),
-    Route("/years", library_routes.endpoint_years, methods=["GET"]),
-    Route("/studios", library_routes.endpoint_studios, methods=["GET"]),
+    Route("/genres", metadata_routes.endpoint_tags, methods=["GET"]),
+    Route("/users/{user_id}/genres", metadata_routes.endpoint_tags, methods=["GET"]),
+    Route("/tags", metadata_routes.endpoint_tags, methods=["GET"]),
+    Route("/users/{user_id}/tags", metadata_routes.endpoint_tags, methods=["GET"]),
+    Route("/years", metadata_routes.endpoint_years, methods=["GET"]),
+    Route("/studios", metadata_routes.endpoint_studios, methods=["GET"]),
     
     # Generic item listing
     Route("/items", library_routes.endpoint_items, methods=["GET"]),
     Route("/users/{user_id}/items", library_routes.endpoint_items, methods=["GET"]),
 
     # --- Item Detail & Image Routes ---
-    Route("/users/{user_id}/items/{item_id}", library_routes.endpoint_item_details, methods=["GET"]),
-    Route("/users/{user_id}/items/{item_id}", library_routes.endpoint_delete_item, methods=["DELETE"]),
-    Route("/items/{item_id}", library_routes.endpoint_item_details, methods=["GET"]),
-    Route("/items/{item_id}", library_routes.endpoint_delete_item, methods=["DELETE"]),
+    Route("/users/{user_id}/items/{item_id}", metadata_routes.endpoint_item_details, methods=["GET"]),
+    Route("/users/{user_id}/items/{item_id}", metadata_routes.endpoint_delete_item, methods=["DELETE"]),
+    Route("/items/{item_id}", metadata_routes.endpoint_item_details, methods=["GET"]),
+    Route("/items/{item_id}", metadata_routes.endpoint_delete_item, methods=["DELETE"]),
     
-    # Pre-Flight Detail Stubs (Prevents Wholphin Movie 404 Crashes)
+    # Pre-Flight Detail Stubs
     Route("/users/{user_id}/items/{item_id}/thememedia", library_routes.endpoint_theme_songs, methods=["GET"]),
     Route("/users/{user_id}/items/{item_id}/themesongs", library_routes.endpoint_theme_songs, methods=["GET"]),
     Route("/users/{user_id}/items/{item_id}/similar", library_routes.endpoint_empty_list, methods=["GET"]),
@@ -150,33 +161,33 @@ routes = [
     Route("/videos/{item_id}/trickplay/{width}/{file_name}", image_routes.endpoint_trickplay_image, methods=["GET"]),
     
     # --- Playback ---
-    Route("/users/{user_id}/items/{item_id}/playbackinfo", playback_routes.endpoint_playback_info, methods=["POST", "GET"]),
-    Route("/items/{item_id}/playbackinfo", playback_routes.endpoint_playback_info, methods=["POST", "GET"]),
+    Route("/users/{user_id}/items/{item_id}/playbackinfo", stream_routes.endpoint_playback_info, methods=["POST", "GET"]),
+    Route("/items/{item_id}/playbackinfo", stream_routes.endpoint_playback_info, methods=["POST", "GET"]),
     
     # HLS Segment Pipeline
-    Route("/videos/{item_id}/hls/{segment}", playback_routes.endpoint_hls_segment, methods=["GET"]),
-    Route("/videos/{item_id}/master.m3u8", playback_routes.endpoint_stream, methods=["GET", "HEAD"]),
-    Route("/videos/{item_id}/main.m3u8", playback_routes.endpoint_stream, methods=["GET", "HEAD"]),
+    Route("/videos/{item_id}/hls/{segment}", stream_routes.endpoint_hls_segment, methods=["GET"]),
+    Route("/videos/{item_id}/master.m3u8", stream_routes.endpoint_stream, methods=["GET", "HEAD"]),
+    Route("/videos/{item_id}/main.m3u8", stream_routes.endpoint_stream, methods=["GET", "HEAD"]),
     
-    Route("/videos/{item_id}/stream.mp4", playback_routes.endpoint_stream, methods=["GET", "HEAD"]),
-    Route("/videos/{item_id}/stream", playback_routes.endpoint_stream, methods=["GET", "HEAD"]),
-    Route("/sessions/playing", playback_routes.endpoint_sessions_playing, methods=["POST"]),
-    Route("/sessions/playing/progress", playback_routes.endpoint_sessions_playing, methods=["POST"]),
-    Route("/sessions/playing/stopped", playback_routes.endpoint_sessions_stopped, methods=["POST"]),
+    Route("/videos/{item_id}/stream.mp4", stream_routes.endpoint_stream, methods=["GET", "HEAD"]),
+    Route("/videos/{item_id}/stream", stream_routes.endpoint_stream, methods=["GET", "HEAD"]),
+    Route("/sessions/playing", userdata_routes.endpoint_sessions_playing, methods=["POST"]),
+    Route("/sessions/playing/progress", userdata_routes.endpoint_sessions_playing, methods=["POST"]),
+    Route("/sessions/playing/stopped", userdata_routes.endpoint_sessions_stopped, methods=["POST"]),
     
     # --- Watched Status ---
-    Route("/users/{user_id}/playeditems/{item_id}", playback_routes.endpoint_mark_played, methods=["POST"]),
-    Route("/users/{user_id}/playeditems/{item_id}", playback_routes.endpoint_mark_unplayed, methods=["DELETE"]),
-    Route("/userplayeditems/{item_id}", playback_routes.endpoint_mark_played, methods=["POST"]),
-    Route("/userplayeditems/{item_id}", playback_routes.endpoint_mark_unplayed, methods=["DELETE"]),
-    Route("/useritems/{item_id}/userdata", playback_routes.endpoint_update_userdata, methods=["POST"]),
-    Route("/users/{user_id}/items/{item_id}/userdata", playback_routes.endpoint_update_userdata, methods=["POST"]),
+    Route("/users/{user_id}/playeditems/{item_id}", userdata_routes.endpoint_mark_played, methods=["POST"]),
+    Route("/users/{user_id}/playeditems/{item_id}", userdata_routes.endpoint_mark_unplayed, methods=["DELETE"]),
+    Route("/userplayeditems/{item_id}", userdata_routes.endpoint_mark_played, methods=["POST"]),
+    Route("/userplayeditems/{item_id}", userdata_routes.endpoint_mark_unplayed, methods=["DELETE"]),
+    Route("/useritems/{item_id}/userdata", userdata_routes.endpoint_update_userdata, methods=["POST"]),
+    Route("/users/{user_id}/items/{item_id}/userdata", userdata_routes.endpoint_update_userdata, methods=["POST"]),
     
     # --- Favorites ---
-    Route("/users/{user_id}/favoriteitems/{item_id}", playback_routes.endpoint_mark_favorite, methods=["POST"]),
-    Route("/users/{user_id}/favoriteitems/{item_id}", playback_routes.endpoint_unmark_favorite, methods=["DELETE"]),
-    Route("/userfavoriteitems/{item_id}", playback_routes.endpoint_mark_favorite, methods=["POST"]),
-    Route("/userfavoriteitems/{item_id}", playback_routes.endpoint_unmark_favorite, methods=["DELETE"]),
+    Route("/users/{user_id}/favoriteitems/{item_id}", userdata_routes.endpoint_mark_favorite, methods=["POST"]),
+    Route("/users/{user_id}/favoriteitems/{item_id}", userdata_routes.endpoint_unmark_favorite, methods=["DELETE"]),
+    Route("/userfavoriteitems/{item_id}", userdata_routes.endpoint_mark_favorite, methods=["POST"]),
+    Route("/userfavoriteitems/{item_id}", userdata_routes.endpoint_unmark_favorite, methods=["DELETE"]),
     
     Route("/displaypreferences/{display_id}", library_routes.endpoint_empty_list, methods=["GET"]),
     Route("/users/{user_id}/displaypreferences/{display_id}", library_routes.endpoint_empty_list, methods=["GET"]),
@@ -184,11 +195,14 @@ routes = [
     Route("/users/{user_id}/configuration", auth_routes.endpoint_user, methods=["GET"]),
 
     # --- Downloads ---
-    Route("/items/{item_id}/download", playback_routes.endpoint_stream, methods=["GET"]),
-    Route("/users/{user_id}/items/{item_id}/download", playback_routes.endpoint_stream, methods=["GET"]),
+    Route("/items/{item_id}/download", stream_routes.endpoint_stream, methods=["GET"]),
+    Route("/users/{user_id}/items/{item_id}/download", stream_routes.endpoint_stream, methods=["GET"]),
 
     # --- Logs ---
     Route("/clientlog/document", auth_routes.endpoint_client_log, methods=["POST"]),
+
+    # --- Websocket ---
+    WebSocketRoute("/socket", dummy_websocket),
 ]
 
 # Initialize the Starlette App
@@ -287,10 +301,12 @@ async def run_server():
                                     if 0.01 < pct < 0.90:
                                         resume_seconds = last_ticks / 10000000.0
                                         logger.info(f"🧟 Salvaging resume point ({resume_seconds}s) for crashed stream {s.get('id')}")
-                                        asyncio.create_task(playback_routes._update_stash_resume_time(raw_id, resume_seconds))
+                                        # UPDATED TO USE STASH_CLIENT:
+                                        asyncio.create_task(stash_client.update_resume_time(raw_id, resume_seconds))
                                     elif pct >= 0.90:
                                         logger.info(f"🧟 Salvaging watch status for crashed stream {s.get('id')}")
-                                        asyncio.create_task(playback_routes._increment_stash_playcount(raw_id))
+                                        # UPDATED TO USE STASH_CLIENT:
+                                        asyncio.create_task(stash_client.increment_play_count(raw_id))
                             except Exception as e:
                                 logger.error(f"Failed to salvage zombie stream data: {e}")
                     else:

@@ -244,4 +244,4 @@ async def endpoint_client_log(request: Request):
     except Exception as e:
         logger.error(f"Failed to save client log: {e}")
         
-    return PlainTextResponse({})
+    return PlainTextResponse("OK")
