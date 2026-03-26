@@ -249,14 +249,24 @@ async def endpoint_client_log(request: Request):
 async def endpoint_blackhole(request: Request):
     """
     Catch-all for the official Jellyfin Web UI. 
-    Logs the missing endpoint and returns safe empty data.
+    Logs the missing endpoint and returns safe empty data to prevent UI lockups.
     """
     path_lower = request.url.path.lower()
-    logger.info(f"🕳️ BLACKHOLE INTERCEPT: {request.method} {request.url.path}")
+    logger.debug(f"🕳️ WEB UI BLACKHOLE: {request.method} {request.url.path}")
     
-    # Endpoints where the Web UI strictly expects a list/array
-    array_endpoints = ["/plugins", "/scheduledtasks", "/channels", "/livetv", "/providers"]
+    # 1. SyncPlay (Multi-user watching icon in top right)
+    if "syncplay" in path_lower: return JSONResponse([])
+    
+    # 2. Cast/PlayTo (Casting icon)
+    if "sessions" in path_lower and request.method == "GET": return JSONResponse([])
+
+    # 3. Administration & Metadata Dashboard Spinners
+    array_endpoints = ["/plugins", "/scheduledtasks", "/channels", "/livetv", "/providers", "/branding/css"]
     if any(x in path_lower for x in array_endpoints):
         return JSONResponse([])
         
+    # 4. User settings (Prevents the User Editing page from breaking)
+    if "configuration" in path_lower:
+        return JSONResponse({"PlayDefaultAudioTrack": True, "SubtitleMode": "Default"})
+
     return JSONResponse({})

@@ -3,6 +3,7 @@ import asyncio
 import datetime
 import re
 import hashlib
+import json
 from starlette.responses import JSONResponse
 from starlette.requests import Request
 import config
@@ -116,6 +117,7 @@ async def endpoint_items(request: Request):
     studio_ids_param = _get_query_param(request, "StudioIds")
     filters_string = _get_query_param(request, "Filters", "")
     item_types = _get_query_param(request, "IncludeItemTypes", "").lower()
+    exclude_types = _get_query_param(request, "ExcludeItemTypes", "").lower()
     recursive = _get_query_param(request, "Recursive", "false").lower() == "true"
 
     # Edge Case: App Boot Request
@@ -244,8 +246,14 @@ async def endpoint_items(request: Request):
                     if "direction" in data["find_filter"]: filter_args["direction"] = data["find_filter"]["direction"]
 
     if item_types:
-        if not any(t in item_types for t in ["movie", "video", "series", "episode", "folder"]):
+        # Prevent duplicate Web UI search rows by ONLY mapping scenes to Movies/Folders
+        if not any(t in item_types for t in ["movie", "folder"]):
             return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": start_index})
+            
+    exclude_types = _get_query_param(request, "ExcludeItemTypes", "").lower()
+    if exclude_types and "movie" in exclude_types:
+        # If the Web UI explicitly excludes Movies, return empty to prevent the duplicate "Video" row
+        return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": start_index})
 
     # Sort logic
     sort_by = _get_query_param(request, "SortBy", "").lower()
@@ -297,13 +305,28 @@ async def endpoint_items(request: Request):
     safe_root = encode_id("root", "scenes")
     
     for scene in stash_data.get("scenes", []):
-        if search_term and not (scene.get("title") or scene.get("code") or "").lower().startswith(search_term.lower()): continue
         if "IsResumable" in filter_list and (not scene.get("resume_time") or scene.get("resume_time") <= 0): continue
         try: jellyfin_items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=parent_id or safe_root))
         except Exception: pass
 
+    if search_term and (not item_types or "movie" in item_types):
+        all_tags = await stash_client.get_all_tags()
+        server_id = getattr(config, "SERVER_ID", "stash-proxy")
+        for t in all_tags:
+            tag_name = t.get("name", "")
+            if search_term.lower() in tag_name.lower():
+                jellyfin_items.append({
+                    "Name": tag_name,
+                    "Id": encode_id("tag", str(t.get("id"))),
+                    "Type": "Folder", 
+                    "IsFolder": True,
+                    "ServerId": server_id
+                })
+
     total_count = len(jellyfin_items) if search_term or "IsResumable" in filter_list else stash_data.get("count", 0)
-    if original_limit > 0 and (search_term or "IsResumable" in filter_list): jellyfin_items = jellyfin_items[start_index : start_index + original_limit]
+    
+    if original_limit > 0 and (search_term or "IsResumable" in filter_list): 
+        jellyfin_items = jellyfin_items[start_index : start_index + original_limit]
 
     return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": total_count, "StartIndex": start_index})
 
@@ -333,3 +356,35 @@ async def endpoint_latest(request: Request):
     safe_root = encode_id("root", "scenes")
     
     return JSONResponse([jellyfin_mapper.format_jellyfin_item(scene, parent_id=parent_id or safe_root) for scene in stash_data.get("scenes", [])])
+
+async def endpoint_search_hints(request: Request):
+    """Wraps the standard item search specifically for the Web UI search box, and injects Tag results."""
+    import json
+    
+    # 1. Get the movie/scene results
+    response = await endpoint_items(request)
+    data = json.loads(response.body.decode('utf-8'))
+    
+    hints = []
+    for item in data.get("Items", []):
+        hints.append({
+            "ItemId": item["Id"],
+            "Name": item["Name"],
+            "Type": item["Type"],
+            "PrimaryImageTag": item.get("ImageTags", {}).get("Primary", "")
+        })
+        
+    # 2. Inject matching Stash Tags as "Genres"
+    search_term = _get_query_param(request, "SearchTerm", "").lower()
+    if search_term:
+        all_tags = await stash_client.get_all_tags()
+        for t in all_tags:
+            tag_name = t.get("name", "")
+            if search_term in tag_name.lower():
+                hints.append({
+                    "ItemId": encode_id("tag", str(t.get("id"))),
+                    "Name": tag_name,
+                    "Type": "Genre", # Jellyfin uses 'Genre' for tags in search results
+                })
+                
+    return JSONResponse({"SearchHints": hints, "TotalRecordCount": len(hints)})

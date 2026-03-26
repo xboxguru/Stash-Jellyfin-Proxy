@@ -32,6 +32,14 @@ async def endpoint_stream(request: Request):
     stash_stream_url = f"{stash_base}/scene/{raw_id}/stream"
     download_ext = "mp4" 
     
+    if "download" in request.url.path.lower():
+        scene = await stash_client.get_scene(raw_id)
+        if scene and scene.get("files"):
+            dl_url = f"{stash_base}/scene/{raw_id}/stream"
+            if apikey: dl_url += f"?apikey={apikey}&download=true"
+            logger.info(f"📥 Redirecting Web UI Download to raw file: {raw_id}")
+            return RedirectResponse(url=dl_url, status_code=302)
+        
     # 1. Check Codec to Decide on HLS Hijack
     scene = await stash_client.get_scene(raw_id)
     if scene and scene.get("files"):

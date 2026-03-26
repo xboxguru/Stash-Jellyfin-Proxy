@@ -8,6 +8,8 @@ import json
 from hypercorn.config import Config
 from hypercorn.asyncio import serve
 from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import RedirectResponse
 from starlette.routing import Route, WebSocketRoute, Mount
 from starlette.websockets import WebSocket
 from logging.handlers import RotatingFileHandler
@@ -78,9 +80,21 @@ async def dummy_websocket(websocket: WebSocket):
     except Exception:
         pass
 
+async def root_router(request: Request):
+    """Routes traffic based on the port requested."""
+    ui_port = getattr(config, "UI_PORT", 8097)
+    
+    # If accessed via the dedicated UI port, serve the proxy dashboard
+    if request.url.port == ui_port:
+        return await ui_routes.serve_index(request)
+        
+    # Otherwise (port 8096 or a standard web proxy), send them to the Jellyfin Web UI
+    return RedirectResponse(url="/web/index.html", status_code=302)
+
 routes = [
     # --- UI Routes (Proxy Web Dashboard) ---
-    Route("/", ui_routes.serve_index, methods=["GET"]),
+    Route("/", root_router, methods=["GET"]),
+    Route("/favicon.ico", lambda r: RedirectResponse(url="/web/favicon.ico", status_code=302), methods=["GET"]),
     Route("/api/config", ui_routes.api_get_config, methods=["GET"]),
     Route("/api/config", ui_routes.api_post_config, methods=["POST"]),
     Route("/api/logs", ui_routes.api_get_logs, methods=["GET"]),
@@ -133,10 +147,13 @@ routes = [
     Route("/users/{user_id}/tags", metadata_routes.endpoint_tags, methods=["GET"]),
     Route("/years", metadata_routes.endpoint_years, methods=["GET"]),
     Route("/studios", metadata_routes.endpoint_studios, methods=["GET"]),
+    Route("/persons", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/artists", library_routes.endpoint_empty_list, methods=["GET"]),
     
     # Generic item listing
     Route("/items", library_routes.endpoint_items, methods=["GET"]),
     Route("/users/{user_id}/items", library_routes.endpoint_items, methods=["GET"]),
+    Route("/search/hints", library_routes.endpoint_search_hints, methods=["GET"]),
 
     # --- Item Detail & Image Routes ---
     Route("/users/{user_id}/items/{item_id}", metadata_routes.endpoint_item_details, methods=["GET"]),

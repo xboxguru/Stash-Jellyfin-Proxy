@@ -19,10 +19,21 @@ def load_auth_ips():
         try:
             with open(AUTH_IPS_FILE, 'r') as f:
                 data = json.load(f)
-                ips = data.get("ips", [])
-                if isinstance(ips, dict): return ips
-                # Migrate legacy list to timestamped dict
-                return {ip: time.time() for ip in ips}
+                
+                # Scenario 1: It's a dictionary {"ips": ...}
+                if isinstance(data, dict):
+                    ips = data.get("ips", {})
+                    # If it's already the new timestamped format
+                    if isinstance(ips, dict): 
+                        return ips
+                    # If it's the wrapped legacy list {"ips": ["1.2.3.4"]}
+                    elif isinstance(ips, list): 
+                        return {ip: time.time() for ip in ips}
+                
+                # Scenario 2: It's a raw legacy list ["1.2.3.4", "5.6.7.8"]
+                elif isinstance(data, list):
+                    return {ip: time.time() for ip in data}
+                    
         except Exception as e:
             print(f"Error loading authenticated IPs: {e}")
     return {}
