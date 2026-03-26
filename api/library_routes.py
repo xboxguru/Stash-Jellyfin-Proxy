@@ -110,15 +110,85 @@ async def endpoint_items(request: Request):
     except: start_index = 0
     try: limit = int(_get_query_param(request, "Limit", getattr(config, "DEFAULT_PAGE_SIZE", 50)))
     except: limit = getattr(config, "DEFAULT_PAGE_SIZE", 50)
+    
+    # FIX 1: Define original_limit early so the search router can use it safely
+    original_limit = limit
 
-    search_term = _get_query_param(request, "SearchTerm")
+    search_term = _get_query_param(request, "SearchTerm", "")
     person_ids = (_get_query_param(request, "ArtistIds") or _get_query_param(request, "PeopleIds") or _get_query_param(request, "PersonIds"))
     tags_param = (_get_query_param(request, "Tags") or _get_query_param(request, "TagIds") or _get_query_param(request, "GenreIds"))
     studio_ids_param = _get_query_param(request, "StudioIds")
     filters_string = _get_query_param(request, "Filters", "")
-    item_types = _get_query_param(request, "IncludeItemTypes", "").lower()
-    exclude_types = _get_query_param(request, "ExcludeItemTypes", "").lower()
+    
+    # FIX 2: Define recursive!
     recursive = _get_query_param(request, "Recursive", "false").lower() == "true"
+
+    # Safely extract arrays of query parameters to catch Jellyfin's duplicate keys
+    item_types = ",".join([v.lower() for k, v in request.query_params.multi_items() if k.lower() == "includeitemtypes"])
+    if not item_types: item_types = _get_query_param(request, "IncludeItemTypes", "").lower()
+        
+    media_types = ",".join([v.lower() for k, v in request.query_params.multi_items() if k.lower() == "mediatypes"])
+    if not media_types: media_types = _get_query_param(request, "MediaTypes", "").lower()
+        
+    exclude_types = ",".join([v.lower() for k, v in request.query_params.multi_items() if k.lower() == "excludeitemtypes"])
+    if not exclude_types: exclude_types = _get_query_param(request, "ExcludeItemTypes", "").lower()
+
+    # --- SMART GLOBAL SEARCH ROUTER ---
+    if search_term and (item_types or media_types):
+        server_id = getattr(config, "SERVER_ID", "stash-proxy")
+        jellyfin_items = []
+        
+        # ROW 1: "Movies" -> Return Stash Scenes
+        if "movie" in item_types and "movie" not in exclude_types:
+            # FIX: Use the correct fetch_scenes method and calculate the page number
+            page = (start_index // original_limit) + 1 if original_limit > 0 else 1
+            stash_data = await stash_client.fetch_scenes(
+                filter_args={"q": search_term, "sort": "created_at", "direction": "DESC"}, 
+                page=page, 
+                per_page=original_limit, 
+                scene_filter={}
+            )
+            
+            safe_root = jellyfin_mapper.encode_id("root", "scenes") 
+            for scene in stash_data.get("scenes", []):
+                try: jellyfin_items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=safe_root))
+                except Exception: pass
+
+        # ROW 2: "Shows" (Series) -> Return Stash Performers
+        if "series" in item_types and "series" not in exclude_types:
+            query = """query FindPerformers($q: String) { findPerformers(filter: {q: $q, per_page: 20}) { performers { id name } } }"""
+            result = await stash_client.call_graphql(query, {"q": search_term})
+            for p in result.get("findPerformers", {}).get("performers", []):
+                jellyfin_items.append({
+                    "Name": p.get("name", "Unknown"),
+                    # Changed to "person" prefix to perfectly match standard routing
+                    "Id": jellyfin_mapper.encode_id("person", str(p.get("id"))),
+                    "Type": "Series", 
+                    "IsFolder": True, 
+                    "ServerId": server_id,
+                    # Force Jellyfin to draw a beautiful vertical poster box
+                    "PrimaryImageAspectRatio": 0.6666666666666666, 
+                    # Always force the Web UI to request the image
+                    "ImageTags": {"Primary": "primary"} 
+                })
+
+        # ROW 3: "Videos" -> Return Stash Tags
+        if "video" in media_types and "movie" in exclude_types:
+            all_tags = await stash_client.get_all_tags()
+            matched_tags = 0
+            for t in all_tags:
+                if search_term.lower() in t.get("name", "").lower():
+                    jellyfin_items.append({
+                        "Name": t.get("name", ""),
+                        "Id": jellyfin_mapper.encode_id("tag", str(t.get("id"))),
+                        "Type": "Video", 
+                        "IsFolder": True, 
+                        "ServerId": server_id
+                    })
+                    matched_tags += 1
+                    if matched_tags >= 50: break
+                    
+        return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": len(jellyfin_items), "StartIndex": start_index})
 
     # Edge Case: App Boot Request
     if not any([parent_id, ids_param, search_term, recursive, person_ids, tags_param, filters_string]):
@@ -309,19 +379,6 @@ async def endpoint_items(request: Request):
         try: jellyfin_items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=parent_id or safe_root))
         except Exception: pass
 
-    if search_term and (not item_types or "movie" in item_types):
-        all_tags = await stash_client.get_all_tags()
-        server_id = getattr(config, "SERVER_ID", "stash-proxy")
-        for t in all_tags:
-            tag_name = t.get("name", "")
-            if search_term.lower() in tag_name.lower():
-                jellyfin_items.append({
-                    "Name": tag_name,
-                    "Id": encode_id("tag", str(t.get("id"))),
-                    "Type": "Folder", 
-                    "IsFolder": True,
-                    "ServerId": server_id
-                })
 
     total_count = len(jellyfin_items) if search_term or "IsResumable" in filter_list else stash_data.get("count", 0)
     
