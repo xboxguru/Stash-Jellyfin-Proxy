@@ -63,10 +63,18 @@ async def endpoint_item_details(request: Request):
     return JSONResponse({"error": "Item not found"}, status_code=404)
 
 async def endpoint_tags(request: Request):
-    """Provides a list of all Stash tags formatted as Jellyfin Genres/Tags."""
+    """Provides a list of all Stash tags formatted as Jellyfin Genres/Tags, with search filtering."""
     item_type = "Genre" if "genre" in request.url.path.lower() else "Tag"
     server_id = getattr(config, "SERVER_ID", "stash-proxy")
+    
+    # Extract search term safely (case-insensitive key check)
+    search_term = next((v.lower() for k, v in request.query_params.items() if k.lower() == "searchterm"), "")
+    
     stash_tags = await stash_client.get_all_tags()
+    
+    # Filter tags by search term if one was typed in
+    if search_term:
+        stash_tags = [t for t in stash_tags if search_term in t.get("name", "").lower()]
     
     jelly_tags = [{"Name": t.get("name"), "Id": encode_id("tag", str(t.get('id'))), "Type": item_type, "ServerId": server_id, "IsFolder": False} for t in stash_tags]
     return JSONResponse({"Items": jelly_tags, "TotalRecordCount": len(jelly_tags), "StartIndex": 0})

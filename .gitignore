@@ -2,6 +2,7 @@
 stash_jellyfin_proxy.conf
 .env
 authenticated_IPs.json
+stats.json
 
 # Python artifacts
 __pycache__/
@@ -12,8 +13,12 @@ __pycache__/
 # Logs
 *.log
 config/logos/
+*.log.?
 
 # IDE settings
 .vscode/
 .idea/
 .DS_Store
+
+# Jellyfin Web UI (Local Testing)
+jellyfin-web/

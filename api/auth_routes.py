@@ -1,5 +1,5 @@
 import logging
-from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.requests import Request
 import config
 import os
@@ -245,3 +245,32 @@ async def endpoint_client_log(request: Request):
         logger.error(f"Failed to save client log: {e}")
         
     return PlainTextResponse("OK")
+
+async def endpoint_blackhole(request: Request):
+    """
+    Catch-all for the official Jellyfin Web UI. 
+    Logs the missing endpoint and returns safe empty data to prevent UI lockups.
+    """
+    path_lower = request.url.path.lower()
+    logger.debug(f"🕳️ WEB UI BLACKHOLE: {request.method} {request.url.path}")
+    
+    # 1. SyncPlay (Multi-user watching icon in top right)
+    if "syncplay" in path_lower: return JSONResponse([])
+    
+    # 2. Cast/PlayTo (Casting icon)
+    if "sessions" in path_lower and request.method == "GET": return JSONResponse([])
+
+    # 3. CSS intercepts (Must return correct MIME type)
+    if "branding/css" in path_lower:
+        return Response(content="", media_type="text/css")
+
+    # 4. Administration & Metadata Dashboard Spinners
+    array_endpoints = ["/plugins", "/scheduledtasks", "/channels", "/livetv", "/providers"]
+    if any(x in path_lower for x in array_endpoints):
+        return JSONResponse([])
+        
+    # 4. User settings (Prevents the User Editing page from breaking)
+    if "configuration" in path_lower:
+        return JSONResponse({"PlayDefaultAudioTrack": True, "SubtitleMode": "Default"})
+
+    return JSONResponse({})

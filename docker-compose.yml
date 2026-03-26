@@ -9,6 +9,7 @@ services:
     ports:
       - "8096:8096"   # Jellyfin API (for Infuse/ErsatzTV)
       - "8097:8097"   # Web UI
+      - "7359:7359/udp" # Jellyfin Auto-Discovery
     
     volumes:
       - ./config:/config
@@ -27,6 +28,8 @@ services:
       # - REQUIRE_AUTH_FOR_CONFIG=true
       # - UI_PORT=8097
       # - PROXY_PORT=8096
+      # - AUTH_IP_TIMEOUT_MINUTES=60
+      # - TOP_PLAYED_RETENTION_DAYS=0
       
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8096/System/Info/Public"]

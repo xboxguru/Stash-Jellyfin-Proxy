@@ -22,7 +22,7 @@ SYNC_LEVEL = "Everything"
 PROXY_BIND = "0.0.0.0"
 PROXY_PORT = 8096
 UI_PORT = 8097
-HOST_IP = ""  # NEW: For UDP discovery behind Docker networks
+HOST_IP = ""  
 SJS_USER = ""
 SJS_PASSWORD = ""
 TAG_GROUPS = []
@@ -52,6 +52,8 @@ BANNED_IPS = set()
 BAN_THRESHOLD = 10
 BAN_WINDOW_MINUTES = 15
 CACHE_VERSION = 0 
+AUTH_IP_TIMEOUT_MINUTES = 60
+TOP_PLAYED_RETENTION_DAYS = 0
 
 config_defined_keys = set()
 env_overrides = []
@@ -63,7 +65,6 @@ def normalize_path(path, default="/graphql"):
     if len(p) > 1 and p.endswith('/'): p = p.rstrip('/')
     return p
 
-# NEW: Centralized Stash Base URL generator
 def get_stash_base():
     """Returns the Stash URL stripped of trailing slashes."""
     return getattr(sys.modules[__name__], "STASH_URL", "http://localhost:9999").rstrip('/')
@@ -78,37 +79,34 @@ def save_config():
         "ENABLE_ALL_TAGS", "CACHE_VERSION", "DEFAULT_PAGE_SIZE", "MAX_PAGE_SIZE",
         "REQUIRE_AUTH_FOR_CONFIG", "LOG_DIR", "LOG_FILE", 
         "LOG_LEVEL", "LOG_MAX_SIZE_MB", "LOG_BACKUP_COUNT", "BAN_THRESHOLD", 
-        "BAN_WINDOW_MINUTES", "BANNED_IPS", "RECENT_DAYS", "FAVORITE_ACTION", "ALLOW_CLIENT_DELETION"
+        "BAN_WINDOW_MINUTES", "BANNED_IPS", "RECENT_DAYS", "FAVORITE_ACTION", "ALLOW_CLIENT_DELETION",
+        "AUTH_IP_TIMEOUT_MINUTES", "TOP_PLAYED_RETENTION_DAYS"
     ]
     
     try:
-        with open(CONFIG_FILE, 'w') as f:
+        tmp_file = CONFIG_FILE + ".tmp"
+        with open(tmp_file, 'w') as f:
             f.write("# Stash-Jellyfin Proxy Configuration\n")
             for key in keys_to_save:
                 val = getattr(sys.modules[__name__], key, "")
-                
-                if isinstance(val, bool):
-                    val_str = str(val).lower()
-                elif isinstance(val, (list, set)):
-                    val_str = ", ".join(map(str, val))
-                else:
-                    val_str = str(val).strip()
-                    
+                if isinstance(val, bool): val_str = str(val).lower()
+                elif isinstance(val, (list, set)): val_str = ", ".join(map(str, val))
+                else: val_str = str(val).strip()
                 f.write(f"{key} = {val_str}\n")
+        
+        # Atomic replace prevents corruption if process crashes mid-write
+        os.replace(tmp_file, CONFIG_FILE)
     except Exception as e:
         logger.error(f"Failed to save config: {e}")
 
 # --- 3. ROBUST LOAD FUNCTION ---
 def load_config_file():
-    if not os.path.exists(CONFIG_FILE):
-        return
-        
+    if not os.path.exists(CONFIG_FILE): return
     try:
         with open(CONFIG_FILE, 'r') as f:
             for line in f:
                 line = line.strip()
-                if not line or line.startswith('#'):
-                    continue
+                if not line or line.startswith('#'): continue
                 if '=' in line:
                     k, v = line.split('=', 1)
                     k = k.strip()
@@ -116,7 +114,8 @@ def load_config_file():
                     
                     if k in ["CACHE_VERSION", "PROXY_PORT", "UI_PORT", "DEFAULT_PAGE_SIZE", "MAX_PAGE_SIZE", 
                              "STASH_TIMEOUT", "STASH_RETRIES", "LOG_MAX_SIZE_MB", 
-                             "LOG_BACKUP_COUNT", "BAN_THRESHOLD", "BAN_WINDOW_MINUTES", "RECENT_DAYS"]:
+                             "LOG_BACKUP_COUNT", "BAN_THRESHOLD", "BAN_WINDOW_MINUTES", "RECENT_DAYS",
+                             "AUTH_IP_TIMEOUT_MINUTES", "TOP_PLAYED_RETENTION_DAYS"]: 
                         try: v = int(v)
                         except ValueError: continue
                     elif k in ["ENABLE_FILTERS", "ENABLE_TAG_FILTERS", "ENABLE_ALL_TAGS", "REQUIRE_AUTH_FOR_CONFIG", "STASH_VERIFY_TLS"]:
@@ -125,23 +124,18 @@ def load_config_file():
                         v = [x.strip() for x in v.split(",") if x.strip()]
                     elif k in ["BANNED_IPS"]:
                         v = set(x.strip() for x in v.split(",") if x.strip())
-                    elif k == "LOG_LEVEL":
-                        v = str(v).upper()
-                    elif k == "STASH_GRAPHQL_PATH":
-                        v = normalize_path(v)
+                    elif k == "LOG_LEVEL": v = str(v).upper()
+                    elif k == "STASH_GRAPHQL_PATH": v = normalize_path(v)
                         
                     setattr(sys.modules[__name__], k, v)
-                    
                     if hasattr(sys.modules[__name__], "config_defined_keys"):
                         getattr(sys.modules[__name__], "config_defined_keys").add(k)
-                        
     except Exception as e:
         logger.error(f"Config load error: {e}")
 
 load_config_file()
 
 # --- 4. ENVIRONMENT VARIABLES OVERRIDE ---
-# Dynamically check all supported configuration keys against the environment
 _supported_keys = [
     "STASH_URL", "STASH_API_KEY", "PROXY_BIND", "PROXY_PORT", "UI_PORT", "HOST_IP", "PROXY_API_KEY",
     "SJS_USER", "SJS_PASSWORD", "SERVER_ID", "SERVER_NAME", "TAG_GROUPS", "LATEST_GROUPS",
@@ -150,7 +144,8 @@ _supported_keys = [
     "ENABLE_ALL_TAGS", "CACHE_VERSION", "DEFAULT_PAGE_SIZE", "MAX_PAGE_SIZE",
     "REQUIRE_AUTH_FOR_CONFIG", "LOG_DIR", "LOG_FILE", 
     "LOG_LEVEL", "LOG_MAX_SIZE_MB", "LOG_BACKUP_COUNT", "BAN_THRESHOLD", 
-    "BAN_WINDOW_MINUTES", "BANNED_IPS", "RECENT_DAYS", "FAVORITE_ACTION", "ALLOW_CLIENT_DELETION"
+    "BAN_WINDOW_MINUTES", "BANNED_IPS", "RECENT_DAYS", "FAVORITE_ACTION", "ALLOW_CLIENT_DELETION",
+    "AUTH_IP_TIMEOUT_MINUTES", "TOP_PLAYED_RETENTION_DAYS"
 ]
 
 for k in _supported_keys:
@@ -158,7 +153,8 @@ for k in _supported_keys:
     if val is not None:
         if k in ["CACHE_VERSION", "PROXY_PORT", "UI_PORT", "DEFAULT_PAGE_SIZE", "MAX_PAGE_SIZE", 
                  "STASH_TIMEOUT", "STASH_RETRIES", "LOG_MAX_SIZE_MB", 
-                 "LOG_BACKUP_COUNT", "BAN_THRESHOLD", "BAN_WINDOW_MINUTES", "RECENT_DAYS"]:
+                 "LOG_BACKUP_COUNT", "BAN_THRESHOLD", "BAN_WINDOW_MINUTES", "RECENT_DAYS",
+                 "AUTH_IP_TIMEOUT_MINUTES", "TOP_PLAYED_RETENTION_DAYS"]:
             try: val = int(val)
             except ValueError: continue
         elif k in ["ENABLE_FILTERS", "ENABLE_TAG_FILTERS", "ENABLE_ALL_TAGS", "REQUIRE_AUTH_FOR_CONFIG", "STASH_VERIFY_TLS"]:
@@ -167,17 +163,14 @@ for k in _supported_keys:
             val = [x.strip() for x in val.split(",") if x.strip()]
         elif k in ["BANNED_IPS"]:
             val = set(x.strip() for x in val.split(",") if x.strip())
-        elif k == "LOG_LEVEL":
-            val = str(val).upper()
-        elif k == "STASH_GRAPHQL_PATH":
-            val = normalize_path(val)
+        elif k == "LOG_LEVEL": val = str(val).upper()
+        elif k == "STASH_GRAPHQL_PATH": val = normalize_path(val)
             
         globals()[k] = val
         env_overrides.append(k)
 
 # --- 5. AUTO-GENERATE MISSING KEYS ---
 needs_save = False
-
 if not globals().get("SERVER_ID"):
     globals()["SERVER_ID"] = uuid.uuid4().hex
     needs_save = True
@@ -186,5 +179,4 @@ if not globals().get("PROXY_API_KEY"):
     globals()["PROXY_API_KEY"] = str(uuid.uuid4())
     needs_save = True
 
-if needs_save:
-    save_config()
+if needs_save: save_config()

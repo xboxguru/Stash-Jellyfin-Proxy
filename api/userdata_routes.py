@@ -50,8 +50,11 @@ async def endpoint_sessions_playing(request: Request):
             state.stats["streams_today"] += 1
             state.stats["total_streams"] += 1
             scene_id = item_id if item_id else "unknown"
-            if scene_id not in state.stats["top_played"]: state.stats["top_played"][scene_id] = {"title": title, "performer": performer, "count": 0}
+            if scene_id not in state.stats["top_played"]: 
+                state.stats["top_played"][scene_id] = {"title": title, "performer": performer, "count": 0}
             state.stats["top_played"][scene_id]["count"] += 1
+            state.stats["top_played"][scene_id]["last_played"] = time.time()
+            if hasattr(state, "save_stats"): state.save_stats()
         else:
             stream["last_ticks"] = max(stream.get("last_ticks", 0), playback_ticks)
             stream["last_ping"] = int(time.time())

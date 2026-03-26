@@ -72,6 +72,8 @@ async def api_get_config(request: Request):
         "BAN_WINDOW_MINUTES": getattr(config, "BAN_WINDOW_MINUTES", 15),
         "BANNED_IPS": list(getattr(config, "BANNED_IPS", set())),
         "AUTHENTICATED_IPS": list(getattr(state, "authenticated_ips", set())),
+        "AUTH_IP_TIMEOUT_MINUTES": getattr(config, "AUTH_IP_TIMEOUT_MINUTES", 60),
+        "TOP_PLAYED_RETENTION_DAYS": getattr(config, "TOP_PLAYED_RETENTION_DAYS", 0),
     }
     
     return JSONResponse({
@@ -168,7 +170,11 @@ async def api_get_stats(request: Request):
         state.stats["unique_ips_today"] = set()
         state.day_tracker = current_day
 
-    top_played_list = sorted(state.stats["top_played"].values(), key=lambda x: x["count"], reverse=True)[:5]
+    top_played_list = sorted(
+        [{"id": k, **v} for k, v in state.stats.get("top_played", {}).items()], 
+        key=lambda x: x.get("count", 0), 
+        reverse=True
+    )[:100]
 
     return JSONResponse({
         "stash": {
@@ -227,3 +233,17 @@ async def api_increment_cache_version(request):
     return JSONResponse({
         "message": f"Global Cache Version bumped to v{config.CACHE_VERSION}. Tunarr and ErsatzTV will rebuild their libraries on the next sync."
     })
+
+async def api_clear_top_played(request: Request):
+    import state
+    state.stats["top_played"] = {}
+    if hasattr(state, "save_stats"): state.save_stats()
+    return JSONResponse({"success": True})
+
+async def api_remove_top_played_item(request: Request):
+    import state
+    item_id = request.path_params.get("item_id")
+    if item_id and item_id in state.stats["top_played"]:
+        del state.stats["top_played"][item_id]
+        if hasattr(state, "save_stats"): state.save_stats()
+    return JSONResponse({"success": True})

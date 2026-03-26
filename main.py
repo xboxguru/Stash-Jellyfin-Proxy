@@ -8,10 +8,16 @@ import json
 from hypercorn.config import Config
 from hypercorn.asyncio import serve
 from starlette.applications import Starlette
-from starlette.routing import Route, WebSocketRoute
+from starlette.requests import Request
+from starlette.responses import RedirectResponse
+from starlette.routing import Route, WebSocketRoute, Mount
 from starlette.websockets import WebSocket
 from logging.handlers import RotatingFileHandler
 from starlette.middleware.cors import CORSMiddleware
+from starlette.staticfiles import StaticFiles
+import mimetypes
+mimetypes.add_type('application/javascript', '.js')
+mimetypes.add_type('text/css', '.css')
 
 # Import our custom modules
 import config
@@ -74,9 +80,21 @@ async def dummy_websocket(websocket: WebSocket):
     except Exception:
         pass
 
+async def root_router(request: Request):
+    """Routes traffic based on the port requested."""
+    ui_port = getattr(config, "UI_PORT", 8097)
+    
+    # If accessed via the dedicated UI port, serve the proxy dashboard
+    if request.url.port == ui_port:
+        return await ui_routes.serve_index(request)
+        
+    # Otherwise (port 8096 or a standard web proxy), send them to the Jellyfin Web UI
+    return RedirectResponse(url="/web/index.html", status_code=302)
+
 routes = [
     # --- UI Routes (Proxy Web Dashboard) ---
-    Route("/", ui_routes.serve_index, methods=["GET"]),
+    Route("/", root_router, methods=["GET"]),
+    Route("/favicon.ico", lambda r: RedirectResponse(url="/web/favicon.ico", status_code=302), methods=["GET"]),
     Route("/api/config", ui_routes.api_get_config, methods=["GET"]),
     Route("/api/config", ui_routes.api_post_config, methods=["POST"]),
     Route("/api/logs", ui_routes.api_get_logs, methods=["GET"]),
@@ -90,6 +108,8 @@ routes = [
     Route("/api/auth/login", ui_routes.api_login, methods=["POST"]),
     Route("/api/auth/logout", ui_routes.api_logout, methods=["POST"]),
     Route("/api/cache/increment", ui_routes.api_increment_cache_version, methods=["POST"]),
+    Route("/api/stats/top_played", ui_routes.api_clear_top_played, methods=["DELETE"]),
+    Route("/api/stats/top_played/{item_id}", ui_routes.api_remove_top_played_item, methods=["DELETE"]),
     
     # --- System & Auth ---
     Route("/system/info/public", auth_routes.endpoint_system_info_public, methods=["GET"]),
@@ -127,10 +147,13 @@ routes = [
     Route("/users/{user_id}/tags", metadata_routes.endpoint_tags, methods=["GET"]),
     Route("/years", metadata_routes.endpoint_years, methods=["GET"]),
     Route("/studios", metadata_routes.endpoint_studios, methods=["GET"]),
+    Route("/persons", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/artists", library_routes.endpoint_empty_list, methods=["GET"]),
     
     # Generic item listing
     Route("/items", library_routes.endpoint_items, methods=["GET"]),
     Route("/users/{user_id}/items", library_routes.endpoint_items, methods=["GET"]),
+    Route("/search/hints", library_routes.endpoint_search_hints, methods=["GET"]),
 
     # --- Item Detail & Image Routes ---
     Route("/users/{user_id}/items/{item_id}", metadata_routes.endpoint_item_details, methods=["GET"]),
@@ -203,6 +226,15 @@ routes = [
 
     # --- Websocket ---
     WebSocketRoute("/socket", dummy_websocket),
+
+    # =================================================================
+    # --- OFFICIAL JELLYFIN WEB UI ---
+    # =================================================================
+    # 1. Serve the physical HTML/JS files
+    Mount("/web", app=StaticFiles(directory="jellyfin-web", html=True), name="jellyfin-web"),
+
+    # 2. The API Blackhole (MUST BE LAST!)
+    Route("/{path:path}", auth_routes.endpoint_blackhole, methods=["GET", "POST", "OPTIONS", "DELETE"]),
 ]
 
 # Initialize the Starlette App
@@ -237,6 +269,37 @@ class JellyfinDiscoveryProtocol(asyncio.DatagramProtocol):
             }
             logger.debug(f"Answering discovery ping from {addr[0]} with cached IP {CACHED_LOCAL_IP}")
             self.transport.sendto(json.dumps(response).encode('utf-8'), addr)
+
+async def background_pruner():
+    """Silently cleans up expired top_played history and forgotten Auth IPs."""
+    import time
+    import state
+    while True:
+        await asyncio.sleep(60)
+        now = time.time()
+        
+        # 1. Prune Expired Auth IPs
+        timeout = getattr(config, "AUTH_IP_TIMEOUT_MINUTES", 60)
+        if timeout > 0 and hasattr(state, "authenticated_ips") and isinstance(state.authenticated_ips, dict):
+            expired_ips = [ip for ip, ts in state.authenticated_ips.items() if now - ts > (timeout * 60)]
+            if expired_ips:
+                for ip in expired_ips:
+                    del state.authenticated_ips[ip]
+                if hasattr(state, "save_auth_ips"): state.save_auth_ips(state.authenticated_ips)
+
+        # 2. Prune Expired Top Played Items
+        retention = getattr(config, "TOP_PLAYED_RETENTION_DAYS", 0)
+        if retention > 0 and "top_played" in state.stats:
+            expired_scenes = []
+            for sid, data in list(state.stats["top_played"].items()):
+                last = data.get("last_played", now)
+                if "last_played" not in data: data["last_played"] = last
+                if now - last > (retention * 86400):
+                    expired_scenes.append(sid)
+            if expired_scenes:
+                for sid in expired_scenes:
+                    del state.stats["top_played"][sid]
+                if hasattr(state, "save_stats"): state.save_stats()
 
 async def run_server():
     """Configures and runs the Hypercorn ASGI server."""
@@ -319,8 +382,10 @@ async def run_server():
             await asyncio.sleep(60)
 
     watch_task = asyncio.create_task(watch_for_restart())
+    prune_task = asyncio.create_task(background_pruner())
     await serve(asgi_app, hypercorn_config, shutdown_trigger=shutdown_event.wait)
     watch_task.cancel()
+    prune_task.cancel()
     
     if discovery_transport:
         discovery_transport.close()
