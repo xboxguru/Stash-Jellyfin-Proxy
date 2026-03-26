@@ -423,6 +423,41 @@
         select.form-input {
             cursor: pointer;
         }
+        /* Mobile Responsiveness */
+        @media (max-width: 768px) {
+            .layout {
+                flex-direction: column;
+            }
+            .sidebar {
+                width: 100%;
+                display: flex;
+                flex-wrap: wrap;
+                padding: 10px;
+                border-right: none;
+                border-bottom: 1px solid var(--border);
+            }
+            .logo {
+                width: 100%;
+                border-bottom: none;
+                margin-bottom: 0;
+                padding: 10px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+            }
+            .nav-item {
+                flex: 1;
+                justify-content: center;
+                padding: 10px;
+                font-size: 12px;
+            }
+            .nav-item svg {
+                margin-right: 6px;
+            }
+            .nav-item[onclick="doLogout()"] {
+                margin-top: 0 !important;
+            }
+        }
     </style>
 </head>
 <body>
@@ -888,6 +923,12 @@
             setTimeout(() => toast.remove(), 3000);
         }
 
+        function escapeHTML(str) {
+            return str.replace(/[&<>'"]/g, tag => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
+            }[tag]));
+        }
+
         // NAVIGATION
         document.querySelectorAll('.nav-item').forEach(item => {
             item.addEventListener('click', () => {
@@ -936,7 +977,7 @@
                             ${s.item_id ? `<img class="stream-thumb" src="/Items/${s.item_id}/Images/Primary" onerror="this.style.display='none'">` : ''}
                             
                             <div class="stream-details">
-                                <div class="stream-title">${s.performer && s.performer !== 'Unknown' ? s.performer + ': ' : ''}${s.title || s.id}</div>
+                                <div class="stream-title" title="${s.performer && s.performer !== 'Unknown' ? s.performer + ': ' : ''}${s.title || s.id}">${s.performer && s.performer !== 'Unknown' ? s.performer + ': ' : ''}${s.title || s.id}</div>
                                 <div class="stream-meta">
                                     <span class="stream-meta-item"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path></svg>${s.user || 'unknown'}</span>
                                     <span class="stream-meta-item"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"></path></svg>${s.clientIp || 'unknown'}</span>
@@ -975,7 +1016,7 @@
                             <div class="top-played-item">
                                 <span class="top-played-rank">${idx + 1}</span>
                                 <div class="top-played-info">
-                                    <div class="top-played-title">${item.title}</div>
+                                    <div class="top-played-title" title="${item.title}">${item.title}</div>
                                     <div class="top-played-performer">${item.performer || 'Unknown'}</div>
                                 </div>
                                 <span class="top-played-count">${item.count}x</span>
@@ -1005,7 +1046,7 @@
             if (searchFilter) filtered = filtered.filter(l => l.message.toLowerCase().includes(searchFilter));
             
             document.getElementById('log-count').textContent = `${filtered.length} entries`;
-            const html = filtered.map(l => `<div class="log-entry log-${l.level}">${l.timestamp} [${l.level}] ${l.message}</div>`).join('');
+            const html = filtered.map(l => `<div class="log-entry log-${l.level}">${l.timestamp} [${l.level}] ${escapeHTML(l.message)}</div>`).join('');
             document.getElementById('full-logs').innerHTML = html || '<div class="empty-state">No logs</div>';
             
             if (state.currentPage === 'dashboard') {
@@ -1095,11 +1136,26 @@
 
         async function startDashboard() {
             fetchStatus(); fetchStreams(); fetchLogs(); fetchStats(); fetchConfig();
-            if (!window.pollInterval) window.pollInterval = setInterval(() => {
-                if (state.currentPage === 'dashboard') {
-                    fetchStatus(); fetchStreams(); fetchLogs(); fetchStats();
-                } else if (state.currentPage === 'logs') fetchLogs();
-            }, 5000);
+            
+            if (!window.pollInterval) {
+                let isPolling = false; // Safety lock
+                
+                window.pollInterval = setInterval(async () => {
+                    if (isPolling) return; // Skip this tick if we are still waiting on the server
+                    isPolling = true;
+                    
+                    try {
+                        if (state.currentPage === 'dashboard') {
+                            // Run them concurrently, but wait for all to finish
+                            await Promise.all([fetchStatus(), fetchStreams(), fetchLogs(), fetchStats()]);
+                        } else if (state.currentPage === 'logs') {
+                            await fetchLogs();
+                        }
+                    } finally {
+                        isPolling = false; // Unlock for the next tick
+                    }
+                }, 5000);
+            }
         }
 
         // EVENT LISTENERS
@@ -1107,12 +1163,12 @@
             e.preventDefault();
             const formData = new FormData(e.target);
             const data = {};
-            const intFields = ['PROXY_PORT', 'UI_PORT', 'STASH_TIMEOUT', 'STASH_RETRIES', 'RECENT_DAYS', 'LOG_MAX_SIZE_MB', 'LOG_BACKUP_COUNT', 'DEFAULT_PAGE_SIZE', 'MAX_PAGE_SIZE', 'BAN_THRESHOLD', 'BAN_WINDOW_MINUTES'];
             
             formData.forEach((value, key) => {
                 if (key === 'TAG_GROUPS' || key === 'LATEST_GROUPS' || key === 'AUTHENTICATED_IPS') {
                     data[key] = value.split(',').map(s => s.trim()).filter(Boolean);
-                } else if (intFields.includes(key)) {
+                } else if (typeof DEFAULTS[key] === 'number') {
+                    // Dynamically check if the default value is a number!
                     data[key] = value.trim() === '' ? DEFAULTS[key] : parseInt(value);
                 } else data[key] = value.trim() === '' ? DEFAULTS[key] : value;
             });

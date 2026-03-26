@@ -12,6 +12,7 @@ __pycache__/
 # Logs
 *.log
 config/logos/
+*.log.?
 
 # IDE settings
 .vscode/
