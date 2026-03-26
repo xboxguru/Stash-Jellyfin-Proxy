@@ -25,10 +25,6 @@ async def endpoint_item_image(request: Request):
     
     logger.info(f"📸 IMAGE REQUEST DETECTED | Raw ID: '{raw_item_id}' | Decoded ID: '{item_id}' | Type: '{image_type}'")
 
-    # ... [Keep lines 1-13 the same] ...
-    
-    logger.info(f"📸 IMAGE REQUEST DETECTED | Raw ID: '{raw_item_id}' | Decoded ID: '{item_id}' | Type: '{image_type}'")
-
     # 3. Handle Scenes (Movies) First!
     if item_id.startswith("scene-"):
         raw_id = item_id.replace("scene-", "")
@@ -39,9 +35,9 @@ async def endpoint_item_image(request: Request):
         logger.info(f"🖼️ ROUTING TO SCENE: {item_id} ({image_type}) -> {stash_img_url}")
         return await _proxy_image(stash_img_url)
 
-    # 4. Handle Performers (Actors)
-    if item_id.startswith("person-"):
-        raw_id = item_id.replace("person-", "")
+    # 4. Handle Performers (Actors) - NOW PROXIED INSTEAD OF REDIRECTED
+    if item_id.startswith("person-") or item_id.startswith("performer-"):
+        raw_id = item_id.replace("person-", "").replace("performer-", "")
         stash_base = config.get_stash_base()
         apikey = getattr(config, "STASH_API_KEY", "")
         stash_img_url = f"{stash_base}/performer/{raw_id}/image"
