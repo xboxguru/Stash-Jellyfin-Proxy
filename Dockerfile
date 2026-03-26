@@ -11,17 +11,23 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
+# 1. Added wget and unzip to the install list
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    bash curl gosu tzdata && \
+    bash curl gosu tzdata wget unzip && \
     rm -rf /var/lib/apt/lists/*
 
-# Install modular dependencies
+# 2. Install modular dependencies
 RUN pip install --no-cache-dir \
     hypercorn starlette requests httpx
 
 RUN mkdir -p /app /config && chmod 755 /app /config
 
-# Copy the new modular structure
+# 3. Download and extract the pre-compiled Jellyfin Web UI during the build
+RUN wget -q https://github.com/jellyfin/jellyfin/releases/download/v10.9.11/jellyfin_10.9.11_windows-x64.zip -O /tmp/jellyfin.zip && \
+    unzip -q /tmp/jellyfin.zip "jellyfin-web/*" -d /app/ && \
+    rm /tmp/jellyfin.zip
+
+# 4. Copy the new modular structure
 COPY api/ /app/api/
 COPY core/ /app/core/
 COPY templates/ /app/templates/
@@ -33,8 +39,8 @@ RUN chmod +x /docker-entrypoint.sh
 
 WORKDIR /app
 
-# Match your existing ports [cite: 1]
-EXPOSE 8096 8097
+# Match your existing ports
+EXPOSE 8096 8097 7539/udp
 
 VOLUME ["/config"]
 
