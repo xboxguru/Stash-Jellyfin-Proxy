@@ -156,16 +156,20 @@ async def endpoint_items(request: Request):
 
         # ROW 2: "Shows" (Series) -> Return Stash Performers
         if "series" in item_types and "series" not in exclude_types:
-            query = """query FindPerformers($q: String) { findPerformers(filter: {q: $q, per_page: 20}) { performers { id name image_path } } }"""
+            query = """query FindPerformers($q: String) { findPerformers(filter: {q: $q, per_page: 20}) { performers { id name } } }"""
             result = await stash_client.call_graphql(query, {"q": search_term})
             for p in result.get("findPerformers", {}).get("performers", []):
                 jellyfin_items.append({
                     "Name": p.get("name", "Unknown"),
-                    "Id": jellyfin_mapper.encode_id("performer", str(p.get("id"))),
+                    # Changed to "person" prefix to perfectly match standard routing
+                    "Id": jellyfin_mapper.encode_id("person", str(p.get("id"))),
                     "Type": "Series", 
                     "IsFolder": True, 
                     "ServerId": server_id,
-                    "ImageTags": {"Primary": "primary"} if p.get("image_path") else {}
+                    # Force Jellyfin to draw a beautiful vertical poster box
+                    "PrimaryImageAspectRatio": 0.6666666666666666, 
+                    # Always force the Web UI to request the image
+                    "ImageTags": {"Primary": "primary"} 
                 })
 
         # ROW 3: "Videos" -> Return Stash Tags
