@@ -1,9 +1,10 @@
 import re
 import urllib.parse
 import logging
-import time  # <-- ADDED THIS
+import time 
 import config
 import state
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +103,7 @@ class AuthenticationMiddleware:
                     if key_lower in ["referer", "origin"]:
                         header_val = value.decode("utf-8", errors="ignore")
                         # Check if any of our trusted IPs appear in the Referer URL
-                        if any(auth_ip in header_val for auth_ip in auth_ips.keys()):
+                        if any(re.search(rf"\b{re.escape(auth_ip)}\b", header_val) for auth_ip in auth_ips.keys()):
                             is_public = True
                             break      
 
@@ -190,12 +191,6 @@ class AuthenticationMiddleware:
             # Remember this IP as a trusted client for password-less image requests
             if not hasattr(state, "authenticated_ips") or isinstance(state.authenticated_ips, set):
                 state.authenticated_ips = {}
-            
-            # --- THE FIX (Using a dictionary for timeouts) ---
-            state.authenticated_ips[client_ip] = time.time()
-            if hasattr(state, "save_auth_ips"):
-                state.save_auth_ips(state.authenticated_ips)
-            # -------------------------------------------------
             
             if not path_lower.startswith("/api/") and not path_lower.startswith("/web/"):
                 query = scope.get('query_string', b'').decode('utf-8')

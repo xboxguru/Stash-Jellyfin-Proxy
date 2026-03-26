@@ -84,19 +84,18 @@ def save_config():
     ]
     
     try:
-        with open(CONFIG_FILE, 'w') as f:
+        tmp_file = CONFIG_FILE + ".tmp"
+        with open(tmp_file, 'w') as f:
             f.write("# Stash-Jellyfin Proxy Configuration\n")
             for key in keys_to_save:
                 val = getattr(sys.modules[__name__], key, "")
-                
-                if isinstance(val, bool):
-                    val_str = str(val).lower()
-                elif isinstance(val, (list, set)):
-                    val_str = ", ".join(map(str, val))
-                else:
-                    val_str = str(val).strip()
-                    
+                if isinstance(val, bool): val_str = str(val).lower()
+                elif isinstance(val, (list, set)): val_str = ", ".join(map(str, val))
+                else: val_str = str(val).strip()
                 f.write(f"{key} = {val_str}\n")
+        
+        # Atomic replace prevents corruption if process crashes mid-write
+        os.replace(tmp_file, CONFIG_FILE)
     except Exception as e:
         logger.error(f"Failed to save config: {e}")
 

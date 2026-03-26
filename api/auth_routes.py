@@ -1,5 +1,5 @@
 import logging
-from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.requests import Request
 import config
 import os
@@ -260,8 +260,12 @@ async def endpoint_blackhole(request: Request):
     # 2. Cast/PlayTo (Casting icon)
     if "sessions" in path_lower and request.method == "GET": return JSONResponse([])
 
-    # 3. Administration & Metadata Dashboard Spinners
-    array_endpoints = ["/plugins", "/scheduledtasks", "/channels", "/livetv", "/providers", "/branding/css"]
+    # 3. CSS intercepts (Must return correct MIME type)
+    if "branding/css" in path_lower:
+        return Response(content="", media_type="text/css")
+
+    # 4. Administration & Metadata Dashboard Spinners
+    array_endpoints = ["/plugins", "/scheduledtasks", "/channels", "/livetv", "/providers"]
     if any(x in path_lower for x in array_endpoints):
         return JSONResponse([])
         
