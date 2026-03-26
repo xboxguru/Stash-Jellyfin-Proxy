@@ -48,10 +48,13 @@ class AuthenticationMiddleware:
             await self.app(scope, receive, send)
             return
 
-        # FORCE LOWERCASE PATH FOR ROUTING
+        # FORCE LOWERCASE PATH FOR ROUTING (Except for static Web UI files!)
         original_path = scope.get("path", "")
         path_lower = original_path.lower()
-        scope["path"] = path_lower
+        
+        # Preserve case-sensitivity for Javascript chunks and static assets
+        if not path_lower.startswith("/web/") and not path_lower.startswith("/assets/"):
+            scope["path"] = path_lower
         
         method = scope.get("method", "UNK")
         client_ip = get_client_ip(scope)
