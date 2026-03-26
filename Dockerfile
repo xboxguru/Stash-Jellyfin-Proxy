@@ -1,3 +1,7 @@
+# Stage 1: Steal the compiled Web UI from the official Jellyfin image
+FROM jellyfin/jellyfin:10.9.11 AS jellyfin-base
+
+# Stage 2: Build our actual Proxy image
 FROM python:3.11-slim-bookworm
 
 LABEL maintainer="xboxguru"
@@ -11,23 +15,21 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
-# 1. Added wget and unzip to the install list
+# Notice we removed wget and unzip, we don't need them anymore!
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    bash curl gosu tzdata wget unzip && \
+    bash curl gosu tzdata && \
     rm -rf /var/lib/apt/lists/*
 
-# 2. Install modular dependencies
+# Install modular dependencies
 RUN pip install --no-cache-dir \
     hypercorn starlette requests httpx
 
 RUN mkdir -p /app /config && chmod 755 /app /config
 
-# 3. Download and extract the pre-compiled Jellyfin Web UI during the build
-RUN wget -q https://nyc1.mirror.jellyfin.org/main/server/windows/stable/v10.9.11/amd64/jellyfin_10.9.11-amd64.zip -O /tmp/jellyfin.zip && \
-    unzip -q /tmp/jellyfin.zip "jellyfin-web/*" -d /app/ && \
-    rm /tmp/jellyfin.zip
+# COPY the web UI directly from Stage 1 into our app folder
+COPY --from=jellyfin-base /usr/share/jellyfin/web /app/jellyfin-web
 
-# 4. Copy the new modular structure
+# Copy the rest of our Python proxy code
 COPY api/ /app/api/
 COPY core/ /app/core/
 COPY templates/ /app/templates/
@@ -39,8 +41,8 @@ RUN chmod +x /docker-entrypoint.sh
 
 WORKDIR /app
 
-# Match your existing ports
-EXPOSE 8096 8097 7539/udp
+# Match your existing ports, plus UDP Discovery
+EXPOSE 8096 8097 7359/udp
 
 VOLUME ["/config"]
 
