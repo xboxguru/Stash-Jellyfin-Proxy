@@ -245,3 +245,18 @@ async def endpoint_client_log(request: Request):
         logger.error(f"Failed to save client log: {e}")
         
     return PlainTextResponse("OK")
+
+async def endpoint_blackhole(request: Request):
+    """
+    Catch-all for the official Jellyfin Web UI. 
+    Logs the missing endpoint and returns safe empty data.
+    """
+    path_lower = request.url.path.lower()
+    logger.info(f"🕳️ BLACKHOLE INTERCEPT: {request.method} {request.url.path}")
+    
+    # Endpoints where the Web UI strictly expects a list/array
+    array_endpoints = ["/plugins", "/scheduledtasks", "/channels", "/livetv", "/providers"]
+    if any(x in path_lower for x in array_endpoints):
+        return JSONResponse([])
+        
+    return JSONResponse({})

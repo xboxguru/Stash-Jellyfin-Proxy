@@ -8,10 +8,14 @@ import json
 from hypercorn.config import Config
 from hypercorn.asyncio import serve
 from starlette.applications import Starlette
-from starlette.routing import Route, WebSocketRoute
+from starlette.routing import Route, WebSocketRoute, Mount
 from starlette.websockets import WebSocket
 from logging.handlers import RotatingFileHandler
 from starlette.middleware.cors import CORSMiddleware
+from starlette.staticfiles import StaticFiles
+import mimetypes
+mimetypes.add_type('application/javascript', '.js')
+mimetypes.add_type('text/css', '.css')
 
 # Import our custom modules
 import config
@@ -205,6 +209,15 @@ routes = [
 
     # --- Websocket ---
     WebSocketRoute("/socket", dummy_websocket),
+
+    # =================================================================
+    # --- OFFICIAL JELLYFIN WEB UI ---
+    # =================================================================
+    # 1. Serve the physical HTML/JS files
+    Mount("/web", app=StaticFiles(directory="jellyfin-web", html=True), name="jellyfin-web"),
+
+    # 2. The API Blackhole (MUST BE LAST!)
+    Route("/{path:path}", auth_routes.endpoint_blackhole, methods=["GET", "POST", "OPTIONS", "DELETE"]),
 ]
 
 # Initialize the Starlette App
