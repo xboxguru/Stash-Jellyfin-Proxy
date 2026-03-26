@@ -90,6 +90,8 @@ routes = [
     Route("/api/auth/login", ui_routes.api_login, methods=["POST"]),
     Route("/api/auth/logout", ui_routes.api_logout, methods=["POST"]),
     Route("/api/cache/increment", ui_routes.api_increment_cache_version, methods=["POST"]),
+    Route("/api/stats/top_played", ui_routes.api_clear_top_played, methods=["DELETE"]),
+    Route("/api/stats/top_played/{item_id}", ui_routes.api_remove_top_played_item, methods=["DELETE"]),
     
     # --- System & Auth ---
     Route("/system/info/public", auth_routes.endpoint_system_info_public, methods=["GET"]),
@@ -238,6 +240,37 @@ class JellyfinDiscoveryProtocol(asyncio.DatagramProtocol):
             logger.debug(f"Answering discovery ping from {addr[0]} with cached IP {CACHED_LOCAL_IP}")
             self.transport.sendto(json.dumps(response).encode('utf-8'), addr)
 
+async def background_pruner():
+    """Silently cleans up expired top_played history and forgotten Auth IPs."""
+    import time
+    import state
+    while True:
+        await asyncio.sleep(60)
+        now = time.time()
+        
+        # 1. Prune Expired Auth IPs
+        timeout = getattr(config, "AUTH_IP_TIMEOUT_MINUTES", 60)
+        if timeout > 0 and hasattr(state, "authenticated_ips") and isinstance(state.authenticated_ips, dict):
+            expired_ips = [ip for ip, ts in state.authenticated_ips.items() if now - ts > (timeout * 60)]
+            if expired_ips:
+                for ip in expired_ips:
+                    del state.authenticated_ips[ip]
+                if hasattr(state, "save_auth_ips"): state.save_auth_ips(state.authenticated_ips)
+
+        # 2. Prune Expired Top Played Items
+        retention = getattr(config, "TOP_PLAYED_RETENTION_DAYS", 0)
+        if retention > 0 and "top_played" in state.stats:
+            expired_scenes = []
+            for sid, data in list(state.stats["top_played"].items()):
+                last = data.get("last_played", now)
+                if "last_played" not in data: data["last_played"] = last
+                if now - last > (retention * 86400):
+                    expired_scenes.append(sid)
+            if expired_scenes:
+                for sid in expired_scenes:
+                    del state.stats["top_played"][sid]
+                if hasattr(state, "save_stats"): state.save_stats()
+
 async def run_server():
     """Configures and runs the Hypercorn ASGI server."""
     hypercorn_config = Config()
@@ -319,8 +352,10 @@ async def run_server():
             await asyncio.sleep(60)
 
     watch_task = asyncio.create_task(watch_for_restart())
+    prune_task = asyncio.create_task(background_pruner())
     await serve(asgi_app, hypercorn_config, shutdown_trigger=shutdown_event.wait)
     watch_task.cancel()
+    prune_task.cancel()
     
     if discovery_transport:
         discovery_transport.close()

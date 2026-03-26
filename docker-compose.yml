@@ -27,6 +27,8 @@ services:
       # - REQUIRE_AUTH_FOR_CONFIG=true
       # - UI_PORT=8097
       # - PROXY_PORT=8096
+      # - AUTH_IP_TIMEOUT_MINUTES=60
+      # - TOP_PLAYED_RETENTION_DAYS=0
       
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8096/System/Info/Public"]
