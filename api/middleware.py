@@ -192,6 +192,10 @@ class AuthenticationMiddleware:
             if not hasattr(state, "authenticated_ips") or isinstance(state.authenticated_ips, set):
                 state.authenticated_ips = {}
             
+            # --- THE MISSING LINE ---
+            state.authenticated_ips[client_ip] = time.time()
+            # ------------------------
+            
             if not path_lower.startswith("/api/") and not path_lower.startswith("/web/"):
                 query = scope.get('query_string', b'').decode('utf-8')
                 full_url = f"{original_path}?{query}" if query else original_path
