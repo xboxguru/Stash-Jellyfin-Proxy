@@ -23,7 +23,7 @@ RUN pip install --no-cache-dir \
 RUN mkdir -p /app /config && chmod 755 /app /config
 
 # 3. Download and extract the pre-compiled Jellyfin Web UI during the build
-RUN wget -q https://github.com/jellyfin/jellyfin/releases/download/v10.9.11/jellyfin_10.9.11_windows-x64.zip -O /tmp/jellyfin.zip && \
+RUN wget -q https://nyc1.mirror.jellyfin.org/main/server/windows/stable/v10.9.11/amd64/jellyfin_10.9.11-amd64.zip -O /tmp/jellyfin.zip && \
     unzip -q /tmp/jellyfin.zip "jellyfin-web/*" -d /app/ && \
     rm /tmp/jellyfin.zip
 
