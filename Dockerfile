@@ -15,7 +15,6 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
-# Notice we removed wget and unzip, we don't need them anymore!
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash curl gosu tzdata && \
     rm -rf /var/lib/apt/lists/*
@@ -26,8 +25,9 @@ RUN pip install --no-cache-dir \
 
 RUN mkdir -p /app /config && chmod 755 /app /config
 
-# COPY the web UI directly from Stage 1 into our app folder
-COPY --from=jellyfin-base /usr/share/jellyfin/web /app/jellyfin-web
+# --- THE FIX: Copy from the correct Docker-specific path! ---
+COPY --from=jellyfin-base /jellyfin/jellyfin-web /app/jellyfin-web
+# ------------------------------------------------------------
 
 # Copy the rest of our Python proxy code
 COPY api/ /app/api/
