@@ -18,16 +18,55 @@ async def endpoint_item_details(request: Request):
     cache_version = getattr(config, "CACHE_VERSION", 0)
     
     # 1. Handle Navigation Folders
-    if decoded_id.startswith("root-") or decoded_id.startswith("tag-") or decoded_id.startswith("filter-"):
-        is_root = decoded_id.startswith("root-")
-        is_nav_folder = decoded_id in ["root-filters", "root-tags", "root-stashtags", "root-alltags"]
+    if "root-" in decoded_id or "tag-" in decoded_id or "filter-" in decoded_id:
         
-        if is_root: safe_id = encode_id("root", decoded_id.replace("root-", ""))
-        elif decoded_id.startswith("tag-"): safe_id = encode_id("tag", decoded_id.replace("tag-", ""))
-        elif decoded_id.startswith("filter-"): safe_id = encode_id("filter", decoded_id.replace("filter-", ""))
+        # THE FIX: Violently scrub invisible null bytes and whitespace before matching
+        clean_dec = decoded_id.replace("\x00", "").strip()
         
+        is_root = clean_dec.startswith("root-")
+        is_nav_folder = clean_dec in ["root-filters", "root-tags", "root-stashtags", "root-alltags"]
+        
+        item_name = "Folder"
+        safe_id = item_id # Echo exact requested ID
+        
+        # Dynamically resolve real names using our sanitized string
+        if is_root: 
+            if clean_dec == "root-scenes": item_name = "Scenes (Everything)"
+            elif clean_dec == "root-organized": item_name = "Scenes (Organized)"
+            elif clean_dec == "root-tagged": item_name = "Scenes (Tagged)"
+            elif clean_dec == "root-recent": item_name = f"Recently Added ({getattr(config, 'RECENT_DAYS', 14)} Days)"
+            elif clean_dec == "root-filters": item_name = "Saved Filters"
+            elif clean_dec == "root-stashtags": item_name = "Stash Tags"
+            elif clean_dec == "root-alltags": item_name = "All Tags"
+        elif clean_dec.startswith("tag-"): 
+            raw_id = clean_dec.replace("tag-", "")
+            all_tags = await stash_client.get_all_tags()
+            match = next((t for t in all_tags if str(t.get("id")) == raw_id), None)
+            if match: item_name = match.get("name", "Folder")
+        elif clean_dec.startswith("filter-"): 
+            raw_id = clean_dec.replace("filter-", "")
+            filters = await stash_client.get_saved_filters()
+            match = next((f for f in filters if str(f.get("id")) == raw_id), None)
+            if match: item_name = match.get("name", "Folder")
+        
+        logo_hash = hashlib.md5(f"stash-logo-{cache_version}".encode()).hexdigest()
         is_collection = is_root and not is_nav_folder
-        response_dict = {"Name": "Folder", "SortName": "Folder", "Id": safe_id, "ServerId": server_id, "Type": "CollectionFolder" if is_collection else "Folder", "IsFolder": True}
+        
+        response_dict = {
+            "Name": item_name, 
+            "SortName": item_name, 
+            "Id": safe_id, 
+            "DisplayPreferencesId": safe_id,
+            "ServerId": server_id, 
+            "Type": "CollectionFolder" if is_collection else "Folder", 
+            "IsFolder": True,
+            "PrimaryImageAspectRatio": 1.7777777777777777,
+            "ImageTags": {"Primary": logo_hash, "Thumb": logo_hash},
+            "HasPrimaryImage": True, 
+            "HasThumb": True,
+            "HasBackdrop": True,
+            "BackdropImageTags": [logo_hash]
+        }
         if is_collection: response_dict["CollectionType"] = "movies"
         return JSONResponse(response_dict)
 

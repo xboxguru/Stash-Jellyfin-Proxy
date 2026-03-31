@@ -301,9 +301,25 @@ async def endpoint_items(request: Request):
             jellyfin_items = []
             server_id = getattr(config, "SERVER_ID", "stash-proxy")
             
+            # Generate the logo hash for the initial list load
+            cache_version = getattr(config, "CACHE_VERSION", 0)
+            logo_hash = hashlib.md5(f"stash-logo-{cache_version}".encode()).hexdigest()
+            
+            def build_subfolder(name, safe_id, is_collection=False):
+                folder_item = {
+                    "Name": name, "SortName": name, "Id": safe_id, "DisplayPreferencesId": safe_id,
+                    "ServerId": server_id, "Type": "CollectionFolder" if is_collection else "Folder", "IsFolder": True,
+                    "PrimaryImageAspectRatio": 1.7777777777777777,
+                    "ImageTags": {"Primary": logo_hash, "Thumb": logo_hash},
+                    "HasPrimaryImage": True, "HasThumb": True, "HasBackdrop": True,
+                    "BackdropImageTags": [logo_hash]
+                }
+                if is_collection: folder_item["CollectionType"] = "movies"
+                return folder_item
+
             if decoded_parent_id == "root-filters":
                 filters = await stash_client.get_saved_filters()
-                jellyfin_items = [{"Name": f.get("name"), "Id": encode_id("filter", str(f.get("id"))), "Type": "Folder", "IsFolder": True, "ServerId": server_id} for f in filters]
+                jellyfin_items = [build_subfolder(f.get("name"), encode_id("filter", str(f.get("id")))) for f in filters]
             
             elif decoded_parent_id in ["root-tags", "root-stashtags"]:
                 tag_names = getattr(config, "TAG_GROUPS", [])
@@ -312,12 +328,12 @@ async def endpoint_items(request: Request):
                     for name in tag_names:
                         search_name = name.strip().lower()
                         match = next((t for t in all_tags if t['name'].strip().lower() == search_name), None)
-                        if match: jellyfin_items.append({"Name": match['name'], "Id": encode_id("tag", str(match['id'])), "Type": "Folder", "IsFolder": True, "ServerId": server_id})
-                if getattr(config, "ENABLE_ALL_TAGS", False): jellyfin_items.append({"Name": "All Tags", "Id": encode_id("root", "alltags"), "Type": "Folder", "IsFolder": True, "ServerId": server_id})
+                        if match: jellyfin_items.append(build_subfolder(match['name'], encode_id("tag", str(match['id']))))
+                if getattr(config, "ENABLE_ALL_TAGS", False): jellyfin_items.append(build_subfolder("All Tags", encode_id("root", "alltags")))
                     
             elif decoded_parent_id == "root-alltags":
                 tags = await stash_client.get_all_tags()
-                jellyfin_items = [{"Name": t.get("name"), "Id": encode_id("tag", str(t.get("id"))), "Type": "Folder", "IsFolder": True, "ServerId": server_id} for t in tags]
+                jellyfin_items = [build_subfolder(t.get("name"), encode_id("tag", str(t.get("id")))) for t in tags]
                     
             total_record_count = len(jellyfin_items)
             if original_limit > 0: jellyfin_items = jellyfin_items[start_index : start_index + original_limit]
