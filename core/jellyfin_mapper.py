@@ -24,7 +24,7 @@ def decode_id(encoded_id: str) -> str:
         
     try:
         decoded_bytes = bytes.fromhex(clean_id)
-        # FIX: Scrub ALL null bytes and whitespace to prevent ID mismatch bugs globally!
+        # FIX: Violently scrub ALL null bytes and whitespace to prevent ID mismatch bugs globally!
         decoded_str = decoded_bytes.decode('utf-8').replace("\x00", "").strip()
         
         if "scene-" in decoded_str or "person-" in decoded_str or "studio-" in decoded_str or "tag-" in decoded_str or "root-" in decoded_str or "filter-" in decoded_str or "year-" in decoded_str:
@@ -100,7 +100,17 @@ def _build_media_sources(item_id: str, path: str, files: list, runtime_ticks: in
         "Id": item_id, "Path": path, "Protocol": "File", "Type": "Default", "Container": container,
         "RunTimeTicks": runtime_ticks, "IsRemote": False, "SupportsTranscoding": True, "VideoType": "VideoFile",
         "MediaStreams": [video_stream, audio_stream], "MediaAttachments": [], "Formats": [], "RequiredHttpHeaders": {},
-        "Name": title, "Size": int(file_data.get("size") or 0), "ReadAtNativeFramerate": False, "SupportsProbing": True
+        "Name": title, "Size": int(file_data.get("size") or 0), "ReadAtNativeFramerate": False, "SupportsProbing": True,
+        
+        # --- NEW: KOTLIN SDK REQUIRED FIELDS ---
+        "IgnoreDts": False, 
+        "IgnoreIndex": False, 
+        "GenPtsInput": False, 
+        "IsInfiniteStream": False, 
+        "RequiresOpening": False, 
+        "RequiresClosing": False, 
+        "RequiresLooping": False, 
+        "HasSegments": False
     }
 
     if needs_transcode:
@@ -193,7 +203,9 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
     fake_blurhash = "LKO2?U%2Tw=w]~RBVZRi};RPxuwH"
     
     files = scene.get("files") or []
-    path = files[0].get("path", "").replace("\\", "/") if files else ""
+    
+    # FIX 1: Safely handle if path is explicitly null
+    path = (files[0].get("path") or "").replace("\\", "/") if files else ""
     runtime_ticks = int((files[0].get("duration") or 0) * 10000000) if files else 0
     
     title = scene.get("title") or scene.get("code") or (os.path.splitext(os.path.basename(path))[0] if path else f"Scene {raw_id}")
@@ -222,6 +234,7 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
         "Width": (files[0].get("width") or 0) if files else 0,
         "Height": (files[0].get("height") or 0) if files else 0,
         
+        # --- DELEGATED TO HELPERS ---
         "Trickplay": _build_trickplay_dict(item_id, runtime_ticks, files),
         "MediaSources": _build_media_sources(item_id, path, files, runtime_ticks, title),
         "People": _build_people(scene.get("performers") or [], cache_version, fake_blurhash),
@@ -243,12 +256,15 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
     
     item_tags = [t.get("name") for t in scene.get("tags") or [] if t.get("name")]
     if dates_info.pop("_is_recent", False): item_tags.append("Recently Added")
-    if scene.get("o_counter", 0) >= 1: item_tags.append("Onot0")
+    
+    # FIX 2: Safely check o_counter if it explicitly returns null
+    if (scene.get("o_counter") or 0) >= 1: 
+        item_tags.append("Onot0")
     
     item["Tags"] = item_tags
     item["Genres"] = item_tags[:10]
     
-    item.update(dates_info) # Appends DateCreated, PremiereDate, ProductionYear
+    item.update(dates_info)
 
     # Optional Overview Generator
     overview_parts = [scene.get("details", "")] if scene.get("details") else []

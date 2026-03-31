@@ -378,7 +378,7 @@ async def _handle_library_browse(request, parent_id, decoded_parent_id, start_in
     for scene in stash_data.get("scenes", []):
         if "IsResumable" in filter_list and (not scene.get("resume_time") or scene.get("resume_time") <= 0): continue
         try: jellyfin_items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=parent_id or safe_root))
-        except Exception: pass
+        except Exception as e: logger.error(f"Failed to map scene {scene.get('id')}: {e}")
 
     total_count = len(jellyfin_items) if search_term or "IsResumable" in filter_list else stash_data.get("count", 0)
     
