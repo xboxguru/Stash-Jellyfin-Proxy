@@ -10,8 +10,52 @@ from core.jellyfin_mapper import encode_id, decode_id
 
 logger = logging.getLogger(__name__)
 
+# --- REFACTORED metadata_routes.py (Partial) ---
+
+async def _build_nav_folder_metadata(decoded_id: str, item_id: str, server_id: str, cache_version: int) -> dict:
+    """Responsibility: Construct Jellyfin metadata dictionaries for purely virtual proxy folders."""
+    clean_dec = decoded_id.replace("\x00", "").strip()
+    is_root = clean_dec.startswith("root-")
+    is_nav_folder = clean_dec in ["root-filters", "root-tags", "root-stashtags", "root-alltags"]
+    item_name = "Folder"
+    
+    if is_root: 
+        root_map = {
+            "root-scenes": "Scenes (Everything)",
+            "root-organized": "Scenes (Organized)",
+            "root-tagged": "Scenes (Tagged)",
+            "root-recent": f"Recently Added ({getattr(config, 'RECENT_DAYS', 14)} Days)",
+            "root-filters": "Saved Filters",
+            "root-stashtags": "Stash Tags",
+            "root-alltags": "All Tags"
+        }
+        item_name = root_map.get(clean_dec, "Folder")
+    elif clean_dec.startswith("tag-"): 
+        raw_id = clean_dec.replace("tag-", "")
+        all_tags = await stash_client.get_all_tags()
+        match = next((t for t in all_tags if str(t.get("id")) == raw_id), None)
+        if match: item_name = match.get("name", "Folder")
+    elif clean_dec.startswith("filter-"): 
+        raw_id = clean_dec.replace("filter-", "")
+        filters = await stash_client.get_saved_filters()
+        match = next((f for f in filters if str(f.get("id")) == raw_id), None)
+        if match: item_name = match.get("name", "Folder")
+    
+    logo_hash = hashlib.md5(f"stash-logo-{cache_version}".encode()).hexdigest()
+    is_collection = is_root and not is_nav_folder
+    
+    response_dict = {
+        "Name": item_name, "SortName": item_name, "Id": item_id, "DisplayPreferencesId": item_id,
+        "ServerId": server_id, "Type": "CollectionFolder" if is_collection else "Folder", 
+        "IsFolder": True, "PrimaryImageAspectRatio": 1.7777777777777777,
+        "ImageTags": {"Primary": logo_hash, "Thumb": logo_hash},
+        "HasPrimaryImage": True, "HasThumb": True, "HasBackdrop": True, "BackdropImageTags": [logo_hash]
+    }
+    if is_collection: response_dict["CollectionType"] = "movies"
+    return response_dict
+
 async def endpoint_item_details(request: Request):
-    """Provides detailed metadata for a single item (Scene, Folder, Person, Studio)."""
+    """Responsibility: Delegate metadata requests to the correct data builder."""
     item_id = request.path_params.get("item_id", "")
     decoded_id = decode_id(item_id)
     server_id = getattr(config, "SERVER_ID", "stash-proxy")
@@ -19,56 +63,7 @@ async def endpoint_item_details(request: Request):
     
     # 1. Handle Navigation Folders
     if "root-" in decoded_id or "tag-" in decoded_id or "filter-" in decoded_id:
-        
-        # THE FIX: Violently scrub invisible null bytes and whitespace before matching
-        clean_dec = decoded_id.replace("\x00", "").strip()
-        
-        is_root = clean_dec.startswith("root-")
-        is_nav_folder = clean_dec in ["root-filters", "root-tags", "root-stashtags", "root-alltags"]
-        
-        item_name = "Folder"
-        safe_id = item_id # Echo exact requested ID
-        
-        # Dynamically resolve real names using our sanitized string
-        if is_root: 
-            if clean_dec == "root-scenes": item_name = "Scenes (Everything)"
-            elif clean_dec == "root-organized": item_name = "Scenes (Organized)"
-            elif clean_dec == "root-tagged": item_name = "Scenes (Tagged)"
-            elif clean_dec == "root-recent": item_name = f"Recently Added ({getattr(config, 'RECENT_DAYS', 14)} Days)"
-            elif clean_dec == "root-filters": item_name = "Saved Filters"
-            elif clean_dec == "root-stashtags": item_name = "Stash Tags"
-            elif clean_dec == "root-alltags": item_name = "All Tags"
-        elif clean_dec.startswith("tag-"): 
-            raw_id = clean_dec.replace("tag-", "")
-            all_tags = await stash_client.get_all_tags()
-            match = next((t for t in all_tags if str(t.get("id")) == raw_id), None)
-            if match: item_name = match.get("name", "Folder")
-        elif clean_dec.startswith("filter-"): 
-            raw_id = clean_dec.replace("filter-", "")
-            filters = await stash_client.get_saved_filters()
-            match = next((f for f in filters if str(f.get("id")) == raw_id), None)
-            if match: item_name = match.get("name", "Folder")
-        
-        logo_hash = hashlib.md5(f"stash-logo-{cache_version}".encode()).hexdigest()
-        is_collection = is_root and not is_nav_folder
-        
-        response_dict = {
-            "Name": item_name, 
-            "SortName": item_name, 
-            "Id": safe_id, 
-            "DisplayPreferencesId": safe_id,
-            "ServerId": server_id, 
-            "Type": "CollectionFolder" if is_collection else "Folder", 
-            "IsFolder": True,
-            "PrimaryImageAspectRatio": 1.7777777777777777,
-            "ImageTags": {"Primary": logo_hash, "Thumb": logo_hash},
-            "HasPrimaryImage": True, 
-            "HasThumb": True,
-            "HasBackdrop": True,
-            "BackdropImageTags": [logo_hash]
-        }
-        if is_collection: response_dict["CollectionType"] = "movies"
-        return JSONResponse(response_dict)
+        return JSONResponse(await _build_nav_folder_metadata(decoded_id, item_id, server_id, cache_version))
 
     # 2. Handle Studios
     if decoded_id.startswith("studio-"):
@@ -79,7 +74,6 @@ async def endpoint_item_details(request: Request):
     if decoded_id.startswith("person-"):
         raw_id = decoded_id.replace("person-", "")
         perf = await stash_client.get_performer(raw_id)
-        
         if perf:
             p_tag = hashlib.md5(f"person-{raw_id}-v{cache_version}".encode()).hexdigest()
             perf_name = perf.get("name", "Unknown Person")
@@ -95,10 +89,9 @@ async def endpoint_item_details(request: Request):
     number_match = re.search(r'\d+', decoded_id)
     if not number_match: return JSONResponse({"error": f"Invalid ID format: {decoded_id}"}, status_code=400)
         
-    raw_id = number_match.group()
-    scene = await stash_client.get_scene(raw_id)
-    
+    scene = await stash_client.get_scene(number_match.group())
     if scene: return JSONResponse(jellyfin_mapper.format_jellyfin_item(scene))
+    
     return JSONResponse({"error": "Item not found"}, status_code=404)
 
 async def endpoint_tags(request: Request):

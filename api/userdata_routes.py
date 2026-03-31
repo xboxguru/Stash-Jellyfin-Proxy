@@ -113,73 +113,80 @@ async def endpoint_sessions_stopped(request: Request):
     except Exception as e: logger.error(f"Error processing stopped session: {e}")
     return JSONResponse({}, status_code=204, background=bg_tasks)
 
-async def endpoint_mark_played(request: Request):
+async def _toggle_play_state(request: Request, is_played: bool):
+    """Responsibility: Handle both marking and unmarking items as played."""
     raw_item_id = request.path_params.get("item_id", "")
     item_id = decode_id(raw_item_id)
     play_count = 1
     task = None
+    
     if item_id.startswith("scene-"):
         raw_id = item_id.replace("scene-", "")
-        task = BackgroundTask(stash_client.increment_play_count, raw_id)
+        # Even if unplayed, the proxy currently increments to trigger a Stash UI update
+        task = BackgroundTask(stash_client.increment_play_count, raw_id) 
         scene = await stash_client.get_scene(raw_id)
         if scene: play_count = (scene.get("play_count") or 0) + 1
-    return JSONResponse({"Played": True, "PlayCount": play_count, "PlaybackPositionTicks": 0, "Key": raw_item_id, "ItemId": raw_item_id}, background=task)
+        
+    return JSONResponse({
+        "Played": is_played, 
+        "PlayCount": play_count, 
+        "PlaybackPositionTicks": 0, 
+        "Key": raw_item_id if is_played else item_id, # Replicated original proxy quirk
+        "ItemId": raw_item_id
+    }, background=task)
+
+async def _toggle_favorite_state(request: Request, is_favorite: bool):
+    """Responsibility: Handle both favoriting and unfavoriting items."""
+    raw_item_id = request.path_params.get("item_id", "")
+    item_id = decode_id(raw_item_id)
+    bg_tasks = BackgroundTasks()
+    play_count, resume_ticks, played = 0, 0, False
+    
+    if item_id.startswith("scene-"):
+        raw_id = item_id.replace("scene-", "")
+        action = getattr(config, "FAVORITE_ACTION", "o_counter").lower()
+        
+        # Add tasks based on config action
+        if action in ["o_counter", "both"]: 
+            bg_tasks.add_task(stash_client.increment_o_counter, raw_id)
+            
+        if action == "both": 
+            bg_tasks.add_task(stash_client.update_rating, raw_id, 100)
+        elif action == "rating": 
+            bg_tasks.add_task(stash_client.update_rating, raw_id, 100 if is_favorite else 0)
+        
+        scene = await stash_client.get_scene(raw_id)
+        if scene:
+            play_count = scene.get("play_count") or 0
+            played = play_count > 0
+            resume_ticks = int((scene.get("resume_time") or 0) * 10000000)
+            
+    # Stash-Infuse proxy traditionally returns True for "Likes" if O-counter is used
+    likes_state = True if (is_favorite and action in ["o_counter", "both"]) else (action in ["o_counter", "both"])
+            
+    return JSONResponse({
+        "IsFavorite": is_favorite if action == "rating" else likes_state, 
+        "Likes": likes_state, 
+        "Played": played, 
+        "PlayCount": play_count, 
+        "PlaybackPositionTicks": resume_ticks, 
+        "Key": raw_item_id, 
+        "ItemId": raw_item_id
+    }, background=bg_tasks)
+
+
+async def endpoint_mark_played(request: Request):
+    return await _toggle_play_state(request, True)
 
 async def endpoint_mark_unplayed(request: Request):
-    raw_item_id = request.path_params.get("item_id", "")
-    item_id = decode_id(raw_item_id)
-    play_count = 1
-    task = None
-    if item_id.startswith("scene-"):
-        raw_id = item_id.replace("scene-", "")
-        task = BackgroundTask(stash_client.increment_play_count, raw_id) # Repurposed increment
-        scene = await stash_client.get_scene(raw_id)
-        if scene: play_count = (scene.get("play_count") or 0) + 1
-    return JSONResponse({"Played": False, "PlayCount": play_count, "PlaybackPositionTicks": 0, "Key": item_id, "ItemId": raw_item_id}, background=task)
+    return await _toggle_play_state(request, False)
 
 async def endpoint_mark_favorite(request: Request):
-    raw_item_id = request.path_params.get("item_id", "")
-    item_id = decode_id(raw_item_id)
-    bg_tasks = BackgroundTasks()
-    play_count, resume_ticks, played = 0, 0, False
-    
-    if item_id.startswith("scene-"):
-        raw_id = item_id.replace("scene-", "")
-        action = getattr(config, "FAVORITE_ACTION", "o_counter").lower()
-        
-        if action in ["o_counter", "both"]: bg_tasks.add_task(stash_client.increment_o_counter, raw_id)
-        if action in ["rating", "both"]: bg_tasks.add_task(stash_client.update_rating, raw_id, 100)
-        
-        scene = await stash_client.get_scene(raw_id)
-        if scene:
-            play_count = scene.get("play_count") or 0
-            played = play_count > 0
-            resume_ticks = int((scene.get("resume_time") or 0) * 10000000)
-            
-    return JSONResponse({"IsFavorite": True, "Likes": True, "Played": played, "PlayCount": play_count, "PlaybackPositionTicks": resume_ticks, "Key": raw_item_id, "ItemId": raw_item_id}, background=bg_tasks)
+    return await _toggle_favorite_state(request, True)
 
 async def endpoint_unmark_favorite(request: Request):
-    raw_item_id = request.path_params.get("item_id", "")
-    item_id = decode_id(raw_item_id)
-    bg_tasks = BackgroundTasks()
-    play_count, resume_ticks, played = 0, 0, False
+    return await _toggle_favorite_state(request, False)
     
-    if item_id.startswith("scene-"):
-        raw_id = item_id.replace("scene-", "")
-        action = getattr(config, "FAVORITE_ACTION", "o_counter").lower()
-        
-        if action in ["o_counter", "both"]: bg_tasks.add_task(stash_client.increment_o_counter, raw_id)
-        if action == "both": bg_tasks.add_task(stash_client.update_rating, raw_id, 100)
-        elif action == "rating": bg_tasks.add_task(stash_client.update_rating, raw_id, 0)
-        
-        scene = await stash_client.get_scene(raw_id)
-        if scene:
-            play_count = scene.get("play_count") or 0
-            played = play_count > 0
-            resume_ticks = int((scene.get("resume_time") or 0) * 10000000)
-            
-    return JSONResponse({"IsFavorite": action in ["o_counter", "both"], "Likes": action in ["o_counter", "both"], "Played": played, "PlayCount": play_count, "PlaybackPositionTicks": resume_ticks, "Key": raw_item_id, "ItemId": raw_item_id}, background=bg_tasks)
-
 async def endpoint_update_userdata(request: Request):
     raw_item_id = request.path_params.get("item_id", "")
     item_id = decode_id(raw_item_id)
