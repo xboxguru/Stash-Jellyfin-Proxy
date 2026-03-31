@@ -212,8 +212,8 @@ routes = [
     Route("/userfavoriteitems/{item_id}", userdata_routes.endpoint_mark_favorite, methods=["POST"]),
     Route("/userfavoriteitems/{item_id}", userdata_routes.endpoint_unmark_favorite, methods=["DELETE"]),
     
-    Route("/displaypreferences/{display_id}", library_routes.endpoint_empty_list, methods=["GET"]),
-    Route("/users/{user_id}/displaypreferences/{display_id}", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/displaypreferences/{display_id}", library_routes.endpoint_display_preferences, methods=["GET", "POST"]),
+    Route("/users/{user_id}/displaypreferences/{display_id}", library_routes.endpoint_display_preferences, methods=["GET", "POST"]),
     Route("/users/{user_id}/policy", auth_routes.endpoint_user, methods=["GET"]),
     Route("/users/{user_id}/configuration", auth_routes.endpoint_user, methods=["GET"]),
 

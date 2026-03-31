@@ -3,6 +3,7 @@ stash_jellyfin_proxy.conf
 .env
 authenticated_IPs.json
 stats.json
+display_preferences.json
 
 # Python artifacts
 __pycache__/

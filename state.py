@@ -9,9 +9,29 @@ ui_sessions = set()
 if os.path.exists("/.dockerenv") and os.path.isdir("/config"):
     AUTH_IPS_FILE = "/config/authenticated_IPs.json"
     STATS_FILE = "/config/stats.json"
+    PREFS_FILE = "/config/display_preferences.json"
 else:
     AUTH_IPS_FILE = os.path.join(config.SCRIPT_DIR, "authenticated_IPs.json")
     STATS_FILE = os.path.join(config.SCRIPT_DIR, "stats.json")
+    PREFS_FILE = os.path.join(config.SCRIPT_DIR, "display_preferences.json")
+
+display_preferences = {}
+
+def load_prefs():
+    global display_preferences
+    if os.path.exists(PREFS_FILE):
+        try:
+            with open(PREFS_FILE, 'r') as f:
+                display_preferences = json.load(f)
+        except Exception as e:
+            print(f"Error loading display preferences: {e}")
+
+def save_prefs():
+    try:
+        with open(PREFS_FILE, 'w') as f:
+            json.dump(display_preferences, f)
+    except Exception as e:
+        print(f"Error saving display preferences: {e}")
 
 # --- AUTH IPs PERSISTENCE ---
 def load_auth_ips():
@@ -78,6 +98,7 @@ def save_stats():
         print(f"Error saving stats: {e}")
 
 load_stats()
+load_prefs()
 
 day_tracker = time.strftime("%Y-%m-%d")
 active_streams = []

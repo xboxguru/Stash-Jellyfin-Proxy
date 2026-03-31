@@ -4,11 +4,12 @@ import datetime
 import re
 import hashlib
 import json
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.requests import Request
 import config
 from core import stash_client, jellyfin_mapper
 from core.jellyfin_mapper import encode_id, decode_id, hyphens
+import state
 
 logger = logging.getLogger(__name__)
 
@@ -62,9 +63,12 @@ async def _get_libraries():
         logo_hash = hashlib.md5(f"stash-logo-{cache_version}".encode()).hexdigest()
         return {
             "Name": name, "ServerId": server_id, "Id": view_id, "ItemId": view_id,
-            "ChannelId": None, "IsFolder": True, "Type": "Folder" if is_standard_folder else "UserView", 
+            "DisplayPreferencesId": view_id,
+            "ChannelId": None, "IsFolder": True, 
+            "Type": "UserView", # FIX: Android apps require root items to be UserViews
             "UserData": {"PlaybackPositionTicks": 0, "PlayCount": 0, "IsFavorite": False, "Played": False, "Key": hyphens(view_id), "ItemId": view_id},
-            "PrimaryImageAspectRatio": 1.7777777777777777, "CollectionType": "folders" if is_standard_folder else "movies",
+            "PrimaryImageAspectRatio": 1.7777777777777777, 
+            "CollectionType": "movies", # FIX: Use 'movies' for strict UI compatibility
             "LibraryOptions": {"PathInfos": []}, "Locations": [],
             "ImageTags": {"Primary": logo_hash, "Thumb": logo_hash}, "HasPrimaryImage": True, "HasThumb": True, "HasBackdrop": True,
             "BackdropImageTags": [logo_hash], "ImageBlurHashes": {}, "LocationType": "FileSystem", "MediaType": "Unknown"
@@ -199,25 +203,69 @@ async def endpoint_items(request: Request):
     if decoded_parent_id and decoded_parent_id.startswith("scene-"):
         return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": 0})
 
-    # 1. Exact ID Requests (e.g. Resume Watching row)
+    # 1. Exact ID Requests (e.g. Resume Watching row or Library UI Refreshes)
     if ids_param:
         raw_ids, jellyfin_items = [], []
         server_id = getattr(config, "SERVER_ID", "stash-proxy")
         
+        # Generate the Stash logo hash to prevent the blue folder fallback
+        cache_version = getattr(config, "CACHE_VERSION", 0)
+        logo_hash = hashlib.md5(f"stash-logo-{cache_version}".encode()).hexdigest()
+        
+        # Fetch root libraries so we can answer metadata refresh requests accurately
+        views = await _get_libraries()
+        
         for i in ids_param.split(","):
+            # Check if the client is refreshing a Root Library card
+            matching_view = next((v for v in views if v["Id"] == i), None)
+            if matching_view:
+                jellyfin_items.append(matching_view)
+                continue
+
             dec_i = decode_id(i)
+            
             # Fladder Navigation Folders Intercept
             if dec_i.startswith("root-") or dec_i.startswith("tag-") or dec_i.startswith("filter-"):
                 is_root = dec_i.startswith("root-")
-                is_nav_folder = dec_i in ["root-filters", "root-tags", "root-alltags"]
+                is_nav_folder = dec_i in ["root-filters", "root-tags", "root-alltags", "root-stashtags"]
                 
-                if is_root: safe_id = encode_id("root", dec_i.replace("root-", ""))
-                elif dec_i.startswith("tag-"): safe_id = encode_id("tag", dec_i.replace("tag-", ""))
-                elif dec_i.startswith("filter-"): safe_id = encode_id("filter", dec_i.replace("filter-", ""))
-                else: safe_id = i
+                item_name = "Folder" # Default fallback
+                
+                # Dynamically resolve the real names for Sub-Folders!
+                if is_root: 
+                    safe_id = encode_id("root", dec_i.replace("root-", ""))
+                    if dec_i == "root-alltags": item_name = "All Tags"
+                elif dec_i.startswith("tag-"): 
+                    safe_id = encode_id("tag", dec_i.replace("tag-", ""))
+                    raw_id = dec_i.replace("tag-", "")
+                    all_tags = await stash_client.get_all_tags()
+                    match = next((t for t in all_tags if str(t.get("id")) == raw_id), None)
+                    if match: item_name = match.get("name", "Folder")
+                elif dec_i.startswith("filter-"): 
+                    safe_id = encode_id("filter", dec_i.replace("filter-", ""))
+                    raw_id = dec_i.replace("filter-", "")
+                    filters = await stash_client.get_saved_filters()
+                    match = next((f for f in filters if str(f.get("id")) == raw_id), None)
+                    if match: item_name = match.get("name", "Folder")
+                else: 
+                    safe_id = i
                 
                 is_collection = is_root and not is_nav_folder
-                folder_item = {"Name": "Folder", "SortName": "Folder", "Id": safe_id, "ServerId": server_id, "Type": "CollectionFolder" if is_collection else "Folder", "IsFolder": True}
+                folder_item = {
+                    "Name": item_name, 
+                    "SortName": item_name, 
+                    "Id": safe_id, 
+                    "DisplayPreferencesId": safe_id,
+                    "ServerId": server_id, 
+                    "Type": "CollectionFolder" if is_collection else "Folder", 
+                    "IsFolder": True,
+                    "PrimaryImageAspectRatio": 1.7777777777777777,
+                    "ImageTags": {"Primary": logo_hash, "Thumb": logo_hash},
+                    "HasPrimaryImage": True, 
+                    "HasThumb": True,
+                    "HasBackdrop": True,
+                    "BackdropImageTags": [logo_hash]
+                }
                 if is_collection: folder_item["CollectionType"] = "movies"
                 jellyfin_items.append(folder_item)
                 continue
@@ -445,3 +493,37 @@ async def endpoint_search_hints(request: Request):
                 })
                 
     return JSONResponse({"SearchHints": hints, "TotalRecordCount": len(hints)})
+
+async def endpoint_display_preferences(request: Request):
+    """Satisfies and persists Jellyfin client UI view settings."""
+    display_id = request.path_params.get("display_id", "default")
+
+    if request.method == "POST":
+        try:
+            # Catch the layout settings the Android app sends and save them!
+            data = await request.json()
+            state.display_preferences[display_id] = data
+            state.save_prefs()
+            logger.info(f"💾 Saved Display Preferences for View: {display_id}")
+        except Exception as e:
+            logger.error(f"Failed to save display preferences: {e}")
+            
+        # 204 No Content prevents the Android app from synchronously parsing the body on the UI thread
+        return Response(status_code=204)
+        
+    # GET Request: Return the saved preferences if they exist
+    saved_prefs = state.display_preferences.get(display_id)
+    if saved_prefs:
+        # Ensure the ID matches just in case
+        saved_prefs["Id"] = display_id
+        return JSONResponse(saved_prefs)
+
+    # Fallback to default if they haven't customized this library yet
+    return JSONResponse({
+        "Id": display_id,
+        "Client": "emby",
+        "SortBy": "Default",
+        "SortOrder": "Ascending",
+        "RememberIndexing": False,
+        "CustomPrefs": {}
+    })
