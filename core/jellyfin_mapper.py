@@ -37,137 +37,155 @@ def hyphens(h: str) -> str:
     if len(h) != 32: return h
     return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
 
-def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[str, Any]:
-    """
-    Transforms a Stash Scene object into a Jellyfin Movie/Video object.
-    Crash-proofed against null GraphQL returns for newly scraped media.
-    """
-    raw_id = str(scene.get("id"))
-    item_id = encode_id("scene", raw_id)
-    date = scene.get("date")
-    cache_version = getattr(config, "CACHE_VERSION", 0)
-    
-    final_parent_id = parent_id if parent_id else encode_id("root", "scenes")
-
-    primary_tag = hashlib.md5(f"scene-{raw_id}-v{cache_version}".encode()).hexdigest()
-    backdrop_tag = hashlib.md5(f"backdrop-{raw_id}-v{cache_version}".encode()).hexdigest()
-    etag_hash = hashlib.md5(f"etag-{raw_id}-v{cache_version}".encode()).hexdigest()
-
-    # FIX: A pre-calculated generic valid BlurHash string to prevent Fladder decoder crashes
-    fake_blurhash = "LKO2?U%2Tw=w]~RBVZRi};RPxuwH"
-
-    resume_time_seconds = scene.get("resume_time") or 0
-    resume_ticks = int(resume_time_seconds * 10000000)
-    
-    files = scene.get("files") or []
-    path = files[0].get("path") if files else ""
-    duration_seconds = (files[0].get("duration") or 0) if files else 0
-    runtime_ticks = int(duration_seconds * 10000000)
-    
-    file_size = int(files[0].get("size") or 0) if files else 0
-
-    if path:
-        path = path.replace("\\", "/")
-
-    width = (files[0].get("width") or 0) if files else 0
-    height = (files[0].get("height") or 0) if files else 0
-    v_codec = (files[0].get("video_codec") or "h264") if files else "h264"
-    a_codec = (files[0].get("audio_codec") or "aac") if files else "aac"
-    container = (files[0].get("format") or "mp4") if files else "mp4"
-    bit_rate = (files[0].get("bit_rate") or 0) if files else 0
-
-    # --- TRANSCODE DETECTION ---
-    safe_codecs = ["h264", "h265", "hevc", "avc", "vp8", "vp9", "av1"]
-    safe_containers = ["mp4", "m4v", "mov", "webm"]
-    needs_transcode = False
-    
-    if str(v_codec).lower() not in safe_codecs or str(container).lower() not in safe_containers:
-        needs_transcode = True
-
-    title = scene.get("title") or scene.get("code")
-    if not title and path:
-        filename = os.path.basename(path)
-        title = os.path.splitext(filename)[0] if filename else None
-    if not title:
-        title = f"Scene {raw_id}"
+def _build_trickplay_dict(item_id: str, runtime_ticks: int, files: list) -> dict:
+    """Calculates BIF/Trickplay thumbnail intervals for video scrubbing."""
+    if runtime_ticks <= 0 or not files:
+        return {}
         
-    studio_obj = scene.get("studio")
-    studio_name = studio_obj.get("name") if studio_obj else None
-    description = scene.get("details") or ""
+    video_width = files[0].get("width", 1920)
+    video_height = files[0].get("height", 1080)
+    aspect_ratio = video_width / video_height if video_height > 0 else 1.777
     
-    tags = scene.get("tags") or []
-    performers = scene.get("performers") or []
+    actual_width = 160
+    actual_height = int(actual_width / aspect_ratio)
     
-    play_count = scene.get("play_count") or 0
-    o_counter = scene.get("o_counter") or 0
+    thumbnail_count = 81
+    interval_ms = int((runtime_ticks / 10000) / thumbnail_count)
     
-    # Dynamically check the correct Stash stat based on user config!
-    fav_action = getattr(config, "FAVORITE_ACTION", "o_counter").lower()
-    if fav_action == "rating":
-        # If Stash has a rating > 0, tell Jellyfin the heart is filled
-        is_favorite = (scene.get("rating100") or 0) > 0
-    else:
-        is_favorite = o_counter > 0
-    
-    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
-
-    base_stream_flags = {
-        "IsInterlaced": False,
-        "IsDefault": True,
-        "IsForced": False,
-        "IsHearingImpaired": False,
-        "IsExternal": False,
-        "IsTextSubtitleStream": False,
-        "SupportsExternalStream": False,
-        "IsAVC": False
-    }
-
-    video_stream = base_stream_flags.copy()
-    video_stream.update({
-        "Codec": v_codec,
-        "Type": "Video",
-        "Width": width,
-        "Height": height,
-        "Index": 0,
-        "BitRate": bit_rate,
-        "IsAVC": v_codec.lower() in ["h264", "avc"]
-    })
-
-    audio_stream = base_stream_flags.copy()
-    audio_stream.update({
-        "Codec": a_codec,
-        "Type": "Audio",
-        "Index": 1,
-        "Channels": 2
-    })
-
-    media_streams = [video_stream, audio_stream]
-
-    trickplay_dict = {}
-    if runtime_ticks > 0 and files:
-        video_width = files[0].get("width", 1920)
-        video_height = files[0].get("height", 1080)
-        aspect_ratio = video_width / video_height if video_height > 0 else 1.777
-        
-        actual_width = 160
-        actual_height = int(actual_width / aspect_ratio)
-        
-        thumbnail_count = 81
-        interval_ms = int((runtime_ticks / 10000) / thumbnail_count)
-        
-        trickplay_dict = {
-            item_id: {
-                str(actual_width): {  
-                    "Width": actual_width,
-                    "Height": actual_height,
-                    "TileWidth": 9,
-                    "TileHeight": 9,
-                    "ThumbnailCount": thumbnail_count,
-                    "Interval": interval_ms,
-                    "Bandwidth": 0
-                }
+    return {
+        item_id: {
+            str(actual_width): {  
+                "Width": actual_width, "Height": actual_height,
+                "TileWidth": 9, "TileHeight": 9,
+                "ThumbnailCount": thumbnail_count, "Interval": interval_ms, "Bandwidth": 0
             }
         }
+    }
+
+def _build_media_sources(item_id: str, path: str, files: list, runtime_ticks: int, title: str) -> list:
+    """Analyzes codecs and builds the direct-play or HLS transcode profile."""
+    if not path or not files:
+        return []
+        
+    file_data = files[0]
+    v_codec = str(file_data.get("video_codec", "h264")).lower()
+    a_codec = str(file_data.get("audio_codec", "aac")).lower()
+    container = str(file_data.get("format", "mp4")).lower()
+    
+    # Transcode Detection
+    safe_codecs = ["h264", "h265", "hevc", "avc", "vp8", "vp9", "av1"]
+    safe_containers = ["mp4", "m4v", "mov", "webm"]
+    needs_transcode = v_codec not in safe_codecs or container not in safe_containers
+
+    base_stream_flags = {"IsInterlaced": False, "IsDefault": True, "IsForced": False, "IsHearingImpaired": False, "IsExternal": False, "IsTextSubtitleStream": False, "SupportsExternalStream": False}
+    
+    video_stream = {**base_stream_flags, "Codec": v_codec, "Type": "Video", "Width": file_data.get("width", 0), "Height": file_data.get("height", 0), "Index": 0, "BitRate": file_data.get("bit_rate", 0), "IsAVC": v_codec in ["h264", "avc"]}
+    audio_stream = {**base_stream_flags, "Codec": a_codec, "Type": "Audio", "Index": 1, "Channels": 2}
+
+    media_source = {
+        "Id": item_id, "Path": path, "Protocol": "File", "Type": "Default", "Container": container,
+        "RunTimeTicks": runtime_ticks, "IsRemote": False, "SupportsTranscoding": True, "VideoType": "VideoFile",
+        "MediaStreams": [video_stream, audio_stream], "MediaAttachments": [], "Formats": [], "RequiredHttpHeaders": {},
+        "Name": title, "Size": int(file_data.get("size", 0)), "ReadAtNativeFramerate": False, "SupportsProbing": True
+    }
+
+    if needs_transcode:
+        media_source.update({
+            "SupportsDirectPlay": False, "SupportsDirectStream": False,
+            "TranscodingUrl": f"/Videos/{item_id}/master.m3u8",
+            "TranscodingSubProtocol": "hls", "TranscodingContainer": "ts"
+        })
+    else:
+        media_source.update({
+            "SupportsDirectPlay": True, "SupportsDirectStream": True,
+            "DirectStreamUrl": f"/Videos/{item_id}/stream",
+            "TranscodingSubProtocol": "http"
+        })
+
+    return [media_source]
+
+def _build_people(performers: list, cache_version: int, fake_blurhash: str) -> list:
+    """Formats Stash performers into Jellyfin actors."""
+    people_list = []
+    for p in performers:
+        if p.get("name") and p.get("id"):
+            person = {"Name": p.get("name"), "Type": "Actor", "Role": "Actor", "Id": encode_id("person", str(p["id"])), "ImageBlurHashes": {}}
+            if p.get("image_path"):
+                p_tag = hashlib.md5(f"person-{p['id']}-v{cache_version}".encode()).hexdigest()
+                person["PrimaryImageTag"] = p_tag
+                person["ImageBlurHashes"] = {"Primary": {p_tag: fake_blurhash}}
+            people_list.append(person)
+    return people_list
+
+def _build_dates(date_str: str, created_at_str: str, now_iso: str, recent_days_limit: int) -> dict:
+    """Extracts, formats, and safely parses Stash dates into Jellyfin timestamps."""
+    result = {"_is_recent": False}
+    
+    if created_at_str:
+        base_time = created_at_str.replace("Z", "").replace(" ", "T")[:19]
+        formatted_created = f"{base_time}.0000000Z"
+        if recent_days_limit > 0:
+            try:
+                dt = datetime.datetime.strptime(base_time, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+                if (datetime.datetime.now(datetime.timezone.utc) - dt).days <= recent_days_limit:
+                    result["_is_recent"] = True
+            except Exception: pass
+    else:
+        formatted_created = now_iso
+
+    result["DateCreated"] = formatted_created
+
+    if date_str and len(date_str) >= 4:
+        try:
+            result["ProductionYear"] = int(date_str[:4])
+            clean_date = f"{date_str}-01-01" if len(date_str) == 4 else f"{date_str}-01" if len(date_str) == 7 else date_str
+            result["PremiereDate"] = f"{clean_date}T00:00:00.0000000Z"
+        except:
+            result["PremiereDate"] = formatted_created
+            result["ProductionYear"] = int(formatted_created[:4])
+    else:
+        result["PremiereDate"] = formatted_created
+        result["ProductionYear"] = int(formatted_created[:4])
+
+    return result
+
+def _build_studios(studio_obj: dict, cache_version: int, fake_blurhash: str) -> list:
+    """Safely extracts Studio objects and their associated image hashes."""
+    if not studio_obj or not studio_obj.get("name"):
+        return []
+
+    studio_id = studio_obj.get("id")
+    has_studio_image = bool(studio_obj.get("image_path"))
+    
+    studio_item = {
+        "Name": studio_obj.get("name"),
+        "Id": encode_id("studio", str(studio_id)),
+        "ImageBlurHashes": {}
+    }
+    
+    if has_studio_image:
+        s_tag = hashlib.md5(f"studio-{studio_id}-v{cache_version}".encode()).hexdigest()
+        studio_item["PrimaryImageTag"] = s_tag
+        studio_item["ImageTags"] = {"Primary": s_tag}
+        studio_item["ImageBlurHashes"] = {"Primary": {s_tag: fake_blurhash}}
+        
+    return [studio_item]
+
+def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[str, Any]:
+    """Transforms a Stash Scene object into a Jellyfin Movie/Video object."""
+    raw_id = str(scene.get("id"))
+    item_id = encode_id("scene", raw_id)
+    cache_version = getattr(config, "CACHE_VERSION", 0)
+    fake_blurhash = "LKO2?U%2Tw=w]~RBVZRi};RPxuwH"
+    
+    files = scene.get("files") or []
+    path = files[0].get("path", "").replace("\\", "/") if files else ""
+    runtime_ticks = int((files[0].get("duration") or 0) * 10000000) if files else 0
+    
+    title = scene.get("title") or scene.get("code") or (os.path.splitext(os.path.basename(path))[0] if path else f"Scene {raw_id}")
+    
+    primary_tag = hashlib.md5(f"scene-{raw_id}-v{cache_version}".encode()).hexdigest()
+    backdrop_tag = hashlib.md5(f"backdrop-{raw_id}-v{cache_version}".encode()).hexdigest()
 
     item = {
         "Name": title,
@@ -177,207 +195,51 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
         "Type": "Movie",
         "IsFolder": False,
         "MediaType": "Video",
-        "CanDelete": getattr(config, "ALLOW_CLIENT_DELETION", "Disabled").lower() != "disabled",
-        "CanDownload": True,
-        "ParentId": final_parent_id,
-        "DateLastSaved": now_iso, 
-        
-        "ChannelId": None,
-        "Container": container,
+        "ParentId": parent_id if parent_id else encode_id("root", "scenes"),
         
         "HasPrimaryImage": True,
         "HasBackdrop": True,
         "ImageTags": {"Primary": primary_tag, "Thumb": primary_tag}, 
         "PrimaryImageAspectRatio": 1.777,
-        "VideoType": "VideoFile",
-        "Protocol": "File",
         "BackdropImageTags": [backdrop_tag],
-        
-        "ImageBlurHashes": {
-            "Primary": {primary_tag: fake_blurhash},
-            "Thumb": {primary_tag: fake_blurhash},
-            "Backdrop": {backdrop_tag: fake_blurhash}
-        },
+        "ImageBlurHashes": {"Primary": {primary_tag: fake_blurhash}, "Thumb": {primary_tag: fake_blurhash}, "Backdrop": {backdrop_tag: fake_blurhash}},
         
         "RunTimeTicks": runtime_ticks,
-        "OfficialRating": "XXX",
-        "CommunityRating": play_count,
-        "Width": width,
-        "Height": height,
-
-        "Etag": etag_hash,
-        "Taglines": [],
-        "Trickplay": trickplay_dict,
-        "ProviderIds": {},
-        "Chapters": [],
-        "Overview": "",
-        "People": [],
-        "Studios": [],
-        "MediaStreams": media_streams,
-        "Path": path if path else "",
-
-        "_StashVideoCodec": v_codec,
-        "_StashAudioCodec": a_codec,
-        "_StashContainer": container,
-        "_StashBitRate": bit_rate,
-
+        "Width": files[0].get("width", 0) if files else 0,
+        "Height": files[0].get("height", 0) if files else 0,
+        
+        # --- DELEGATED TO HELPERS ---
+        "Trickplay": _build_trickplay_dict(item_id, runtime_ticks, files),
+        "MediaSources": _build_media_sources(item_id, path, files, runtime_ticks, title),
+        "People": _build_people(scene.get("performers") or [], cache_version, fake_blurhash),
+        "Studios": _build_studios(scene.get("studio"), cache_version, fake_blurhash),
+        
         "UserData": {
-            "PlaybackPositionTicks": resume_ticks,
-            "PlayCount": play_count,
-            "IsFavorite": is_favorite,
-            "Played": play_count > 0,
+            "PlaybackPositionTicks": int((scene.get("resume_time") or 0) * 10000000),
+            "PlayCount": scene.get("play_count", 0),
+            "IsFavorite": (scene.get("rating100", 0) > 0) if getattr(config, "FAVORITE_ACTION", "o_counter").lower() == "rating" else (scene.get("o_counter", 0) > 0),
+            "Played": scene.get("play_count", 0) > 0,
             "Key": hyphens(item_id),
             "ItemId": item_id
         }
     }
-
-    item_tags = [t.get("name") for t in tags if t.get("name")]
-    created_at = scene.get("created_at")
-    recent_days_limit = getattr(config, "RECENT_DAYS", 14)
-
-    if created_at:
-        base_time = created_at.replace("Z", "").replace(" ", "T")[:19]
-        formatted_created = f"{base_time}.0000000Z"
-        if recent_days_limit > 0:
-            try:
-                # Parse the time and immediately attach UTC timezone info to prevent math crashes
-                dt = datetime.datetime.strptime(base_time, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc)
-                if (datetime.datetime.now(datetime.timezone.utc) - dt).days <= recent_days_limit:
-                    item_tags.append("Recently Added")
-            except Exception:
-                pass
-    else:
-        formatted_created = now_iso
-
-    item["DateCreated"] = formatted_created
-
-    if date and len(date) >= 4:
-        try:
-            item["ProductionYear"] = int(date[:4])
-            clean_date = date
-            if len(clean_date) == 4:
-                clean_date = f"{clean_date}-01-01"
-            elif len(clean_date) == 7:
-                clean_date = f"{clean_date}-01"
-                
-            item["PremiereDate"] = f"{clean_date}T00:00:00.0000000Z"
-        except:
-            item["PremiereDate"] = formatted_created
-            item["ProductionYear"] = int(formatted_created[:4])
-    else:
-        item["PremiereDate"] = formatted_created
-        item["ProductionYear"] = int(formatted_created[:4])
-
-    overview_parts = []
-    if description:
-        overview_parts.append(description)
-    if studio_name:
-        overview_parts.append(f"Studio: {studio_name}")
-    if overview_parts:
-        item["Overview"] = "\n\n".join(overview_parts)
-
-    if o_counter >= 1:
-        item_tags.append("Onot0")
+    
+    # Merge Date dictionary and evaluate "Recently Added" status
+    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
+    dates_info = _build_dates(scene.get("date"), scene.get("created_at"), now_iso, getattr(config, "RECENT_DAYS", 14))
+    
+    item_tags = [t.get("name") for t in scene.get("tags") or [] if t.get("name")]
+    if dates_info.pop("_is_recent", False): item_tags.append("Recently Added")
+    if scene.get("o_counter", 0) >= 1: item_tags.append("Onot0")
     
     item["Tags"] = item_tags
     item["Genres"] = item_tags[:10]
+    
+    item.update(dates_info) # Appends DateCreated, PremiereDate, ProductionYear
 
-    if performers:
-        people_list = []
-        for p in performers:
-            p_name = p.get("name")
-            p_id = p.get("id")
-            if p_name and p_id:
-                has_image = bool(p.get("image_path"))
-            
-                person = {
-                    "Name": p_name,
-                    "Type": "Actor",
-                    "Role": "Actor",
-                    "Id": encode_id("person", str(p_id)),
-                    "ImageBlurHashes": {}
-                }
-                
-                if has_image:
-                    p_tag = hashlib.md5(f"person-{p_id}-v{cache_version}".encode()).hexdigest()
-                    person["PrimaryImageTag"] = p_tag
-                    person["ImageBlurHashes"] = {
-                        "Primary": {p_tag: fake_blurhash}
-                    }
-                    
-                people_list.append(person)
-        item["People"] = people_list
-
-    if studio_obj and studio_name:
-        studio_id = studio_obj.get("id")
-        has_studio_image = bool(studio_obj.get("image_path"))
-        
-        studio_item = {
-            "Name": studio_name,
-            "Id": encode_id("studio", str(studio_id)),
-            "ImageBlurHashes": {}
-        }
-        
-        if has_studio_image:
-            s_tag = hashlib.md5(f"studio-{studio_id}-v{cache_version}".encode()).hexdigest()
-            studio_item["PrimaryImageTag"] = s_tag
-            studio_item["ImageTags"] = {"Primary": s_tag}
-            studio_item["ImageBlurHashes"] = {
-                "Primary": {s_tag: fake_blurhash}
-            }
-            
-        item["Studios"] = [studio_item]
-
-    if path:
-        item["Path"] = path
-        item["LocationType"] = "FileSystem"
-
-        media_source = {
-            "Id": item_id,
-            "Path": path,
-            "Protocol": "File",
-            "Type": "Default",
-            "Container": container,
-            "RunTimeTicks": runtime_ticks, 
-            "IsRemote": False,
-            "SupportsTranscoding": True,
-            "VideoType": "VideoFile",
-            "MediaStreams": media_streams,
-            "MediaAttachments": [],
-            "Formats": [],
-            "RequiredHttpHeaders": {},
-            "Name": title,
-            "Size": file_size,
-            "ETag": etag_hash,
-            "ReadAtNativeFramerate": False,
-            "IgnoreDts": False,
-            "IgnoreIndex": False,
-            "GenPtsInput": False,
-            "IsInfiniteStream": False,
-            "RequiresOpening": False,
-            "RequiresClosing": False,
-            "RequiresLooping": False,
-            "SupportsProbing": True,
-            "HasSegments": False,
-            "UseMostCompatibleTranscodingProfile": False,
-            "DefaultAudioStreamIndex": 1
-        }
-
-        # --- THE STRICT HLS ROUTING ---
-        if needs_transcode:
-            # Emulate the exact Transcode JSON from official Jellyfin
-            media_source["SupportsDirectPlay"] = False
-            media_source["SupportsDirectStream"] = False
-            media_source["TranscodingUrl"] = f"/Videos/{item_id}/master.m3u8"
-            media_source["TranscodingSubProtocol"] = "hls"
-            media_source["TranscodingContainer"] = "ts"
-        else:
-            # Standard MP4 Direct Play
-            media_source["SupportsDirectPlay"] = True
-            media_source["SupportsDirectStream"] = True
-            media_source["DirectStreamUrl"] = f"/Videos/{item_id}/stream"
-            media_source["TranscodingSubProtocol"] = "http"
-
-        item["MediaSources"] = [media_source]
-
+    # Optional Overview Generator
+    overview_parts = [scene.get("details", "")] if scene.get("details") else []
+    if scene.get("studio") and scene["studio"].get("name"): overview_parts.append(f"Studio: {scene['studio']['name']}")
+    item["Overview"] = "\n\n".join(overview_parts)
+    
     return item

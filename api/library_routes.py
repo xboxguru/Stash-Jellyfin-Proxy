@@ -216,8 +216,52 @@ async def _handle_exact_ids(ids_param, parent_id):
                 
     return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": len(jellyfin_items), "StartIndex": 0})
 
-async def _handle_library_browse(request, parent_id, decoded_parent_id, start_index, limit, original_limit, search_term, person_ids, tags_param, studio_ids_param, filters_string, item_types):
-    """Handles standard library browsing, filtering, sorting, and pagination."""
+async def _handle_virtual_folder_contents(decoded_parent_id, start_index, original_limit):
+    """Returns the contents of purely virtual folders like the Tags or Filters lists."""
+    if not decoded_parent_id or decoded_parent_id not in ["root-filters", "root-tags", "root-stashtags", "root-alltags"]:
+        return None
+        
+    jellyfin_items = []
+    server_id = getattr(config, "SERVER_ID", "stash-proxy")
+    cache_version = getattr(config, "CACHE_VERSION", 0)
+    logo_hash = hashlib.md5(f"stash-logo-{cache_version}".encode()).hexdigest()
+    
+    def build_subfolder(name, safe_id, is_collection=False):
+        folder_item = {
+            "Name": name, "SortName": name, "Id": safe_id, "DisplayPreferencesId": safe_id,
+            "ServerId": server_id, "Type": "CollectionFolder" if is_collection else "Folder", "IsFolder": True,
+            "PrimaryImageAspectRatio": 1.7777777777777777,
+            "ImageTags": {"Primary": logo_hash, "Thumb": logo_hash},
+            "HasPrimaryImage": True, "HasThumb": True, "HasBackdrop": True,
+            "BackdropImageTags": [logo_hash]
+        }
+        if is_collection: folder_item["CollectionType"] = "movies"
+        return folder_item
+
+    if decoded_parent_id == "root-filters":
+        filters = await stash_client.get_saved_filters()
+        jellyfin_items = [build_subfolder(f.get("name"), encode_id("filter", str(f.get("id")))) for f in filters]
+    
+    elif decoded_parent_id in ["root-tags", "root-stashtags"]:
+        tag_names = getattr(config, "TAG_GROUPS", [])
+        if tag_names:
+            all_tags = await stash_client.get_all_tags()
+            for name in tag_names:
+                search_name = name.strip().lower()
+                match = next((t for t in all_tags if t['name'].strip().lower() == search_name), None)
+                if match: jellyfin_items.append(build_subfolder(match['name'], encode_id("tag", str(match['id']))))
+        if getattr(config, "ENABLE_ALL_TAGS", False): jellyfin_items.append(build_subfolder("All Tags", encode_id("root", "alltags")))
+            
+    elif decoded_parent_id == "root-alltags":
+        tags = await stash_client.get_all_tags()
+        jellyfin_items = [build_subfolder(t.get("name"), encode_id("tag", str(t.get("id")))) for t in tags]
+            
+    total_record_count = len(jellyfin_items)
+    if original_limit > 0: jellyfin_items = jellyfin_items[start_index : start_index + original_limit]
+    return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": total_record_count, "StartIndex": start_index})
+
+async def _build_stash_filters(request, decoded_parent_id, limit, search_term, person_ids, tags_param, studio_ids_param, filters_string):
+    """Translates Jellyfin sorting and filtering into Stash GraphQL parameters."""
     filter_args = {"sort": "created_at", "direction": "DESC"}
     scene_filter = {} 
     is_folder_override = False
@@ -226,69 +270,21 @@ async def _handle_library_browse(request, parent_id, decoded_parent_id, start_in
         raw_p_ids = [re.search(r'\d+', decode_id(p)).group() for p in person_ids.split(",") if re.search(r'\d+', decode_id(p))]
         if raw_p_ids: scene_filter["performers"] = {"value": raw_p_ids, "modifier": "INCLUDES"}
 
-    # Dynamic Folder Routing (For listing the contents of virtual folders)
     if decoded_parent_id:
-        if decoded_parent_id in ["root-filters", "root-tags", "root-stashtags", "root-alltags"]:
-            jellyfin_items = []
-            server_id = getattr(config, "SERVER_ID", "stash-proxy")
-            cache_version = getattr(config, "CACHE_VERSION", 0)
-            logo_hash = hashlib.md5(f"stash-logo-{cache_version}".encode()).hexdigest()
-            
-            def build_subfolder(name, safe_id, is_collection=False):
-                folder_item = {
-                    "Name": name, "SortName": name, "Id": safe_id, "DisplayPreferencesId": safe_id,
-                    "ServerId": server_id, "Type": "CollectionFolder" if is_collection else "Folder", "IsFolder": True,
-                    "PrimaryImageAspectRatio": 1.7777777777777777,
-                    "ImageTags": {"Primary": logo_hash, "Thumb": logo_hash},
-                    "HasPrimaryImage": True, "HasThumb": True, "HasBackdrop": True,
-                    "BackdropImageTags": [logo_hash]
-                }
-                if is_collection: folder_item["CollectionType"] = "movies"
-                return folder_item
-
-            if decoded_parent_id == "root-filters":
-                filters = await stash_client.get_saved_filters()
-                jellyfin_items = [build_subfolder(f.get("name"), encode_id("filter", str(f.get("id")))) for f in filters]
-            
-            elif decoded_parent_id in ["root-tags", "root-stashtags"]:
-                tag_names = getattr(config, "TAG_GROUPS", [])
-                if tag_names:
-                    all_tags = await stash_client.get_all_tags()
-                    for name in tag_names:
-                        search_name = name.strip().lower()
-                        match = next((t for t in all_tags if t['name'].strip().lower() == search_name), None)
-                        if match: jellyfin_items.append(build_subfolder(match['name'], encode_id("tag", str(match['id']))))
-                if getattr(config, "ENABLE_ALL_TAGS", False): jellyfin_items.append(build_subfolder("All Tags", encode_id("root", "alltags")))
-                    
-            elif decoded_parent_id == "root-alltags":
-                tags = await stash_client.get_all_tags()
-                jellyfin_items = [build_subfolder(t.get("name"), encode_id("tag", str(t.get("id")))) for t in tags]
-                    
-            total_record_count = len(jellyfin_items)
-            if original_limit > 0: jellyfin_items = jellyfin_items[start_index : start_index + original_limit]
-            return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": total_record_count, "StartIndex": start_index})
-
-        # Scene Routing Logic
         if decoded_parent_id == "root-scenes": is_folder_override = True
         elif decoded_parent_id == "root-organized":
-            scene_filter["organized"] = True
-            is_folder_override = True
+            scene_filter["organized"], is_folder_override = True, True
         elif decoded_parent_id == "root-tagged":
-            scene_filter["tags"] = {"modifier": "NOT_NULL"}
-            is_folder_override = True
+            scene_filter["tags"], is_folder_override = {"modifier": "NOT_NULL"}, True
         elif decoded_parent_id == "root-recent":
             cutoff_date = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=getattr(config, "RECENT_DAYS", 14))).strftime("%Y-%m-%dT%H:%M:%S")
-            scene_filter["created_at"] = {"value": cutoff_date, "modifier": "GREATER_THAN"}
-            is_folder_override = True
+            scene_filter["created_at"], is_folder_override = {"value": cutoff_date, "modifier": "GREATER_THAN"}, True
         elif decoded_parent_id.startswith("tag-"):
-            scene_filter["tags"] = {"value": [decoded_parent_id.replace("tag-", "")], "modifier": "INCLUDES"}
-            is_folder_override = True
+            scene_filter["tags"], is_folder_override = {"value": [decoded_parent_id.replace("tag-", "")], "modifier": "INCLUDES"}, True
         elif decoded_parent_id.startswith("person-"):
-            scene_filter["performers"] = {"value": [decoded_parent_id.replace("person-", "")], "modifier": "INCLUDES"}
-            is_folder_override = True
+            scene_filter["performers"], is_folder_override = {"value": [decoded_parent_id.replace("person-", "")], "modifier": "INCLUDES"}, True
         elif decoded_parent_id.startswith("studio-"):
-            scene_filter["studios"] = {"value": [decoded_parent_id.replace("studio-", "")], "modifier": "INCLUDES"}
-            is_folder_override = True
+            scene_filter["studios"], is_folder_override = {"value": [decoded_parent_id.replace("studio-", "")], "modifier": "INCLUDES"}, True
         elif decoded_parent_id.startswith("filter-"):
             is_folder_override = True
             raw_filter_id = decoded_parent_id.replace("filter-", "")
@@ -304,20 +300,6 @@ async def _handle_library_browse(request, parent_id, decoded_parent_id, start_in
                     if "q" in parsed: filter_args["q"] = parsed["q"]
                     if "sort" in parsed: filter_args["sort"] = parsed["sort"]
                     if "direction" in parsed: filter_args["direction"] = parsed["direction"]
-                    
-                if data.get("find_filter"):
-                    if "q" in data["find_filter"]: filter_args["q"] = data["find_filter"]["q"]
-                    if "sort" in data["find_filter"]: filter_args["sort"] = data["find_filter"]["sort"]
-                    if "direction" in data["find_filter"]: filter_args["direction"] = data["find_filter"]["direction"]
-
-    if item_types:
-        # Prevent duplicate Web UI search rows by ONLY mapping scenes to Movies/Folders
-        if not any(t in item_types for t in ["movie", "folder"]):
-            return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": start_index})
-            
-    exclude_types = _get_query_param(request, "ExcludeItemTypes", "").lower()
-    if exclude_types and "movie" in exclude_types:
-        return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": start_index})
 
     # Sort logic
     sort_by = _get_query_param(request, "SortBy", "").lower()
@@ -355,14 +337,39 @@ async def _handle_library_browse(request, parent_id, decoded_parent_id, start_in
         if raw_s_ids: scene_filter["studios"] = {"value": raw_s_ids, "modifier": "INCLUDES"}
 
     if search_term: filter_args["q"] = search_term
+    
+    return filter_args, scene_filter, is_folder_override, limit
+
+async def _handle_library_browse(request, parent_id, decoded_parent_id, start_index, limit, original_limit, search_term, person_ids, tags_param, studio_ids_param, filters_string, item_types):
+    """Fetches, formats, and paginates items for standard library browsing."""
+    
+    # 1. Virtual Folder Intercept (e.g. browsing the Saved Filters menu)
+    virtual_folder_response = await _handle_virtual_folder_contents(decoded_parent_id, start_index, original_limit)
+    if virtual_folder_response: return virtual_folder_response
+    
+    # 2. Web UI Type Filter Intercepts
+    if item_types and not any(t in item_types for t in ["movie", "folder"]):
+        return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": start_index})
+        
+    exclude_types = _get_query_param(request, "ExcludeItemTypes", "").lower()
+    if exclude_types and "movie" in exclude_types:
+        return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": start_index})
+
+    # 3. Build GraphQL Filters
+    filter_args, scene_filter, is_folder_override, updated_limit = await _build_stash_filters(
+        request, decoded_parent_id, limit, search_term, person_ids, tags_param, studio_ids_param, filters_string
+    )
+
+    filter_list = [f.strip() for f in filters_string.split(",")] if filters_string else []
 
     if original_limit == 0 and not search_term and "IsResumable" not in filter_list:
         stash_data = await stash_client.fetch_scenes(filter_args, page=1, per_page=1, scene_filter=scene_filter, ignore_sync_level=is_folder_override)
         return JSONResponse({"Items": [], "TotalRecordCount": stash_data.get("count", 0) if stash_data else 0, "StartIndex": start_index})
 
-    # Fetch and format final dataset
-    page = (start_index // limit) + 1 if limit > 0 else 1
-    stash_data = await stash_client.fetch_scenes(filter_args, page=page, per_page=limit, scene_filter=scene_filter, ignore_sync_level=is_folder_override)
+    # 4. Fetch and format final dataset
+    page = (start_index // updated_limit) + 1 if updated_limit > 0 else 1
+    stash_data = await stash_client.fetch_scenes(filter_args, page=page, per_page=updated_limit, scene_filter=scene_filter, ignore_sync_level=is_folder_override)
+    
     if not stash_data: return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": start_index})
     
     jellyfin_items = []
