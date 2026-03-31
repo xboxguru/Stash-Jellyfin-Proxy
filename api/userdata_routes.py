@@ -63,6 +63,24 @@ async def endpoint_sessions_playing(request: Request):
     except Exception as e: logger.error(f"Error parsing playing session: {e}")
     return JSONResponse({}, status_code=204)
 
+# --- REFACTORED HELPER ---
+def _evaluate_playback_action(playback_ticks: float, runtime_ticks: float) -> tuple[bool, float]:
+    """
+    Responsibility: Calculate if a scene should be marked played, or just update resume time.
+    Returns: (should_mark_played, resume_seconds)
+    """
+    if runtime_ticks <= 0:
+        return False, (playback_ticks / 10000000.0 if playback_ticks > 10000000 else 0)
+
+    percentage = playback_ticks / runtime_ticks
+    if percentage >= 0.90:
+        return True, 0.0  # Mark played, clear resume time
+    elif percentage > 0.01:
+        return False, playback_ticks / 10000000.0 # Save resume time
+    
+    return False, 0.0 # Watched too little, clear resume time
+# -------------------------
+
 async def endpoint_sessions_stopped(request: Request):
     """Receives playback stopped reports to clear active streams and sync watch status."""
     bg_tasks = BackgroundTasks()
@@ -85,19 +103,13 @@ async def endpoint_sessions_stopped(request: Request):
                         scene = await stash_client.get_scene(raw_id)
                         if scene and scene.get("files"): runtime_ticks = float(scene["files"][0].get("duration", 0) * 10000000)
                     
-                    if runtime_ticks > 0:
-                        percentage = playback_ticks / runtime_ticks
-                        if percentage >= 0.90:
-                            bg_tasks.add_task(stash_client.increment_play_count, raw_id)
-                            bg_tasks.add_task(stash_client.update_resume_time, raw_id, 0)
-                        elif percentage > 0.01:
-                            bg_tasks.add_task(stash_client.update_resume_time, raw_id, playback_ticks / 10000000.0)
-                        else:
-                            bg_tasks.add_task(stash_client.update_resume_time, raw_id, 0)
-                    elif playback_ticks > 10000000:
-                        bg_tasks.add_task(stash_client.update_resume_time, raw_id, playback_ticks / 10000000.0)
-                    else:
-                        bg_tasks.add_task(stash_client.update_resume_time, raw_id, 0)
+                    # Delegate logic to helper function
+                    should_mark_played, resume_time_sec = _evaluate_playback_action(playback_ticks, runtime_ticks)
+                    
+                    if should_mark_played:
+                        bg_tasks.add_task(stash_client.increment_play_count, raw_id)
+                    bg_tasks.add_task(stash_client.update_resume_time, raw_id, resume_time_sec)
+                    
     except Exception as e: logger.error(f"Error processing stopped session: {e}")
     return JSONResponse({}, status_code=204, background=bg_tasks)
 

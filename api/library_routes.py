@@ -4,6 +4,7 @@ import datetime
 import re
 import hashlib
 import json
+from dataclasses import dataclass # <--- Added Dataclass import
 from starlette.responses import JSONResponse, Response
 from starlette.requests import Request
 import config
@@ -17,6 +18,53 @@ def _get_query_param(request: Request, param_name: str, default=None):
     """Safely extracts query parameters with case-insensitive matching."""
     values = [value for key, value in request.query_params.multi_items() if key.lower() == param_name.lower()]
     return ",".join(values) if values else default
+
+# --- REFACTORED QUERY PARSER ---
+@dataclass
+class JellyfinItemQuery:
+    parent_id: str
+    decoded_parent_id: str
+    ids_param: str
+    start_index: int
+    limit: int
+    original_limit: int
+    search_term: str
+    person_ids: str
+    tags_param: str
+    studio_ids_param: str
+    filters_string: str
+    recursive: bool
+    item_types: str
+    media_types: str
+    exclude_types: str
+
+def _parse_item_query(request: Request) -> JellyfinItemQuery:
+    """Responsibility: Extract and sanitize all Jellyfin query parameters."""
+    parent_id = _get_query_param(request, "ParentId")
+    try: start_index = int(_get_query_param(request, "StartIndex", 0))
+    except: start_index = 0
+    
+    try: limit = int(_get_query_param(request, "Limit", getattr(config, "DEFAULT_PAGE_SIZE", 50)))
+    except: limit = getattr(config, "DEFAULT_PAGE_SIZE", 50)
+
+    return JellyfinItemQuery(
+        parent_id=parent_id,
+        decoded_parent_id=decode_id(parent_id) if parent_id else None,
+        ids_param=_get_query_param(request, "Ids"),
+        start_index=start_index,
+        limit=limit,
+        original_limit=limit,
+        search_term=_get_query_param(request, "SearchTerm", ""),
+        person_ids=_get_query_param(request, "ArtistIds") or _get_query_param(request, "PeopleIds") or _get_query_param(request, "PersonIds"),
+        tags_param=_get_query_param(request, "Tags") or _get_query_param(request, "TagIds") or _get_query_param(request, "GenreIds"),
+        studio_ids_param=_get_query_param(request, "StudioIds"),
+        filters_string=_get_query_param(request, "Filters", ""),
+        recursive=_get_query_param(request, "Recursive", "false").lower() == "true",
+        item_types=_get_query_param(request, "IncludeItemTypes", "").lower(),
+        media_types=_get_query_param(request, "MediaTypes", "").lower(),
+        exclude_types=_get_query_param(request, "ExcludeItemTypes", "").lower()
+    )
+# -------------------------------
 
 def _transform_saved_filter(object_filter):
     """Translates Stash UI filter definitions into Stash Backend GraphQL definitions."""
@@ -65,10 +113,10 @@ async def _get_libraries():
             "Name": name, "ServerId": server_id, "Id": view_id, "ItemId": view_id,
             "DisplayPreferencesId": view_id,
             "ChannelId": None, "IsFolder": True, 
-            "Type": "UserView", # FIX: Android apps require root items to be UserViews
+            "Type": "UserView",
             "UserData": {"PlaybackPositionTicks": 0, "PlayCount": 0, "IsFavorite": False, "Played": False, "Key": hyphens(view_id), "ItemId": view_id},
             "PrimaryImageAspectRatio": 1.7777777777777777, 
-            "CollectionType": "movies", # FIX: Use 'movies' for strict UI compatibility
+            "CollectionType": "movies",
             "LibraryOptions": {"PathInfos": []}, "Locations": [],
             "ImageTags": {"Primary": logo_hash, "Thumb": logo_hash}, "HasPrimaryImage": True, "HasThumb": True, "HasBackdrop": True,
             "BackdropImageTags": [logo_hash], "ImageBlurHashes": {}, "LocationType": "FileSystem", "MediaType": "Unknown"
@@ -387,53 +435,34 @@ async def _handle_library_browse(request, parent_id, decoded_parent_id, start_in
 
     return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": total_count, "StartIndex": start_index})
 
+# --- REFACTORED CORE ROUTER ---
 async def endpoint_items(request: Request):
-    """Core routing engine. Extracts params and delegates to helper functions."""
-    
-    # 1. Parameter Extraction
-    parent_id = _get_query_param(request, "ParentId")
-    decoded_parent_id = decode_id(parent_id) if parent_id else None
-    ids_param = _get_query_param(request, "Ids")
-    
-    try: start_index = int(_get_query_param(request, "StartIndex", 0))
-    except: start_index = 0
-    try: limit = int(_get_query_param(request, "Limit", getattr(config, "DEFAULT_PAGE_SIZE", 50)))
-    except: limit = getattr(config, "DEFAULT_PAGE_SIZE", 50)
-    original_limit = limit
+    """Responsibility: Delegate the query to the correct handler based on the payload."""
+    query = _parse_item_query(request)
 
-    search_term = _get_query_param(request, "SearchTerm", "")
-    person_ids = (_get_query_param(request, "ArtistIds") or _get_query_param(request, "PeopleIds") or _get_query_param(request, "PersonIds"))
-    tags_param = (_get_query_param(request, "Tags") or _get_query_param(request, "TagIds") or _get_query_param(request, "GenreIds"))
-    studio_ids_param = _get_query_param(request, "StudioIds")
-    filters_string = _get_query_param(request, "Filters", "")
-    
-    recursive = _get_query_param(request, "Recursive", "false").lower() == "true"
-    item_types = _get_query_param(request, "IncludeItemTypes", "").lower()
-    media_types = _get_query_param(request, "MediaTypes", "").lower()
-    exclude_types = _get_query_param(request, "ExcludeItemTypes", "").lower()
+    # 1. Route: Global Web UI Search
+    if query.search_term and (query.item_types or query.media_types):
+        return await _handle_global_search(query.search_term, query.item_types, query.media_types, query.exclude_types, query.start_index, query.original_limit)
 
-    # 2. Route: Global Web UI Search
-    if search_term and (item_types or media_types):
-        return await _handle_global_search(search_term, item_types, media_types, exclude_types, start_index, original_limit)
-
-    # 3. Route: App Boot & Edge Cases
-    if not any([parent_id, ids_param, search_term, recursive, person_ids, tags_param, filters_string]):
-        if "movie" not in item_types and "episode" not in item_types:
+    # 2. Route: App Boot & Edge Cases
+    if not any([query.parent_id, query.ids_param, query.search_term, query.recursive, query.person_ids, query.tags_param, query.filters_string]):
+        if "movie" not in query.item_types and "episode" not in query.item_types:
             views = await _get_libraries()
             return JSONResponse({"Items": views, "TotalRecordCount": len(views), "StartIndex": 0})
 
-    if decoded_parent_id and decoded_parent_id.startswith("scene-"):
+    if query.decoded_parent_id and query.decoded_parent_id.startswith("scene-"):
         return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": 0})
 
-    # 4. Route: Exact UI ID Lookups (Background UI Refreshes)
-    if ids_param:
-        return await _handle_exact_ids(ids_param, parent_id)
+    # 3. Route: Exact UI ID Lookups (Background UI Refreshes)
+    if query.ids_param:
+        return await _handle_exact_ids(query.ids_param, query.parent_id)
 
-    # 5. Route: Standard Library Browsing & Filtering
+    # 4. Route: Standard Library Browsing & Filtering
     return await _handle_library_browse(
-        request, parent_id, decoded_parent_id, start_index, limit, original_limit,
-        search_term, person_ids, tags_param, studio_ids_param, filters_string, item_types
+        request, query.parent_id, query.decoded_parent_id, query.start_index, query.limit, query.original_limit,
+        query.search_term, query.person_ids, query.tags_param, query.studio_ids_param, query.filters_string, query.item_types
     )
+# ------------------------------
 
 async def endpoint_empty_list(request: Request): return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": 0})
 async def endpoint_empty_array(request: Request): return JSONResponse([])

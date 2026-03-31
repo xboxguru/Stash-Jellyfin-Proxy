@@ -27,6 +27,42 @@ async def endpoint_playback_info(request: Request):
         "PlaySessionId": f"stash_{raw_id}"
     })
 
+# --- REFACTORED HELPERS ---
+def _requires_transcode(scene: dict) -> bool:
+    """Responsibility: Evaluate codecs to determine if HLS transcode is required."""
+    if not scene or not scene.get("files"): 
+        return False
+    
+    file_data = scene["files"][0]
+    v_codec = str(file_data.get("video_codec", "")).lower()
+    container = str(file_data.get("format", "")).lower()
+    
+    safe_codecs = ["h264", "h265", "hevc", "avc", "vp8", "vp9", "av1"]
+    safe_containers = ["mp4", "m4v", "mov", "webm"]
+    
+    return (v_codec and v_codec not in safe_codecs) or (container and container not in safe_containers)
+
+async def _rewrite_hls_playlist(stash_base: str, raw_id: str, item_id: str, apikey: str) -> Response:
+    """Responsibility: Fetch and rewrite the M3U8 playlist for proxy routing."""
+    logger.info(f"Serving Trojan HLS Playlist for scene {raw_id}")
+    stash_m3u8_url = f"{stash_base}/scene/{raw_id}/stream.m3u8"
+    if apikey: stash_m3u8_url += f"?apikey={apikey}"
+    
+    async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as temp_client:
+        try:
+            m3u8_resp = await temp_client.get(stash_m3u8_url, timeout=10.0)
+            if m3u8_resp.status_code == 200:
+                rewritten_lines = [
+                    f"/Videos/{item_id}/hls/{line.split('?')[0].split('/')[-1]}" 
+                    if line.strip() and not line.startswith("#") else line 
+                    for line in m3u8_resp.text.splitlines()
+                ]
+                return Response(content="\n".join(rewritten_lines), media_type="application/x-mpegURL", headers={"Access-Control-Allow-Origin": "*"})
+        except Exception as e:
+            logger.error(f"Failed to fetch HLS playlist: {e}")
+    return Response(status_code=500)
+# -------------------------
+
 async def endpoint_stream(request: Request):
     """Pipes the video stream directly from Stash, supporting DirectPlay and Trojan HLS Playlists."""
     item_id = decode_id(request.path_params.get("item_id", ""))
@@ -34,50 +70,30 @@ async def endpoint_stream(request: Request):
     stash_base = config.get_stash_base()
     apikey = getattr(config, "STASH_API_KEY", "")
     stash_stream_url = f"{stash_base}/scene/{raw_id}/stream"
-    download_ext = "mp4" 
     
-    if "download" in request.url.path.lower():
-        scene = await stash_client.get_scene(raw_id)
-        if scene and scene.get("files"):
-            dl_url = f"{stash_base}/scene/{raw_id}/stream"
-            if apikey: dl_url += f"?apikey={apikey}&download=true"
-            logger.info(f"📥 Redirecting Web UI Download to raw file: {raw_id}")
-            return RedirectResponse(url=dl_url, status_code=302)
-        
-    # 1. Check Codec to Decide on HLS Hijack
     scene = await stash_client.get_scene(raw_id)
-    if scene and scene.get("files"):
-        v_codec = str(scene["files"][0].get("video_codec", "")).lower()
-        container = str(scene["files"][0].get("format", "")).lower()
-        if container: download_ext = container
+    download_ext = scene["files"][0].get("format", "mp4").lower() if scene and scene.get("files") else "mp4"
+    is_download = "download" in request.url.path.lower()
+    
+    # 1. Handle Direct Downloads
+    if is_download and scene and scene.get("files"):
+        dl_url = f"{stash_base}/scene/{raw_id}/stream"
+        if apikey: dl_url += f"?apikey={apikey}&download=true"
+        logger.info(f"Redirecting Web UI Download to raw file: {raw_id}")
+        return RedirectResponse(url=dl_url, status_code=302)
         
-        safe_codecs = ["h264", "h265", "hevc", "avc", "vp8", "vp9", "av1"]
-        safe_containers = ["mp4", "m4v", "mov", "webm"]
+    # 2. Check Codec to Decide on HLS Hijack
+    if _requires_transcode(scene):
+        if not request.url.path.lower().endswith(".m3u8"):
+            logger.info(f"Redirecting strict client to explicit .m3u8 URL for scene {raw_id}")
+            new_url = f"/Videos/{item_id}/master.m3u8"
+            if request.url.query: new_url += f"?{request.url.query}"
+            return RedirectResponse(url=new_url, status_code=302)
         
-        if (v_codec and v_codec not in safe_codecs) or (container and container not in safe_containers):
-            if "download" in request.url.path.lower():
-                logger.info(f"📥 Download requested for legacy format! Serving RAW file.")
-            else:
-                if not request.url.path.lower().endswith(".m3u8"):
-                    logger.info(f"🎬 Redirecting strict client to explicit .m3u8 URL for scene {raw_id}")
-                    new_url = f"/Videos/{item_id}/master.m3u8"
-                    if request.url.query: new_url += f"?{request.url.query}"
-                    return RedirectResponse(url=new_url, status_code=302)
+        # Delegate to the refactored HLS playlist rewriter
+        return await _rewrite_hls_playlist(stash_base, raw_id, item_id, apikey)
 
-                logger.info(f"🐎 Serving Trojan HLS Playlist for scene {raw_id}")
-                stash_m3u8_url = f"{stash_base}/scene/{raw_id}/stream.m3u8"
-                if apikey: stash_m3u8_url += f"?apikey={apikey}"
-                
-                async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as temp_client:
-                    try:
-                        m3u8_resp = await temp_client.get(stash_m3u8_url, timeout=10.0)
-                        if m3u8_resp.status_code == 200:
-                            rewritten_lines = [f"/Videos/{item_id}/hls/{line.split('?')[0].split('/')[-1]}" if line.strip() and not line.startswith("#") else line for line in m3u8_resp.text.splitlines()]
-                            return Response(content="\n".join(rewritten_lines), media_type="application/x-mpegURL", headers={"Access-Control-Allow-Origin": "*"})
-                    except Exception as e:
-                        logger.error(f"❌ Failed to fetch HLS playlist: {e}")
-
-    # 2. Handle Start Time Translation
+    # 3. Handle Start Time Translation
     start_ticks = next((v for k, v in request.query_params.items() if k.lower() == "starttimeticks"), None)
     if start_ticks:
         try:
@@ -88,12 +104,12 @@ async def endpoint_stream(request: Request):
     if apikey and "apikey=" not in stash_stream_url.lower():
         stash_stream_url += f"{'&' if '?' in stash_stream_url else '?'}apikey={apikey}"
 
+    # 4. Stream Passthrough Execution
     headers = dict(request.headers)
     headers.pop("host", None)
     range_header = headers.get("range") or headers.get("Range")
 
     try:
-        # Use the global stream_client
         req = stream_client.build_request(request.method, stash_stream_url, headers=headers)
         r = await stream_client.send(req, stream=True)
 
@@ -105,7 +121,7 @@ async def endpoint_stream(request: Request):
         if range_header and r.status_code == 206 and "content-range" not in resp_headers:
             logger.warning(f"Stash returned 206 but missing Content-Range for scene {raw_id}")
             
-        if "download" in request.url.path.lower():
+        if is_download:
             resp_headers["Content-Disposition"] = f'attachment; filename="{raw_id}.{download_ext}"'
         
         if request.method == "HEAD":
@@ -116,7 +132,6 @@ async def endpoint_stream(request: Request):
             async for chunk in r.aiter_bytes(chunk_size=8192): yield chunk
             
         async def cleanup():
-            # Only close the specific response, DO NOT close the global client
             await r.aclose()
 
         return StreamingResponse(stream_generator(), status_code=r.status_code, headers=resp_headers, background=BackgroundTask(cleanup))
@@ -140,7 +155,6 @@ async def endpoint_hls_segment(request: Request):
     headers.pop("host", None)
 
     try:
-        # Use the global stream_client
         req = stream_client.build_request(request.method, stash_segment_url, headers=headers)
         r = await stream_client.send(req, stream=True)
 
@@ -153,7 +167,6 @@ async def endpoint_hls_segment(request: Request):
             async for chunk in r.aiter_bytes(chunk_size=8192): yield chunk
             
         async def cleanup():
-            # Only close the specific response, DO NOT close the global client
             await r.aclose()
             
         return StreamingResponse(stream_generator(), status_code=r.status_code, headers=resp_headers, background=BackgroundTask(cleanup))
