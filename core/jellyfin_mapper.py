@@ -24,10 +24,11 @@ def decode_id(encoded_id: str) -> str:
         
     try:
         decoded_bytes = bytes.fromhex(clean_id)
-        decoded_str = decoded_bytes.decode('utf-8').rstrip('\x00')
+        # FIX: Scrub ALL null bytes and whitespace to prevent ID mismatch bugs globally!
+        decoded_str = decoded_bytes.decode('utf-8').replace("\x00", "").strip()
         
         if "scene-" in decoded_str or "person-" in decoded_str or "studio-" in decoded_str or "tag-" in decoded_str or "root-" in decoded_str or "filter-" in decoded_str or "year-" in decoded_str:
-            return decoded_str.strip()
+            return decoded_str
     except Exception:
         pass
         
@@ -42,8 +43,13 @@ def _build_trickplay_dict(item_id: str, runtime_ticks: int, files: list) -> dict
     if runtime_ticks <= 0 or not files:
         return {}
         
-    video_width = files[0].get("width", 1920)
-    video_height = files[0].get("height", 1080)
+    # FIX: Safely fallback if Stash explicitly returns `null` for unprobed files
+    video_width = files[0].get("width")
+    video_height = files[0].get("height")
+    
+    video_width = int(video_width) if video_width else 1920
+    video_height = int(video_height) if video_height else 1080
+    
     aspect_ratio = video_width / video_height if video_height > 0 else 1.777
     
     actual_width = 160
@@ -68,25 +74,33 @@ def _build_media_sources(item_id: str, path: str, files: list, runtime_ticks: in
         return []
         
     file_data = files[0]
-    v_codec = str(file_data.get("video_codec", "h264")).lower()
-    a_codec = str(file_data.get("audio_codec", "aac")).lower()
-    container = str(file_data.get("format", "mp4")).lower()
+    v_codec = str(file_data.get("video_codec") or "h264").lower()
+    a_codec = str(file_data.get("audio_codec") or "aac").lower()
+    container = str(file_data.get("format") or "mp4").lower()
     
-    # Transcode Detection
     safe_codecs = ["h264", "h265", "hevc", "avc", "vp8", "vp9", "av1"]
     safe_containers = ["mp4", "m4v", "mov", "webm"]
     needs_transcode = v_codec not in safe_codecs or container not in safe_containers
 
     base_stream_flags = {"IsInterlaced": False, "IsDefault": True, "IsForced": False, "IsHearingImpaired": False, "IsExternal": False, "IsTextSubtitleStream": False, "SupportsExternalStream": False}
     
-    video_stream = {**base_stream_flags, "Codec": v_codec, "Type": "Video", "Width": file_data.get("width", 0), "Height": file_data.get("height", 0), "Index": 0, "BitRate": file_data.get("bit_rate", 0), "IsAVC": v_codec in ["h264", "avc"]}
+    video_stream = {
+        **base_stream_flags, 
+        "Codec": v_codec, 
+        "Type": "Video", 
+        "Width": file_data.get("width") or 0, 
+        "Height": file_data.get("height") or 0, 
+        "Index": 0, 
+        "BitRate": file_data.get("bit_rate") or 0, 
+        "IsAVC": v_codec in ["h264", "avc"]
+    }
     audio_stream = {**base_stream_flags, "Codec": a_codec, "Type": "Audio", "Index": 1, "Channels": 2}
 
     media_source = {
         "Id": item_id, "Path": path, "Protocol": "File", "Type": "Default", "Container": container,
         "RunTimeTicks": runtime_ticks, "IsRemote": False, "SupportsTranscoding": True, "VideoType": "VideoFile",
         "MediaStreams": [video_stream, audio_stream], "MediaAttachments": [], "Formats": [], "RequiredHttpHeaders": {},
-        "Name": title, "Size": int(file_data.get("size", 0)), "ReadAtNativeFramerate": False, "SupportsProbing": True
+        "Name": title, "Size": int(file_data.get("size") or 0), "ReadAtNativeFramerate": False, "SupportsProbing": True
     }
 
     if needs_transcode:
@@ -205,10 +219,9 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
         "ImageBlurHashes": {"Primary": {primary_tag: fake_blurhash}, "Thumb": {primary_tag: fake_blurhash}, "Backdrop": {backdrop_tag: fake_blurhash}},
         
         "RunTimeTicks": runtime_ticks,
-        "Width": files[0].get("width", 0) if files else 0,
-        "Height": files[0].get("height", 0) if files else 0,
+        "Width": (files[0].get("width") or 0) if files else 0,
+        "Height": (files[0].get("height") or 0) if files else 0,
         
-        # --- DELEGATED TO HELPERS ---
         "Trickplay": _build_trickplay_dict(item_id, runtime_ticks, files),
         "MediaSources": _build_media_sources(item_id, path, files, runtime_ticks, title),
         "People": _build_people(scene.get("performers") or [], cache_version, fake_blurhash),
@@ -216,9 +229,9 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
         
         "UserData": {
             "PlaybackPositionTicks": int((scene.get("resume_time") or 0) * 10000000),
-            "PlayCount": scene.get("play_count", 0),
-            "IsFavorite": (scene.get("rating100", 0) > 0) if getattr(config, "FAVORITE_ACTION", "o_counter").lower() == "rating" else (scene.get("o_counter", 0) > 0),
-            "Played": scene.get("play_count", 0) > 0,
+            "PlayCount": scene.get("play_count") or 0,
+            "IsFavorite": ((scene.get("rating100") or 0) > 0) if getattr(config, "FAVORITE_ACTION", "o_counter").lower() == "rating" else ((scene.get("o_counter") or 0) > 0),
+            "Played": (scene.get("play_count") or 0) > 0,
             "Key": hyphens(item_id),
             "ItemId": item_id
         }
