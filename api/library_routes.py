@@ -104,204 +104,133 @@ async def endpoint_virtual_folders(request: Request):
     virtual_folders = [{"Name": v.get("Name"), "Locations": [], "CollectionType": v.get("CollectionType", "movies"), "LibraryOptions": {}, "ItemId": v.get("Id"), "PrimaryImageItemId": v.get("Id"), "RefreshProgress": 0, "RefreshStatus": "Idle"} for v in views]
     return JSONResponse(virtual_folders)
 
-async def endpoint_items(request: Request):
-    """Core routing engine for filtering, searching, and paginating library items."""
-    parent_id = _get_query_param(request, "ParentId")
-    decoded_parent_id = decode_id(parent_id) if parent_id else None
-    ids_param = _get_query_param(request, "Ids")
+async def _handle_global_search(search_term, item_types, media_types, exclude_types, start_index, original_limit):
+    """Handles Stash-native search hijacking for the Jellyfin Web UI."""
+    server_id = getattr(config, "SERVER_ID", "stash-proxy")
+    jellyfin_items = []
     
-    try: start_index = int(_get_query_param(request, "StartIndex", 0))
-    except: start_index = 0
-    try: limit = int(_get_query_param(request, "Limit", getattr(config, "DEFAULT_PAGE_SIZE", 50)))
-    except: limit = getattr(config, "DEFAULT_PAGE_SIZE", 50)
-    
-    # FIX 1: Define original_limit early so the search router can use it safely
-    original_limit = limit
+    # ROW 1: Movies (Scenes)
+    if "movie" in item_types and "movie" not in exclude_types:
+        page = (start_index // original_limit) + 1 if original_limit > 0 else 1
+        stash_data = await stash_client.fetch_scenes(
+            filter_args={"q": search_term, "sort": "created_at", "direction": "DESC"}, 
+            page=page, per_page=original_limit, scene_filter={}
+        )
+        safe_root = jellyfin_mapper.encode_id("root", "scenes") 
+        for scene in stash_data.get("scenes", []):
+            try: jellyfin_items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=safe_root))
+            except Exception: pass
 
-    search_term = _get_query_param(request, "SearchTerm", "")
-    person_ids = (_get_query_param(request, "ArtistIds") or _get_query_param(request, "PeopleIds") or _get_query_param(request, "PersonIds"))
-    tags_param = (_get_query_param(request, "Tags") or _get_query_param(request, "TagIds") or _get_query_param(request, "GenreIds"))
-    studio_ids_param = _get_query_param(request, "StudioIds")
-    filters_string = _get_query_param(request, "Filters", "")
-    
-    # FIX 2: Define recursive!
-    recursive = _get_query_param(request, "Recursive", "false").lower() == "true"
+    # ROW 2: Shows (Performers)
+    if "series" in item_types and "series" not in exclude_types:
+        query = """query FindPerformers($q: String) { findPerformers(filter: {q: $q, per_page: 20}) { performers { id name } } }"""
+        result = await stash_client.call_graphql(query, {"q": search_term})
+        for p in result.get("findPerformers", {}).get("performers", []):
+            jellyfin_items.append({
+                "Name": p.get("name", "Unknown"),
+                "Id": jellyfin_mapper.encode_id("person", str(p.get("id"))),
+                "Type": "Series", "IsFolder": True, "ServerId": server_id,
+                "PrimaryImageAspectRatio": 0.6666666666666666, 
+                "ImageTags": {"Primary": "primary"} 
+            })
 
-    # Safely extract arrays of query parameters to catch Jellyfin's duplicate keys
-    item_types = ",".join([v.lower() for k, v in request.query_params.multi_items() if k.lower() == "includeitemtypes"])
-    if not item_types: item_types = _get_query_param(request, "IncludeItemTypes", "").lower()
-        
-    media_types = ",".join([v.lower() for k, v in request.query_params.multi_items() if k.lower() == "mediatypes"])
-    if not media_types: media_types = _get_query_param(request, "MediaTypes", "").lower()
-        
-    exclude_types = ",".join([v.lower() for k, v in request.query_params.multi_items() if k.lower() == "excludeitemtypes"])
-    if not exclude_types: exclude_types = _get_query_param(request, "ExcludeItemTypes", "").lower()
-
-    # --- SMART GLOBAL SEARCH ROUTER ---
-    if search_term and (item_types or media_types):
-        server_id = getattr(config, "SERVER_ID", "stash-proxy")
-        jellyfin_items = []
-        
-        # ROW 1: "Movies" -> Return Stash Scenes
-        if "movie" in item_types and "movie" not in exclude_types:
-            # FIX: Use the correct fetch_scenes method and calculate the page number
-            page = (start_index // original_limit) + 1 if original_limit > 0 else 1
-            stash_data = await stash_client.fetch_scenes(
-                filter_args={"q": search_term, "sort": "created_at", "direction": "DESC"}, 
-                page=page, 
-                per_page=original_limit, 
-                scene_filter={}
-            )
-            
-            safe_root = jellyfin_mapper.encode_id("root", "scenes") 
-            for scene in stash_data.get("scenes", []):
-                try: jellyfin_items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=safe_root))
-                except Exception: pass
-
-        # ROW 2: "Shows" (Series) -> Return Stash Performers
-        if "series" in item_types and "series" not in exclude_types:
-            query = """query FindPerformers($q: String) { findPerformers(filter: {q: $q, per_page: 20}) { performers { id name } } }"""
-            result = await stash_client.call_graphql(query, {"q": search_term})
-            for p in result.get("findPerformers", {}).get("performers", []):
+    # ROW 3: Videos (Tags)
+    if "video" in media_types and "movie" in exclude_types:
+        all_tags = await stash_client.get_all_tags()
+        matched_tags = 0
+        for t in all_tags:
+            if search_term.lower() in t.get("name", "").lower():
                 jellyfin_items.append({
-                    "Name": p.get("name", "Unknown"),
-                    # Changed to "person" prefix to perfectly match standard routing
-                    "Id": jellyfin_mapper.encode_id("person", str(p.get("id"))),
-                    "Type": "Series", 
-                    "IsFolder": True, 
-                    "ServerId": server_id,
-                    # Force Jellyfin to draw a beautiful vertical poster box
-                    "PrimaryImageAspectRatio": 0.6666666666666666, 
-                    # Always force the Web UI to request the image
-                    "ImageTags": {"Primary": "primary"} 
+                    "Name": t.get("name", ""), "Id": jellyfin_mapper.encode_id("tag", str(t.get("id"))),
+                    "Type": "Video", "IsFolder": True, "ServerId": server_id
                 })
+                matched_tags += 1
+                if matched_tags >= 50: break
+                
+    return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": len(jellyfin_items), "StartIndex": start_index})
 
-        # ROW 3: "Videos" -> Return Stash Tags
-        if "video" in media_types and "movie" in exclude_types:
-            all_tags = await stash_client.get_all_tags()
-            matched_tags = 0
-            for t in all_tags:
-                if search_term.lower() in t.get("name", "").lower():
-                    jellyfin_items.append({
-                        "Name": t.get("name", ""),
-                        "Id": jellyfin_mapper.encode_id("tag", str(t.get("id"))),
-                        "Type": "Video", 
-                        "IsFolder": True, 
-                        "ServerId": server_id
-                    })
-                    matched_tags += 1
-                    if matched_tags >= 50: break
-                    
-        return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": len(jellyfin_items), "StartIndex": start_index})
+async def _handle_exact_ids(ids_param, parent_id):
+    """Answers specific ID requests, primarily for background UI metadata refreshes."""
+    raw_ids, jellyfin_items = [], []
+    server_id = getattr(config, "SERVER_ID", "stash-proxy")
+    cache_version = getattr(config, "CACHE_VERSION", 0)
+    logo_hash = hashlib.md5(f"stash-logo-{cache_version}".encode()).hexdigest()
+    
+    views = await _get_libraries()
+    
+    for i in ids_param.split(","):
+        clean_i = i.replace("-", "")
+        matching_view = next((v for v in views if v["Id"] == clean_i), None)
+        if matching_view:
+            jellyfin_items.append(matching_view)
+            continue
 
-    # Edge Case: App Boot Request
-    if not any([parent_id, ids_param, search_term, recursive, person_ids, tags_param, filters_string]):
-        if "movie" not in item_types and "episode" not in item_types:
-            views = await _get_libraries()
-            return JSONResponse({"Items": views, "TotalRecordCount": len(views), "StartIndex": 0})
-
-    if decoded_parent_id and decoded_parent_id.startswith("scene-"):
-        return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": 0})
-
-    # 1. Exact ID Requests (e.g. Resume Watching row or Library UI Refreshes)
-    if ids_param:
-        raw_ids, jellyfin_items = [], []
-        server_id = getattr(config, "SERVER_ID", "stash-proxy")
+        dec_i = decode_id(i)
         
-        # Generate the Stash logo hash to prevent the blue folder fallback
-        cache_version = getattr(config, "CACHE_VERSION", 0)
-        logo_hash = hashlib.md5(f"stash-logo-{cache_version}".encode()).hexdigest()
-        
-        # Fetch root libraries so we can answer metadata refresh requests accurately
-        views = await _get_libraries()
-        
-        for i in ids_param.split(","):
-            clean_i = i.replace("-", "")
-
-            # Check if the client is refreshing a Root Library card
-            matching_view = next((v for v in views if v["Id"] == clean_i), None)
-            if matching_view:
-                jellyfin_items.append(matching_view)
-                continue
-
-            dec_i = decode_id(i)
+        # Fladder Navigation Folders Intercept
+        if dec_i.startswith("root-") or dec_i.startswith("tag-") or dec_i.startswith("filter-"):
+            is_root = dec_i.startswith("root-")
+            is_nav_folder = dec_i in ["root-filters", "root-tags", "root-alltags", "root-stashtags"]
             
-            # Fladder Navigation Folders Intercept
-            if dec_i.startswith("root-") or dec_i.startswith("tag-") or dec_i.startswith("filter-"):
-                is_root = dec_i.startswith("root-")
-                is_nav_folder = dec_i in ["root-filters", "root-tags", "root-alltags", "root-stashtags"]
-                
-                item_name = "Folder" # Default fallback
-                
-                # Dynamically resolve the real names for Sub-Folders!
-                if is_root: 
-                    safe_id = i
-                    if dec_i == "root-alltags": item_name = "All Tags"
-                elif dec_i.startswith("tag-"): 
-                    safe_id = i
-                    raw_id = dec_i.replace("tag-", "")
-                    all_tags = await stash_client.get_all_tags()
-                    match = next((t for t in all_tags if str(t.get("id")) == raw_id), None)
-                    if match: item_name = match.get("name", "Folder")
-                elif dec_i.startswith("filter-"): 
-                    safe_id = i
-                    raw_id = dec_i.replace("filter-", "")
-                    filters = await stash_client.get_saved_filters()
-                    match = next((f for f in filters if str(f.get("id")) == raw_id), None)
-                    if match: item_name = match.get("name", "Folder")
-                else: 
-                    safe_id = i
-                
-                is_collection = is_root and not is_nav_folder
-                folder_item = {
-                    "Name": item_name, 
-                    "SortName": item_name, 
-                    "Id": safe_id, 
-                    "DisplayPreferencesId": safe_id,
-                    "ServerId": server_id, 
-                    "Type": "CollectionFolder" if is_collection else "Folder", 
-                    "IsFolder": True,
-                    "PrimaryImageAspectRatio": 1.7777777777777777,
-                    "ImageTags": {"Primary": logo_hash, "Thumb": logo_hash},
-                    "HasPrimaryImage": True, 
-                    "HasThumb": True,
-                    "HasBackdrop": True,
-                    "BackdropImageTags": [logo_hash]
-                }
-                if is_collection: folder_item["CollectionType"] = "movies"
-                jellyfin_items.append(folder_item)
-                continue
-
-            match = re.search(r'\d+', dec_i)
-            if match: raw_ids.append(match.group())
+            item_name = "Folder"
             
-        if raw_ids:
-            tasks = [stash_client.get_scene(rid) for rid in raw_ids]
-            results = await asyncio.gather(*tasks)
-            safe_root = encode_id("root", "scenes")
-            for scene in results:
-                if scene: jellyfin_items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=parent_id or safe_root))
-                    
-        return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": len(jellyfin_items), "StartIndex": 0})
+            if is_root: 
+                safe_id = i
+                if dec_i == "root-alltags": item_name = "All Tags"
+            elif dec_i.startswith("tag-"): 
+                safe_id = i
+                raw_id = dec_i.replace("tag-", "")
+                all_tags = await stash_client.get_all_tags()
+                match = next((t for t in all_tags if str(t.get("id")) == raw_id), None)
+                if match: item_name = match.get("name", "Folder")
+            elif dec_i.startswith("filter-"): 
+                safe_id = i
+                raw_id = dec_i.replace("filter-", "")
+                filters = await stash_client.get_saved_filters()
+                match = next((f for f in filters if str(f.get("id")) == raw_id), None)
+                if match: item_name = match.get("name", "Folder")
+            else: 
+                safe_id = i
+            
+            is_collection = is_root and not is_nav_folder
+            folder_item = {
+                "Name": item_name, "SortName": item_name, "Id": safe_id, "DisplayPreferencesId": safe_id,
+                "ServerId": server_id, "Type": "CollectionFolder" if is_collection else "Folder", "IsFolder": True,
+                "PrimaryImageAspectRatio": 1.7777777777777777,
+                "ImageTags": {"Primary": logo_hash, "Thumb": logo_hash},
+                "HasPrimaryImage": True, "HasThumb": True, "HasBackdrop": True, "BackdropImageTags": [logo_hash]
+            }
+            if is_collection: folder_item["CollectionType"] = "movies"
+            jellyfin_items.append(folder_item)
+            continue
 
-    # 2. Build GraphQL Filters
+        match = re.search(r'\d+', dec_i)
+        if match: raw_ids.append(match.group())
+        
+    if raw_ids:
+        tasks = [stash_client.get_scene(rid) for rid in raw_ids]
+        results = await asyncio.gather(*tasks)
+        safe_root = encode_id("root", "scenes")
+        for scene in results:
+            if scene: jellyfin_items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=parent_id or safe_root))
+                
+    return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": len(jellyfin_items), "StartIndex": 0})
+
+async def _handle_library_browse(request, parent_id, decoded_parent_id, start_index, limit, original_limit, search_term, person_ids, tags_param, studio_ids_param, filters_string, item_types):
+    """Handles standard library browsing, filtering, sorting, and pagination."""
     filter_args = {"sort": "created_at", "direction": "DESC"}
     scene_filter = {} 
-    original_limit = limit
-
+    is_folder_override = False
+    
     if person_ids:
         raw_p_ids = [re.search(r'\d+', decode_id(p)).group() for p in person_ids.split(",") if re.search(r'\d+', decode_id(p))]
         if raw_p_ids: scene_filter["performers"] = {"value": raw_p_ids, "modifier": "INCLUDES"}
 
-    is_folder_override = False
-    
-    # 3. Dynamic Folder Routing
+    # Dynamic Folder Routing (For listing the contents of virtual folders)
     if decoded_parent_id:
         if decoded_parent_id in ["root-filters", "root-tags", "root-stashtags", "root-alltags"]:
             jellyfin_items = []
             server_id = getattr(config, "SERVER_ID", "stash-proxy")
-            
-            # Generate the logo hash for the initial list load
             cache_version = getattr(config, "CACHE_VERSION", 0)
             logo_hash = hashlib.md5(f"stash-logo-{cache_version}".encode()).hexdigest()
             
@@ -388,7 +317,6 @@ async def endpoint_items(request: Request):
             
     exclude_types = _get_query_param(request, "ExcludeItemTypes", "").lower()
     if exclude_types and "movie" in exclude_types:
-        # If the Web UI explicitly excludes Movies, return empty to prevent the duplicate "Video" row
         return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": start_index})
 
     # Sort logic
@@ -445,13 +373,60 @@ async def endpoint_items(request: Request):
         try: jellyfin_items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=parent_id or safe_root))
         except Exception: pass
 
-
     total_count = len(jellyfin_items) if search_term or "IsResumable" in filter_list else stash_data.get("count", 0)
     
     if original_limit > 0 and (search_term or "IsResumable" in filter_list): 
         jellyfin_items = jellyfin_items[start_index : start_index + original_limit]
 
     return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": total_count, "StartIndex": start_index})
+
+async def endpoint_items(request: Request):
+    """Core routing engine. Extracts params and delegates to helper functions."""
+    
+    # 1. Parameter Extraction
+    parent_id = _get_query_param(request, "ParentId")
+    decoded_parent_id = decode_id(parent_id) if parent_id else None
+    ids_param = _get_query_param(request, "Ids")
+    
+    try: start_index = int(_get_query_param(request, "StartIndex", 0))
+    except: start_index = 0
+    try: limit = int(_get_query_param(request, "Limit", getattr(config, "DEFAULT_PAGE_SIZE", 50)))
+    except: limit = getattr(config, "DEFAULT_PAGE_SIZE", 50)
+    original_limit = limit
+
+    search_term = _get_query_param(request, "SearchTerm", "")
+    person_ids = (_get_query_param(request, "ArtistIds") or _get_query_param(request, "PeopleIds") or _get_query_param(request, "PersonIds"))
+    tags_param = (_get_query_param(request, "Tags") or _get_query_param(request, "TagIds") or _get_query_param(request, "GenreIds"))
+    studio_ids_param = _get_query_param(request, "StudioIds")
+    filters_string = _get_query_param(request, "Filters", "")
+    
+    recursive = _get_query_param(request, "Recursive", "false").lower() == "true"
+    item_types = _get_query_param(request, "IncludeItemTypes", "").lower()
+    media_types = _get_query_param(request, "MediaTypes", "").lower()
+    exclude_types = _get_query_param(request, "ExcludeItemTypes", "").lower()
+
+    # 2. Route: Global Web UI Search
+    if search_term and (item_types or media_types):
+        return await _handle_global_search(search_term, item_types, media_types, exclude_types, start_index, original_limit)
+
+    # 3. Route: App Boot & Edge Cases
+    if not any([parent_id, ids_param, search_term, recursive, person_ids, tags_param, filters_string]):
+        if "movie" not in item_types and "episode" not in item_types:
+            views = await _get_libraries()
+            return JSONResponse({"Items": views, "TotalRecordCount": len(views), "StartIndex": 0})
+
+    if decoded_parent_id and decoded_parent_id.startswith("scene-"):
+        return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": 0})
+
+    # 4. Route: Exact UI ID Lookups (Background UI Refreshes)
+    if ids_param:
+        return await _handle_exact_ids(ids_param, parent_id)
+
+    # 5. Route: Standard Library Browsing & Filtering
+    return await _handle_library_browse(
+        request, parent_id, decoded_parent_id, start_index, limit, original_limit,
+        search_term, person_ids, tags_param, studio_ids_param, filters_string, item_types
+    )
 
 async def endpoint_empty_list(request: Request): return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": 0})
 async def endpoint_empty_array(request: Request): return JSONResponse([])
