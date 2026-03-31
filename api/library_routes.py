@@ -216,8 +216,10 @@ async def endpoint_items(request: Request):
         views = await _get_libraries()
         
         for i in ids_param.split(","):
+            clean_i = i.replace("-", "")
+
             # Check if the client is refreshing a Root Library card
-            matching_view = next((v for v in views if v["Id"] == i), None)
+            matching_view = next((v for v in views if v["Id"] == clean_i), None)
             if matching_view:
                 jellyfin_items.append(matching_view)
                 continue
@@ -233,16 +235,16 @@ async def endpoint_items(request: Request):
                 
                 # Dynamically resolve the real names for Sub-Folders!
                 if is_root: 
-                    safe_id = encode_id("root", dec_i.replace("root-", ""))
+                    safe_id = i
                     if dec_i == "root-alltags": item_name = "All Tags"
                 elif dec_i.startswith("tag-"): 
-                    safe_id = encode_id("tag", dec_i.replace("tag-", ""))
+                    safe_id = i
                     raw_id = dec_i.replace("tag-", "")
                     all_tags = await stash_client.get_all_tags()
                     match = next((t for t in all_tags if str(t.get("id")) == raw_id), None)
                     if match: item_name = match.get("name", "Folder")
                 elif dec_i.startswith("filter-"): 
-                    safe_id = encode_id("filter", dec_i.replace("filter-", ""))
+                    safe_id = i
                     raw_id = dec_i.replace("filter-", "")
                     filters = await stash_client.get_saved_filters()
                     match = next((f for f in filters if str(f.get("id")) == raw_id), None)
@@ -496,7 +498,7 @@ async def endpoint_search_hints(request: Request):
 
 async def endpoint_display_preferences(request: Request):
     """Satisfies and persists Jellyfin client UI view settings."""
-    display_id = request.path_params.get("display_id", "default")
+    display_id = request.path_params.get("display_id", "default").replace("-", "")
 
     if request.method == "POST":
         try:
