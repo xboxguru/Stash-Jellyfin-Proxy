@@ -93,6 +93,39 @@ def _get_full_user():
         }
     }
 
+def _build_session_info(fake_user: dict, request_data: dict, server_id: str, client_ip: str) -> dict:
+    """Responsibility: Construct the Jellyfin SessionInfo metadata payload."""
+    return {
+        "PlayState": {
+            "CanSeek": False, "IsPaused": False, "IsMuted": False,
+            "RepeatMode": "RepeatNone", "PlaybackOrder": "Default"
+        },
+        "AdditionalUsers": [],
+        "Capabilities": {
+            "PlayableMediaTypes": [], "SupportedCommands": [],
+            "SupportsMediaControl": False, "SupportsPersistentIdentifier": True
+        },
+        "RemoteEndPoint": client_ip,
+        "PlayableMediaTypes": [],
+        "Id": "00000000000000000000000000000002",
+        "UserId": fake_user["Id"],
+        "UserName": fake_user["Name"],
+        "Client": request_data.get("Client", "Findroid"),
+        "LastActivityDate": "2026-01-01T00:00:00.0000000Z",
+        "LastPlaybackCheckIn": "0001-01-01T00:00:00.0000000Z",
+        "DeviceName": request_data.get("Device", "Device"),
+        "DeviceId": request_data.get("DeviceId", "12345"),
+        "ApplicationVersion": request_data.get("Version", "1.0.0"),
+        "IsActive": True,
+        "SupportsMediaControl": False,
+        "SupportsRemoteControl": False,
+        "NowPlayingQueue": [],
+        "NowPlayingQueueFullItems": [],
+        "HasCustomDeviceName": False,
+        "ServerId": server_id,
+        "SupportedCommands": []
+    }
+
 async def endpoint_public_users(request: Request):
     """Findroid uses this to list users on the login screen. MUST be a simple PublicUserInfo object."""
     valid_jellyfin_id = "00000000-0000-0000-0000-000000000001"
@@ -122,10 +155,8 @@ async def endpoint_users(request: Request):
 
 async def endpoint_authenticate_by_name(request: Request):
     """Authenticates the user and hands the client our Proxy API Key."""
-    try:
-        data = await request.json()
-    except Exception:
-        data = {}
+    try: data = await request.json()
+    except Exception: data = {}
         
     username = data.get("Username") or data.get("username") or ""
     password = data.get("Pw") or data.get("pw") or data.get("Password") or ""
@@ -141,44 +172,12 @@ async def endpoint_authenticate_by_name(request: Request):
             
     fake_user = _get_full_user()
     server_id = getattr(config, "SERVER_ID", "stash-proxy-server-id")
+    client_ip = request.client.host if request.client else "127.0.0.1"
     
+    # Clean, beautiful route handler
     return JSONResponse({
         "User": fake_user,
-        "SessionInfo": {
-            "PlayState": {
-                "CanSeek": False,
-                "IsPaused": False,
-                "IsMuted": False,
-                "RepeatMode": "RepeatNone",
-                "PlaybackOrder": "Default"
-            },
-            "AdditionalUsers": [],
-            "Capabilities": {
-                "PlayableMediaTypes": [],
-                "SupportedCommands": [],
-                "SupportsMediaControl": False,
-                "SupportsPersistentIdentifier": True
-            },
-            "RemoteEndPoint": request.client.host if request.client else "127.0.0.1",
-            "PlayableMediaTypes": [],
-            "Id": "00000000000000000000000000000002",
-            "UserId": fake_user["Id"],
-            "UserName": fake_user["Name"],
-            "Client": data.get("Client", "Findroid"),
-            "LastActivityDate": "2026-01-01T00:00:00.0000000Z",
-            "LastPlaybackCheckIn": "0001-01-01T00:00:00.0000000Z",
-            "DeviceName": data.get("Device", "Device"),
-            "DeviceId": data.get("DeviceId", "12345"),
-            "ApplicationVersion": data.get("Version", "1.0.0"),
-            "IsActive": True,
-            "SupportsMediaControl": False,
-            "SupportsRemoteControl": False,
-            "NowPlayingQueue": [],
-            "NowPlayingQueueFullItems": [],
-            "HasCustomDeviceName": False,
-            "ServerId": server_id,
-            "SupportedCommands": []
-        },
+        "SessionInfo": _build_session_info(fake_user, data, server_id, client_ip),
         "AccessToken": getattr(config, "PROXY_API_KEY", ""),
         "ServerId": server_id
     })

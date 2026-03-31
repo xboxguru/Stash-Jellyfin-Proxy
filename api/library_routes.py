@@ -308,28 +308,37 @@ async def _handle_virtual_folder_contents(decoded_parent_id, start_index, origin
     if original_limit > 0: jellyfin_items = jellyfin_items[start_index : start_index + original_limit]
     return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": total_record_count, "StartIndex": start_index})
 
+def _apply_base_folder_filters(decoded_parent_id: str) -> tuple[dict, bool]:
+    """Responsibility: Translate Jellyfin virtual folder IDs into Stash GraphQL filters."""
+    scene_filter = {}
+    is_folder_override = False
+    
+    if decoded_parent_id:
+        if decoded_parent_id == "root-scenes": 
+            is_folder_override = True
+        elif decoded_parent_id == "root-organized": 
+            scene_filter["organized"], is_folder_override = True, True
+        elif decoded_parent_id == "root-tagged": 
+            scene_filter["tags"], is_folder_override = {"modifier": "NOT_NULL"}, True
+        elif decoded_parent_id == "root-recent":
+            cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=getattr(config, "RECENT_DAYS", 14))).strftime("%Y-%m-%dT%H:%M:%S")
+            scene_filter["created_at"], is_folder_override = {"value": cutoff, "modifier": "GREATER_THAN"}, True
+        elif decoded_parent_id.startswith("tag-"): 
+            scene_filter["tags"], is_folder_override = {"value": [decoded_parent_id.replace("tag-", "")], "modifier": "INCLUDES"}, True
+            
+    return scene_filter, is_folder_override
+
 async def _build_stash_filters(request, decoded_parent_id, limit, search_term, person_ids, tags_param, studio_ids_param, filters_string):
     """Translates Jellyfin sorting and filtering into Stash GraphQL parameters."""
     filter_args = {"sort": "created_at", "direction": "DESC"}
-    scene_filter = {} 
-    is_folder_override = False
+    scene_filter, is_folder_override = _apply_base_folder_filters(decoded_parent_id)
     
     if person_ids:
         raw_p_ids = [re.search(r'\d+', decode_id(p)).group() for p in person_ids.split(",") if re.search(r'\d+', decode_id(p))]
         if raw_p_ids: scene_filter["performers"] = {"value": raw_p_ids, "modifier": "INCLUDES"}
 
     if decoded_parent_id:
-        if decoded_parent_id == "root-scenes": is_folder_override = True
-        elif decoded_parent_id == "root-organized":
-            scene_filter["organized"], is_folder_override = True, True
-        elif decoded_parent_id == "root-tagged":
-            scene_filter["tags"], is_folder_override = {"modifier": "NOT_NULL"}, True
-        elif decoded_parent_id == "root-recent":
-            cutoff_date = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=getattr(config, "RECENT_DAYS", 14))).strftime("%Y-%m-%dT%H:%M:%S")
-            scene_filter["created_at"], is_folder_override = {"value": cutoff_date, "modifier": "GREATER_THAN"}, True
-        elif decoded_parent_id.startswith("tag-"):
-            scene_filter["tags"], is_folder_override = {"value": [decoded_parent_id.replace("tag-", "")], "modifier": "INCLUDES"}, True
-        elif decoded_parent_id.startswith("person-"):
+        if decoded_parent_id.startswith("person-"):
             scene_filter["performers"], is_folder_override = {"value": [decoded_parent_id.replace("person-", "")], "modifier": "INCLUDES"}, True
         elif decoded_parent_id.startswith("studio-"):
             scene_filter["studios"], is_folder_override = {"value": [decoded_parent_id.replace("studio-", "")], "modifier": "INCLUDES"}, True
@@ -475,20 +484,11 @@ async def endpoint_latest(request: Request):
     parent_id = _get_query_param(request, "ParentId")
     decoded_parent_id = decode_id(parent_id) if parent_id else None
     
-    scene_filter, is_folder_override = {}, False
+    scene_filter, is_folder_override = _apply_base_folder_filters(decoded_parent_id)
     
-    if decoded_parent_id:
-        if decoded_parent_id == "root-scenes": is_folder_override = True
-        elif decoded_parent_id == "root-organized": scene_filter["organized"], is_folder_override = True, True
-        elif decoded_parent_id == "root-tagged": scene_filter["tags"], is_folder_override = {"modifier": "NOT_NULL"}, True
-        elif decoded_parent_id == "root-recent":
-            cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=getattr(config, "RECENT_DAYS", 14))).strftime("%Y-%m-%dT%H:%M:%S")
-            scene_filter["created_at"], is_folder_override = {"value": cutoff, "modifier": "GREATER_THAN"}, True
-        elif decoded_parent_id.startswith("tag-"): scene_filter["tags"], is_folder_override = {"value": [decoded_parent_id.replace("tag-", "")], "modifier": "INCLUDES"}, True
-            
     stash_data = await stash_client.fetch_scenes({"sort": "created_at", "direction": "DESC"}, page=1, per_page=16, scene_filter=scene_filter, ignore_sync_level=is_folder_override)
     safe_root = encode_id("root", "scenes")
-    
+
     return JSONResponse([jellyfin_mapper.format_jellyfin_item(scene, parent_id=parent_id or safe_root) for scene in stash_data.get("scenes", [])])
 
 async def endpoint_search_hints(request: Request):
