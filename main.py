@@ -332,53 +332,16 @@ async def run_server():
         discovery_transport = None
         
     shutdown_event = asyncio.Event()
-    
+
     async def watch_for_restart():
-        """Background task that watches for the UI restart flag and safely prunes zombie streams."""
-        import state
+        """Background task that watches for the UI restart flag and triggers stream pruning."""
         while True:
             if ui_routes.RESTART_REQUESTED:
                 logger.info("Restart flag detected. Initiating graceful shutdown...")
                 shutdown_event.set()
                 break
                 
-            current_time = time.time()
-            if hasattr(state, "active_streams"):
-                original_count = len(state.active_streams)
-                surviving_streams = []
-                
-                for s in state.active_streams:
-                    # If it hasn't pinged in 15 minutes (900s), treat it as a crashed client
-                    if current_time - s.get("last_ping", s.get("started", current_time)) >= 900:
-                        item_id = s.get("item_id", "")
-                        if item_id.startswith("scene-"):
-                            raw_id = item_id.replace("scene-", "")
-                            
-                            try:
-                                last_ticks = float(s.get("last_ticks", 0))
-                                runtime_ticks = float(s.get("runtime_ticks", 0))
-                                
-                                # Salvage the resume point or watch state before deleting it from memory!
-                                if runtime_ticks > 0:
-                                    pct = last_ticks / runtime_ticks
-                                    if 0.01 < pct < 0.90:
-                                        resume_seconds = last_ticks / 10000000.0
-                                        logger.info(f"🧟 Salvaging resume point ({resume_seconds}s) for crashed stream {s.get('id')}")
-                                        # UPDATED TO USE STASH_CLIENT:
-                                        asyncio.create_task(stash_client.update_resume_time(raw_id, resume_seconds))
-                                    elif pct >= 0.90:
-                                        logger.info(f"🧟 Salvaging watch status for crashed stream {s.get('id')}")
-                                        # UPDATED TO USE STASH_CLIENT:
-                                        asyncio.create_task(stash_client.increment_play_count(raw_id))
-                            except Exception as e:
-                                logger.error(f"Failed to salvage zombie stream data: {e}")
-                    else:
-                        surviving_streams.append(s)
-                        
-                state.active_streams = surviving_streams
-                if len(state.active_streams) < original_count:
-                    logger.info(f"🧹 Pruned {original_count - len(state.active_streams)} zombie streams from memory.")
-                    
+            await userdata_routes.prune_and_salvage_zombie_streams()
             await asyncio.sleep(60)
 
     watch_task = asyncio.create_task(watch_for_restart())

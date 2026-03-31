@@ -203,3 +203,44 @@ async def endpoint_update_userdata(request: Request):
             is_favorite = (scene.get("rating100") or 0) > 0 if fav_action == "rating" else (scene.get("o_counter") or 0) > 0
 
     return JSONResponse({"PlaybackPositionTicks": resume_ticks, "PlayCount": play_count, "IsFavorite": is_favorite, "Played": played, "Key": raw_item_id, "ItemId": raw_item_id})
+
+async def prune_and_salvage_zombie_streams():
+    """
+    Responsibility: Identify streams that haven't pinged in 15 minutes, 
+    salvage their resume/watch data via Stash GraphQL, and remove them from memory.
+    """
+    if not hasattr(state, "active_streams") or not state.active_streams:
+        return
+
+    current_time = time.time()
+    original_count = len(state.active_streams)
+    surviving_streams = []
+    
+    for s in state.active_streams:
+        if current_time - s.get("last_ping", s.get("started", current_time)) >= 900:
+            item_id = s.get("item_id", "")
+            if item_id.startswith("scene-"):
+                raw_id = item_id.replace("scene-", "")
+                try:
+                    last_ticks = float(s.get("last_ticks", 0))
+                    runtime_ticks = float(s.get("runtime_ticks", 0))
+                    
+                    if runtime_ticks > 0:
+                        should_mark_played, resume_seconds = _evaluate_playback_action(last_ticks, runtime_ticks)
+                        
+                        if should_mark_played:
+                            logger.info(f"🧟 Salvaging watch status for crashed stream {s.get('id')}")
+                            import asyncio
+                            asyncio.create_task(stash_client.increment_play_count(raw_id))
+                        elif resume_seconds > 0:
+                            logger.info(f"🧟 Salvaging resume point ({resume_seconds}s) for crashed stream {s.get('id')}")
+                            import asyncio
+                            asyncio.create_task(stash_client.update_resume_time(raw_id, resume_seconds))
+                except Exception as e:
+                    logger.error(f"Failed to salvage zombie stream data: {e}")
+        else:
+            surviving_streams.append(s)
+            
+    state.active_streams = surviving_streams
+    if len(state.active_streams) < original_count:
+        logger.info(f"🧹 Pruned {original_count - len(state.active_streams)} zombie streams from memory.")

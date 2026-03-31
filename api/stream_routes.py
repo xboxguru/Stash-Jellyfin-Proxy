@@ -63,6 +63,42 @@ async def _rewrite_hls_playlist(stash_base: str, raw_id: str, item_id: str, apik
     return Response(status_code=500)
 # -------------------------
 
+async def _stream_passthrough(url: str, request: Request, is_download: bool = False, download_filename: str = None) -> Response:
+    """Responsibility: Handle the raw byte-streaming pipeline and header translation."""
+    headers = dict(request.headers)
+    headers.pop("host", None)
+    range_header = headers.get("range") or headers.get("Range")
+
+    try:
+        req = stream_client.build_request(request.method, url, headers=headers)
+        r = await stream_client.send(req, stream=True)
+
+        resp_headers = dict(r.headers)
+        for h in ["content-encoding", "transfer-encoding", "connection"]:
+            resp_headers.pop(h, None)
+        
+        if range_header and r.status_code == 206 and "content-range" not in resp_headers:
+            logger.warning(f"Stash returned 206 but missing Content-Range for URL: {url}")
+            
+        if is_download and download_filename:
+            resp_headers["Content-Disposition"] = f'attachment; filename="{download_filename}"'
+        
+        if request.method == "HEAD":
+            await r.aclose()
+            return Response(status_code=r.status_code, headers=resp_headers)
+
+        async def stream_generator():
+            async for chunk in r.aiter_bytes(chunk_size=8192): yield chunk
+            
+        async def cleanup():
+            await r.aclose()
+
+        return StreamingResponse(stream_generator(), status_code=r.status_code, headers=resp_headers, background=BackgroundTask(cleanup))
+
+    except Exception as e:
+        logger.error(f"Stream passthrough failed: {e}")
+        return Response(status_code=500)
+
 async def endpoint_stream(request: Request):
     """Pipes the video stream directly from Stash, supporting DirectPlay and Trojan HLS Playlists."""
     item_id = decode_id(request.path_params.get("item_id", ""))
@@ -105,40 +141,12 @@ async def endpoint_stream(request: Request):
         stash_stream_url += f"{'&' if '?' in stash_stream_url else '?'}apikey={apikey}"
 
     # 4. Stream Passthrough Execution
-    headers = dict(request.headers)
-    headers.pop("host", None)
-    range_header = headers.get("range") or headers.get("Range")
-
-    try:
-        req = stream_client.build_request(request.method, stash_stream_url, headers=headers)
-        r = await stream_client.send(req, stream=True)
-
-        resp_headers = dict(r.headers)
-        resp_headers.pop("content-encoding", None)
-        resp_headers.pop("transfer-encoding", None)
-        resp_headers.pop("connection", None)
-        
-        if range_header and r.status_code == 206 and "content-range" not in resp_headers:
-            logger.warning(f"Stash returned 206 but missing Content-Range for scene {raw_id}")
-            
-        if is_download:
-            resp_headers["Content-Disposition"] = f'attachment; filename="{raw_id}.{download_ext}"'
-        
-        if request.method == "HEAD":
-            await r.aclose()
-            return Response(status_code=r.status_code, headers=resp_headers)
-
-        async def stream_generator():
-            async for chunk in r.aiter_bytes(chunk_size=8192): yield chunk
-            
-        async def cleanup():
-            await r.aclose()
-
-        return StreamingResponse(stream_generator(), status_code=r.status_code, headers=resp_headers, background=BackgroundTask(cleanup))
-
-    except Exception as e:
-        logger.error(f"Stream passthrough failed for scene {raw_id}: {e}")
-        return Response(status_code=500)
+    return await _stream_passthrough(
+        url=stash_stream_url, 
+        request=request, 
+        is_download=is_download, 
+        download_filename=f"{raw_id}.{download_ext}"
+    )
     
 async def endpoint_hls_segment(request: Request):
     """Pipes the individual .ts HLS segments from Stash to the client."""
@@ -151,26 +159,4 @@ async def endpoint_hls_segment(request: Request):
     stash_segment_url = f"{stash_base}/scene/{raw_id}/stream.m3u8/{segment}"
     if apikey: stash_segment_url += f"?apikey={apikey}"
         
-    headers = dict(request.headers)
-    headers.pop("host", None)
-
-    try:
-        req = stream_client.build_request(request.method, stash_segment_url, headers=headers)
-        r = await stream_client.send(req, stream=True)
-
-        resp_headers = dict(r.headers)
-        resp_headers.pop("content-encoding", None)
-        resp_headers.pop("transfer-encoding", None)
-        resp_headers.pop("connection", None)
-        
-        async def stream_generator():
-            async for chunk in r.aiter_bytes(chunk_size=8192): yield chunk
-            
-        async def cleanup():
-            await r.aclose()
-            
-        return StreamingResponse(stream_generator(), status_code=r.status_code, headers=resp_headers, background=BackgroundTask(cleanup))
-
-    except Exception as e:
-        logger.error(f"Stream segment passthrough failed for scene {raw_id} segment {segment}: {e}")
-        return Response(status_code=500)
+    return await _stream_passthrough(stash_segment_url, request)

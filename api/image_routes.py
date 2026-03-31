@@ -15,47 +15,36 @@ async def endpoint_item_image(request: Request):
     Heavily instrumented for debugging Fladder image issues.
     """
     raw_item_id = request.path_params.get("item_id", "")
-    raw_image_type = request.path_params.get("image_type", "Primary")
-    
     item_id = decode_id(raw_item_id)
-    image_type = raw_image_type.lower()
+    image_type = request.path_params.get("image_type", "Primary").lower()
     
     logger.info(f"📸 IMAGE REQUEST DETECTED | Decoded ID: '{item_id}' | Type: '{image_type}'")
 
-    # 1. Handle Scenes (Movies)
-    if item_id.startswith("scene-"):
-        raw_id = item_id.replace("scene-", "")
-        stash_base = config.get_stash_base()
-        apikey = getattr(config, "STASH_API_KEY", "")
-        stash_img_url = f"{stash_base}/scene/{raw_id}/screenshot"
-        if apikey: stash_img_url += f"?apikey={apikey}"
-        return await _proxy_image(stash_img_url)
+    # Map the Proxy ID Prefix -> (Stash Route, Stash Suffix)
+    type_map = {
+        "scene-": ("scene", "screenshot"),
+        "person-": ("performer", "image"),
+        "performer-": ("performer", "image"),
+        "studio-": ("studio", "image")
+    }
 
-    # 2. Handle Performers (Actors)
-    if item_id.startswith("person-") or item_id.startswith("performer-"):
-        raw_id = item_id.replace("person-", "").replace("performer-", "")
-        stash_base = config.get_stash_base()
-        apikey = getattr(config, "STASH_API_KEY", "")
-        stash_img_url = f"{stash_base}/performer/{raw_id}/image"
-        if apikey: stash_img_url += f"?apikey={apikey}"
-        return await _proxy_image(stash_img_url)
+    # 1. Handle Stash Backend Images dynamically
+    for prefix, (stash_route, stash_suffix) in type_map.items():
+        if item_id.startswith(prefix):
+            raw_id = item_id.replace(prefix, "")
+            stash_base = config.get_stash_base()
+            apikey = getattr(config, "STASH_API_KEY", "")
+            
+            stash_img_url = f"{stash_base}/{stash_route}/{raw_id}/{stash_suffix}"
+            if apikey: stash_img_url += f"?apikey={apikey}"
+                
+            return await _proxy_image(stash_img_url)
 
-    # 3. Handle Studios
-    if item_id.startswith("studio-"):
-        raw_id = item_id.replace("studio-", "")
-        stash_base = config.get_stash_base()
-        apikey = getattr(config, "STASH_API_KEY", "")
-        stash_img_url = f"{stash_base}/studio/{raw_id}/image"
-        if apikey: stash_img_url += f"?apikey={apikey}"
-        return await _proxy_image(stash_img_url)
-
-    # 4. Handle Root Libraries & Tags (Fallback to Logo)
-    if item_id.startswith("root-") or item_id.startswith("tag-") or item_id.startswith("filter-") or item_id == raw_item_id:
+    # 2. Handle Root Libraries & Tags (Fallback to Logo)
+    if any(item_id.startswith(p) for p in ["root-", "tag-", "filter-"]) or item_id == raw_item_id:
         logo_path = os.path.join(os.getcwd(), "logo.png")
         if os.path.exists(logo_path):
             return FileResponse(logo_path, media_type="image/png")
-        else:
-            return Response(status_code=404)
 
     logger.warning(f"⚠️ UNHANDLED IMAGE REQUEST: {item_id} | Returning 404")
     return Response(status_code=404)
