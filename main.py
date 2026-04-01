@@ -318,11 +318,15 @@ def main():
         time.sleep(1) 
         try: 
             logging.shutdown()
-            subprocess.Popen([sys.executable] + sys.argv, env=os.environ)
+            
+            script_path = os.path.abspath(__file__)
+            args = [sys.executable, script_path] + sys.argv[1:]
+            
+            os.execv(sys.executable, args)
+            
         except Exception as e:
             print(f"Failed to execute restart: {e}")
-        finally:
-            os._exit(0)
+            os._exit(1)
 
 if __name__ == "__main__":
     main()
