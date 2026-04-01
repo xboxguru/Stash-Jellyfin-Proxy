@@ -9,18 +9,20 @@ from core.jellyfin_mapper import decode_id
 
 logger = logging.getLogger(__name__)
 
+# --- THE FIX: Global Connection Pool for Images ---
+image_client = httpx.AsyncClient(
+    verify=getattr(config, "STASH_VERIFY_TLS", False), 
+    timeout=10.0, 
+    limits=httpx.Limits(max_keepalive_connections=50, max_connections=100)
+)
+
 async def endpoint_item_image(request: Request):
-    """
-    Handles all image requests (Primary, Backdrop, Logo, Thumb).
-    Heavily instrumented for debugging Fladder image issues.
-    """
     raw_item_id = request.path_params.get("item_id", "")
     item_id = decode_id(raw_item_id)
     image_type = request.path_params.get("image_type", "Primary").lower()
     
-    logger.info(f"📸 IMAGE REQUEST DETECTED | Decoded ID: '{item_id}' | Type: '{image_type}'")
+    logger.debug(f"📸 IMAGE REQUEST | Decoded ID: '{item_id}' | Type: '{image_type}'")
 
-    # Map the Proxy ID Prefix -> (Stash Route, Stash Suffix)
     type_map = {
         "scene-": ("scene", "screenshot"),
         "person-": ("performer", "image"),
@@ -28,7 +30,6 @@ async def endpoint_item_image(request: Request):
         "studio-": ("studio", "image")
     }
 
-    # 1. Handle Stash Backend Images dynamically
     for prefix, (stash_route, stash_suffix) in type_map.items():
         if item_id.startswith(prefix):
             raw_id = item_id.replace(prefix, "")
@@ -40,21 +41,18 @@ async def endpoint_item_image(request: Request):
                 
             return await _proxy_image(stash_img_url)
 
-    # 2. Handle Root Libraries & Tags (Fallback to Logo)
     if any(item_id.startswith(p) for p in ["root-", "tag-", "filter-"]) or item_id == raw_item_id:
         logo_path = os.path.join(os.getcwd(), "logo.png")
         if os.path.exists(logo_path):
             return FileResponse(logo_path, media_type="image/png")
 
-    logger.warning(f"⚠️ UNHANDLED IMAGE REQUEST: {item_id} | Returning 404")
     return Response(status_code=404)
 
 async def _proxy_image(url: str):
-    """Helper function to stream the image from Stash without hoarding RAM."""
-    client = httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False))
+    """Streams the image using the shared, persistent HTTP client pool."""
     try:
-        req = client.build_request("GET", url)
-        r = await client.send(req, stream=True)
+        req = image_client.build_request("GET", url)
+        r = await image_client.send(req, stream=True)
         
         if r.status_code == 200:
             content_type = r.headers.get("content-type", "image/jpeg")
@@ -65,22 +63,17 @@ async def _proxy_image(url: str):
                     
             async def cleanup():
                 await r.aclose()
-                await client.aclose()
 
             return StreamingResponse(stream_generator(), media_type=content_type, background=BackgroundTask(cleanup))
         else:
-            logger.error(f"❌ STASH RETURNED HTTP {r.status_code} for URL: {url}")
             await r.aclose()
-            await client.aclose()
             
     except Exception as e:
         logger.error(f"❌ FAILED TO FETCH IMAGE FROM STASH: {e}")
-        await client.aclose()
         
     return Response(status_code=404)
 
 async def endpoint_trickplay_image(request: Request):
-    """Intercepts trickplay requests and securely fetches the sprite via GraphQL."""
     item_id = request.path_params.get("item_id", "")
     file_name = request.path_params.get("file_name", "").lower()
     decoded_id = decode_id(item_id)
@@ -101,19 +94,17 @@ async def endpoint_trickplay_image(request: Request):
         
         url = f"{stash_base}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
-        if getattr(config, "STASH_API_KEY", ""):
-            headers["ApiKey"] = config.STASH_API_KEY
+        if getattr(config, "STASH_API_KEY", ""): headers["ApiKey"] = config.STASH_API_KEY
             
         query = """query($id: ID!) { findScene(id: $id) { paths { sprite } } }"""
         
         stash_sprite_url = None
-        async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
-            try:
-                resp = await client.post(url, headers=headers, json={"query": query, "variables": {"id": raw_id}}, timeout=5.0)
-                data = resp.json()
-                stash_sprite_url = data.get("data", {}).get("findScene", {}).get("paths", {}).get("sprite")
-            except Exception as e:
-                logger.error(f"⚠️ Failed to query GraphQL for sprite URL: {e}")
+        try:
+            resp = await image_client.post(url, headers=headers, json={"query": query, "variables": {"id": raw_id}})
+            data = resp.json()
+            stash_sprite_url = data.get("data", {}).get("findScene", {}).get("paths", {}).get("sprite")
+        except Exception as e:
+            logger.error(f"⚠️ Failed to query GraphQL for sprite URL: {e}")
 
         if stash_sprite_url:
             if stash_sprite_url.startswith("/"):

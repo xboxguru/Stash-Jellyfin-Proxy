@@ -1,16 +1,13 @@
 import logging
 import datetime
 import re
-import hashlib
 from starlette.responses import JSONResponse, Response
 from starlette.requests import Request
 import config
 from core import stash_client, jellyfin_mapper
-from core.jellyfin_mapper import encode_id, decode_id
+from core.jellyfin_mapper import encode_id, decode_id, build_folder, generate_image_tag
 
 logger = logging.getLogger(__name__)
-
-# --- REFACTORED metadata_routes.py (Partial) ---
 
 async def _build_nav_folder_metadata(decoded_id: str, item_id: str, server_id: str, cache_version: int) -> dict:
     """Responsibility: Construct Jellyfin metadata dictionaries for purely virtual proxy folders."""
@@ -41,41 +38,29 @@ async def _build_nav_folder_metadata(decoded_id: str, item_id: str, server_id: s
         match = next((f for f in filters if str(f.get("id")) == raw_id), None)
         if match: item_name = match.get("name", "Folder")
     
-    logo_hash = hashlib.md5(f"stash-logo-{cache_version}".encode()).hexdigest()
     is_collection = is_root and not is_nav_folder
     
-    response_dict = {
-        "Name": item_name, "SortName": item_name, "Id": item_id, "DisplayPreferencesId": item_id,
-        "ServerId": server_id, "Type": "CollectionFolder" if is_collection else "Folder", 
-        "IsFolder": True, "PrimaryImageAspectRatio": 1.7777777777777777,
-        "ImageTags": {"Primary": logo_hash, "Thumb": logo_hash},
-        "HasPrimaryImage": True, "HasThumb": True, "HasBackdrop": True, "BackdropImageTags": [logo_hash]
-    }
-    if is_collection: response_dict["CollectionType"] = "movies"
-    return response_dict
+    # Delegated layout to central mapper!
+    return build_folder(item_name, item_id, server_id, cache_version, is_collection)
 
 async def endpoint_item_details(request: Request):
-    """Responsibility: Delegate metadata requests to the correct data builder."""
     item_id = request.path_params.get("item_id", "")
     decoded_id = decode_id(item_id)
     server_id = getattr(config, "SERVER_ID", "stash-proxy")
     cache_version = getattr(config, "CACHE_VERSION", 0)
     
-    # 1. Handle Navigation Folders
     if "root-" in decoded_id or "tag-" in decoded_id or "filter-" in decoded_id:
         return JSONResponse(await _build_nav_folder_metadata(decoded_id, item_id, server_id, cache_version))
 
-    # 2. Handle Studios
     if decoded_id.startswith("studio-"):
         safe_id = encode_id("studio", decoded_id.replace("studio-", ""))
         return JSONResponse({"Name": "Studio", "SortName": "Studio", "Id": safe_id, "ServerId": server_id, "Type": "Studio", "IsFolder": False})
 
-    # 3. Handle Performers
     if decoded_id.startswith("person-"):
         raw_id = decoded_id.replace("person-", "")
         perf = await stash_client.get_performer(raw_id)
         if perf:
-            p_tag = hashlib.md5(f"person-{raw_id}-v{cache_version}".encode()).hexdigest()
+            p_tag = generate_image_tag("person", raw_id, cache_version)
             perf_name = perf.get("name", "Unknown Person")
             return JSONResponse({
                 "Name": perf_name, "SortName": perf_name, "Id": item_id, "ServerId": server_id, "Type": "Person", "IsFolder": False,
@@ -85,28 +70,20 @@ async def endpoint_item_details(request: Request):
             })
         return JSONResponse({"Name": "Person", "SortName": "Person", "Id": item_id, "ServerId": server_id, "Type": "Person", "IsFolder": False})
         
-    # 4. Handle Scenes
     number_match = re.search(r'\d+', decoded_id)
     if not number_match: return JSONResponse({"error": f"Invalid ID format: {decoded_id}"}, status_code=400)
         
     scene = await stash_client.get_scene(number_match.group())
     if scene: return JSONResponse(jellyfin_mapper.format_jellyfin_item(scene))
-    
     return JSONResponse({"error": "Item not found"}, status_code=404)
 
 async def endpoint_tags(request: Request):
-    """Provides a list of all Stash tags formatted as Jellyfin Genres/Tags, with search filtering."""
     item_type = "Genre" if "genre" in request.url.path.lower() else "Tag"
     server_id = getattr(config, "SERVER_ID", "stash-proxy")
-    
-    # Extract search term safely (case-insensitive key check)
     search_term = next((v.lower() for k, v in request.query_params.items() if k.lower() == "searchterm"), "")
     
     stash_tags = await stash_client.get_all_tags()
-    
-    # Filter tags by search term if one was typed in
-    if search_term:
-        stash_tags = [t for t in stash_tags if search_term in t.get("name", "").lower()]
+    if search_term: stash_tags = [t for t in stash_tags if search_term in t.get("name", "").lower()]
     
     jelly_tags = [{"Name": t.get("name"), "Id": encode_id("tag", str(t.get('id'))), "Type": item_type, "ServerId": server_id, "IsFolder": False} for t in stash_tags]
     return JSONResponse({"Items": jelly_tags, "TotalRecordCount": len(jelly_tags), "StartIndex": 0})
@@ -124,32 +101,19 @@ async def endpoint_studios(request: Request):
     
     jelly_studios = [{
         "Name": s.get("name"), "Id": encode_id("studio", str(s.get('id'))), "Type": "Studio", "ServerId": server_id, "IsFolder": False, 
-        "ImageTags": {"Primary": hashlib.md5(f"studio-{s.get('id')}-v{cache_version}".encode()).hexdigest()}, "HasPrimaryImage": bool(s.get("image_path"))
+        "ImageTags": {"Primary": generate_image_tag("studio", str(s.get('id')), cache_version)}, "HasPrimaryImage": bool(s.get("image_path"))
     } for s in studios]
     return JSONResponse({"Items": jelly_studios, "TotalRecordCount": len(jelly_studios), "StartIndex": 0})
 
 async def endpoint_delete_item(request: Request):
-    """Intercepts Jellyfin delete requests and safely executes them in Stash."""
     decoded_id = decode_id(request.path_params.get("item_id", ""))
     deletion_mode = getattr(config, "ALLOW_CLIENT_DELETION", "Disabled").lower()
     
-    if deletion_mode == "disabled":
-        logger.warning(f"🚫 Deletion attempted for {decoded_id}, but it is disabled in the proxy config.")
-        return Response(status_code=403)
+    if deletion_mode == "disabled": return Response(status_code=403)
     
     if decoded_id.startswith("scene-"):
         raw_id = decoded_id.replace("scene-", "")
-        nuke_file = (deletion_mode == "delete")
-        
-        logger.info(f"🗑️ DELETE REQUEST: {'NUKING' if nuke_file else 'REMOVING'} Scene {raw_id}...")
-        success = await stash_client.destroy_scene(raw_id, delete_file=nuke_file)
-        
-        if success:
-            logger.info(f"✅ SUCCESS: Scene {raw_id} successfully deleted!")
-            return Response(status_code=204)
-        else:
-            logger.error(f"❌ STASH DELETION ERROR: Failed to destroy scene {raw_id}")
-            return Response(status_code=500)
+        success = await stash_client.destroy_scene(raw_id, delete_file=(deletion_mode == "delete"))
+        return Response(status_code=204 if success else 500)
 
-    logger.warning(f"🚫 Denied deletion request for non-scene item: {decoded_id}")
     return Response(status_code=403)

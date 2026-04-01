@@ -33,48 +33,18 @@ async def serve_index(request: Request):
         return HTMLResponse(f"<h1>Error loading UI</h1><p>{e}</p>", status_code=500)
 
 async def api_get_config(request: Request):
-    """Exposes all configuration and state data to the Web UI."""
-    config_data = {
-        "STASH_URL": getattr(config, "STASH_URL", ""),
-        "STASH_API_KEY": getattr(config, "STASH_API_KEY", ""),
-        "PROXY_API_KEY": getattr(config, "PROXY_API_KEY", ""),
-        "PROXY_BIND": getattr(config, "PROXY_BIND", "0.0.0.0"),
-        "HOST_IP": getattr(config, "HOST_IP", ""),
-        "PROXY_PORT": getattr(config, "PROXY_PORT", 8096),
-        "UI_PORT": getattr(config, "UI_PORT", 8097),
-        "SJS_USER": getattr(config, "SJS_USER", ""),
-        "SJS_PASSWORD": getattr(config, "SJS_PASSWORD", ""),
-        "REQUIRE_AUTH_FOR_CONFIG": getattr(config, "REQUIRE_AUTH_FOR_CONFIG", False),
-        "SERVER_NAME": getattr(config, "SERVER_NAME", "Stash Media Server"),
-        "SERVER_ID": getattr(config, "SERVER_ID", ""),
-        "RECENT_DAYS": getattr(config, "RECENT_DAYS", 14),
-        "FAVORITE_ACTION": getattr(config, "FAVORITE_ACTION", "o_counter"),
-        "ALLOW_CLIENT_DELETION": getattr(config, "ALLOW_CLIENT_DELETION", "Disabled"),
-        "ENABLE_FILTERS": getattr(config, "ENABLE_FILTERS", True),
-        "ENABLE_TAG_FILTERS": getattr(config, "ENABLE_TAG_FILTERS", False),
-        "ENABLE_ALL_TAGS": getattr(config, "ENABLE_ALL_TAGS", False),
-        "STASH_VERIFY_TLS": getattr(config, "STASH_VERIFY_TLS", False),
-        "CACHE_VERSION": getattr(config, "CACHE_VERSION", 0),
-        "TAG_GROUPS": getattr(config, "TAG_GROUPS", []),
-        "LATEST_GROUPS": getattr(config, "LATEST_GROUPS", ["Scenes"]),
-        "SYNC_LEVEL": getattr(config, "SYNC_LEVEL", "Everything"),
-        "STASH_GRAPHQL_PATH": getattr(config, "STASH_GRAPHQL_PATH", "/graphql"),
-        "STASH_TIMEOUT": getattr(config, "STASH_TIMEOUT", 30),
-        "STASH_RETRIES": getattr(config, "STASH_RETRIES", 3),
-        "DEFAULT_PAGE_SIZE": getattr(config, "DEFAULT_PAGE_SIZE", 50),
-        "MAX_PAGE_SIZE": getattr(config, "MAX_PAGE_SIZE", 200),
-        "LOG_LEVEL": getattr(config, "LOG_LEVEL", "INFO"),
-        "LOG_DIR": getattr(config, "LOG_DIR", "/config"),
-        "LOG_FILE": getattr(config, "LOG_FILE", "stash_jellyfin_proxy.log"),
-        "LOG_MAX_SIZE_MB": getattr(config, "LOG_MAX_SIZE_MB", 10),
-        "LOG_BACKUP_COUNT": getattr(config, "LOG_BACKUP_COUNT", 3),
-        "BAN_THRESHOLD": getattr(config, "BAN_THRESHOLD", 10),
-        "BAN_WINDOW_MINUTES": getattr(config, "BAN_WINDOW_MINUTES", 15),
-        "BANNED_IPS": list(getattr(config, "BANNED_IPS", set())),
-        "AUTHENTICATED_IPS": list(getattr(state, "authenticated_ips", set())),
-        "AUTH_IP_TIMEOUT_MINUTES": getattr(config, "AUTH_IP_TIMEOUT_MINUTES", 60),
-        "TOP_PLAYED_RETENTION_DAYS": getattr(config, "TOP_PLAYED_RETENTION_DAYS", 0),
-    }
+    """Exposes all configuration and state data to the Web UI dynamically."""
+    
+    # 1. Dynamically grab all uppercase configuration constants
+    config_data = {k: getattr(config, k) for k in dir(config) if k.isupper() and not k.startswith("_")}
+    
+    # 2. Serialize sets into lists for JSON compatibility
+    for k, v in config_data.items():
+        if isinstance(v, set):
+            config_data[k] = list(v)
+            
+    # 3. Inject the dynamic state variables
+    config_data["AUTHENTICATED_IPS"] = list(getattr(state, "authenticated_ips", set()))
     
     return JSONResponse({
         "config": config_data,
