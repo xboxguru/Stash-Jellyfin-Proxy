@@ -26,6 +26,7 @@ PUBLIC_ENDPOINTS = {
 PUBLIC_PREFIXES = ["/web/", "/assets/", "/api/"]
 
 def get_client_ip(scope) -> str:
+    """Extract client IP safely, accounting for reverse proxies."""
     for name, value in scope.get("headers", []):
         if name.decode("latin1").lower() == "x-forwarded-for":
             return value.decode("latin1").split(",")[0].strip()
