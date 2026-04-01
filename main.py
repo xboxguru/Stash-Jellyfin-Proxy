@@ -96,6 +96,7 @@ routes = [
     Route("/api/auth/check", ui_routes.api_auth_check, methods=["GET"]),
     Route("/api/auth/login", ui_routes.api_login, methods=["POST"]),
     Route("/api/auth/logout", ui_routes.api_logout, methods=["POST"]),
+    Route("/api/auth/dynamic_ips/{ip}", ui_routes.api_prune_dynamic_ip, methods=["DELETE"]),
     Route("/api/cache/increment", ui_routes.api_increment_cache_version, methods=["POST"]),
     Route("/api/stats/top_played", ui_routes.api_clear_top_played, methods=["DELETE"]),
     Route("/api/stats/top_played/{item_id}", ui_routes.api_remove_top_played_item, methods=["DELETE"]),

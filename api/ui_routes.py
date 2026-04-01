@@ -1,6 +1,6 @@
 import os
 import logging
-import datetime
+import datetime, time
 import secrets
 from starlette.responses import JSONResponse, HTMLResponse, PlainTextResponse
 from starlette.requests import Request
@@ -34,23 +34,38 @@ async def serve_index(request: Request):
 
 async def api_get_config(request: Request):
     """Exposes all configuration and state data to the Web UI dynamically."""
-    
-    # 1. Dynamically grab all uppercase configuration constants
     config_data = {k: getattr(config, k) for k in dir(config) if k.isupper() and not k.startswith("_")}
     
-    # 2. Serialize sets into lists for JSON compatibility
     for k, v in config_data.items():
         if isinstance(v, set):
             config_data[k] = list(v)
             
-    # 3. Inject the dynamic state variables
-    config_data["AUTHENTICATED_IPS"] = list(getattr(state, "authenticated_ips", set()))
+    # Safely fetch the dynamic auto-whitelist
+    raw_dynamic = getattr(state, "authenticated_ips", {})
+    if isinstance(raw_dynamic, set): 
+        raw_dynamic = {ip: time.time() for ip in raw_dynamic}
+        
+    # --- THE FIX: Filter out statically configured IPs ---
+    static_ips = getattr(config, "AUTHENTICATED_IPS", [])
+    dynamic_ips = {ip: ts for ip, ts in raw_dynamic.items() if ip not in static_ips}
+    # -----------------------------------------------------
     
     return JSONResponse({
         "config": config_data,
+        "dynamic_ips": dynamic_ips,
         "env_fields": getattr(config, "env_overrides", []),
         "defined_fields": list(getattr(config, "config_defined_keys", set()))
     })
+
+async def api_prune_dynamic_ip(request: Request):
+    """Allows the UI to manually revoke an auto-whitelisted IP."""
+    ip_to_prune = request.path_params.get("ip")
+    if hasattr(state, "authenticated_ips") and isinstance(state.authenticated_ips, dict):
+        if ip_to_prune in state.authenticated_ips:
+            del state.authenticated_ips[ip_to_prune]
+            if hasattr(state, "save_auth_ips"):
+                state.save_auth_ips(state.authenticated_ips)
+    return JSONResponse({"status": "success"})
 
 async def api_post_config(request: Request):
     """Saves settings sent from the UI to memory and persistent storage."""
@@ -64,10 +79,18 @@ async def api_post_config(request: Request):
         # 2. Apply settings to memory and specific persistent files
         for key, value in data.items():
             if key == "AUTHENTICATED_IPS":
-                # Handle the trusted IP JSON storage
-                new_ips = set(value) if isinstance(value, list) else set()
-                state.authenticated_ips = new_ips
-                state.save_auth_ips(new_ips)
+                # --- THE FIX: Store as a dictionary to track timeouts properly ---
+                current_auth = getattr(state, "authenticated_ips", {})
+                if isinstance(current_auth, set):
+                    current_auth = {ip: time.time() for ip in current_auth}
+                
+                new_ips_dict = {}
+                for ip in (value if isinstance(value, list) else []):
+                    new_ips_dict[ip] = current_auth.get(ip, time.time())
+                
+                state.authenticated_ips = new_ips_dict
+                state.save_auth_ips(new_ips_dict)
+                # ---------------------------------------------------------------
             else:
                 setattr(config, key, value)
             

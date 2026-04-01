@@ -64,19 +64,28 @@ class AuthenticationMiddleware:
         if "/images/" not in path_lower and "/videos/" not in path_lower:
             return False
             
+        # 1. Check permanent static config first (Your UI Text Box)
+        static_ips = getattr(config, "AUTHENTICATED_IPS", [])
+        if client_ip in static_ips:
+            return True
+            
+        # 2. Check dynamic state (Temporary API tokens)
         auth_ips = getattr(state, "authenticated_ips", {})
         if isinstance(auth_ips, set): 
             auth_ips = {ip: time.time() for ip in auth_ips}
+            state.authenticated_ips = auth_ips
         
         if client_ip in auth_ips:
-            state.authenticated_ips[client_ip] = time.time()
+            state.authenticated_ips[client_ip] = time.time() # Refresh the timer
             return True
             
+        all_allowed = set(auth_ips.keys()).union(set(static_ips))
         for key, value in scope.get("headers", []):
             if key.decode("latin1").lower() in ["referer", "origin"]:
                 header_val = value.decode("utf-8", errors="ignore")
-                if any(re.search(rf"\b{re.escape(auth_ip)}\b", header_val) for auth_ip in auth_ips.keys()):
+                if any(re.search(rf"\b{re.escape(ip)}\b", header_val) for ip in all_allowed):
                     return True
+                    
         return False
 
     async def __call__(self, scope, receive, send):
@@ -121,9 +130,11 @@ class AuthenticationMiddleware:
         if token and token == expected_key:
             state.stats["auth_success"] += 1
             state.stats["unique_ips_today"].add(client_ip)
-            if not hasattr(state, "authenticated_ips") or isinstance(state.authenticated_ips, set):
-                state.authenticated_ips = {}
-            state.authenticated_ips[client_ip] = time.time()
+            static_ips = getattr(config, "AUTHENTICATED_IPS", [])
+            if client_ip not in static_ips:
+                if not hasattr(state, "authenticated_ips") or isinstance(state.authenticated_ips, set):
+                    state.authenticated_ips = {}
+                state.authenticated_ips[client_ip] = time.time()
             return await self.app(scope, receive, send)
 
         state.stats["auth_failed"] += 1
