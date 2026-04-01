@@ -78,20 +78,6 @@ async def api_post_config(request: Request):
         
         # 2. Apply settings to memory and specific persistent files
         for key, value in data.items():
-            if key == "AUTHENTICATED_IPS":
-                # --- THE FIX: Store as a dictionary to track timeouts properly ---
-                current_auth = getattr(state, "authenticated_ips", {})
-                if isinstance(current_auth, set):
-                    current_auth = {ip: time.time() for ip in current_auth}
-                
-                new_ips_dict = {}
-                for ip in (value if isinstance(value, list) else []):
-                    new_ips_dict[ip] = current_auth.get(ip, time.time())
-                
-                state.authenticated_ips = new_ips_dict
-                state.save_auth_ips(new_ips_dict)
-                # ---------------------------------------------------------------
-            else:
                 setattr(config, key, value)
             
         # 3. Save standard config to .conf

@@ -831,6 +831,49 @@
                 if (document.getElementById('current-cache-version')) document.getElementById('current-cache-version').innerText = 'v' + (config.CACHE_VERSION || 0);
             } catch (e) {}
         }
+        
+        async function refreshDynamicConfigUI() {
+            try {
+                // Fetch the RAM state without triggering full form rebuilds
+                const res = await fetch('/api/config');
+                const data = await res.json();
+                const config = data.config || data;
+
+                // 1. Update Banned IPs (Only if you aren't currently typing in it)
+                const bannedInput = document.querySelector('[name="BANNED_IPS"]');
+                if (bannedInput && document.activeElement !== bannedInput) {
+                    const valStr = Array.isArray(config.BANNED_IPS) ? config.BANNED_IPS.join(', ') : (config.BANNED_IPS || '');
+                    if (bannedInput.value !== valStr) {
+                        bannedInput.value = valStr;
+                    }
+                }
+
+                // 2. Update Dynamic IPs list
+                const dynList = document.getElementById('dynamic-ips-list');
+                if (dynList) {
+                    const dynIps = data.dynamic_ips || {};
+                    if (Object.keys(dynIps).length === 0) {
+                        dynList.style.display = 'block';
+                        dynList.innerHTML = '<span style="color: var(--text-secondary);">No active dynamic IPs</span>';
+                    } else {
+                        const timeoutMins = config.AUTH_IP_TIMEOUT_MINUTES || 60;
+                        dynList.style.display = 'flex';
+                        dynList.style.flexWrap = 'wrap';
+                        dynList.style.gap = '8px';
+                        
+                        dynList.innerHTML = Object.entries(dynIps).map(([ip, ts]) => {
+                            const minutesLeft = Math.max(0, Math.round((timeoutMins * 60 - (Date.now() / 1000 - ts)) / 60));
+                            return `<div style="display: inline-flex; align-items: center; background: rgba(255,255,255,0.08); border: 1px solid var(--border); border-radius: 16px; padding: 2px 8px 2px 10px; font-size: 13px;">
+                                <span>${ip} <span style="color:var(--text-secondary); font-size:11px; margin-left: 2px;">(~${minutesLeft}m)</span></span>
+                                <button type="button" onclick="pruneDynamicIp('${ip}')" style="background:none; border:none; color:var(--text-secondary); cursor:pointer; font-size: 12px; margin-left: 8px; padding: 2px; display: flex; align-items: center; justify-content: center; transition: color 0.2s;" onmouseover="this.style.color='var(--error)'" onmouseout="this.style.color='var(--text-secondary)'" title="Remove IP">✕</button>
+                            </div>`;
+                        }).join('');
+                    }
+                }
+            } catch (e) {
+                // Fail silently on background polls
+            }
+        }
 
         async function pruneDynamicIp(ip) {
             try {
@@ -951,6 +994,8 @@
                             await Promise.all([fetchStatus(), fetchStreams(), fetchLogs(), fetchStats()]);
                         } else if (state.currentPage === 'logs') {
                             await fetchLogs();
+                        } else if (state.currentPage === 'config') {
+                            await refreshDynamicConfigUI(); // <-- THE FIX: Use the targeted refresh
                         }
                     } finally {
                         isPolling = false;
