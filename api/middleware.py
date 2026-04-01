@@ -4,11 +4,9 @@ import logging
 import time 
 import config
 import state
-import re
 
 logger = logging.getLogger(__name__)
 
-# Endpoints that do not require the PROXY_API_KEY
 PUBLIC_ENDPOINTS = {
     "/",
     "/system/info/public", 
@@ -28,14 +26,11 @@ PUBLIC_ENDPOINTS = {
 PUBLIC_PREFIXES = ["/web/", "/assets/", "/api/"]
 
 def get_client_ip(scope) -> str:
-    """Extract client IP safely, accounting for reverse proxies."""
     for name, value in scope.get("headers", []):
         if name.decode("latin1").lower() == "x-forwarded-for":
             return value.decode("latin1").split(",")[0].strip()
     client = scope.get("client")
     return client[0] if client else "127.0.0.1"
-
-# --- REFACTORED middleware.py (Class definition) ---
 
 class AuthenticationMiddleware:
     """ASGI middleware that validates PROXY_API_KEY on protected endpoints."""
@@ -44,15 +39,12 @@ class AuthenticationMiddleware:
         self.app = app
 
     def _extract_jellyfin_token(self, scope) -> str | None:
-        """Responsibility: Hunt for the Jellyfin Auth token in queries and headers."""
-        # Check URL query string first
         query_bytes = scope.get("query_string", b"")
         if query_bytes:
             parsed_query = {k.lower(): v for k, v in urllib.parse.parse_qs(query_bytes.decode("utf-8")).items()}
             token = parsed_query.get("api_key", [None])[0] or parsed_query.get("token", [None])[0]
             if token: return token.strip('"').strip("'").strip()
 
-        # Check headers
         for key, value in scope.get("headers", []):
             key_lower = key.decode().lower()
             value_str = value.decode("utf-8", errors="ignore")
@@ -68,12 +60,12 @@ class AuthenticationMiddleware:
         return None
 
     def _is_image_or_video_authorized(self, path_lower: str, client_ip: str, scope) -> bool:
-        """Responsibility: Validate if an unauthenticated client can load an image based on recent IP auth."""
         if "/images/" not in path_lower and "/videos/" not in path_lower:
             return False
             
         auth_ips = getattr(state, "authenticated_ips", {})
-        if isinstance(auth_ips, set): auth_ips = {ip: time.time() for ip in auth_ips}
+        if isinstance(auth_ips, set): 
+            auth_ips = {ip: time.time() for ip in auth_ips}
         
         if client_ip in auth_ips:
             state.authenticated_ips[client_ip] = time.time()
@@ -101,30 +93,27 @@ class AuthenticationMiddleware:
         if method == "OPTIONS":
             return await self.app(scope, receive, send)
 
-        # 1. STRIP PREFIXES
         if path_lower.startswith("/emby/"): scope["path"] = path_lower[5:]
         elif path_lower == "/emby": scope["path"] = "/"
         elif path_lower.startswith("/jellyfin/"): scope["path"] = path_lower[9:]
         elif path_lower == "/jellyfin": scope["path"] = "/"
         path_lower = scope["path"]
 
-        # 2. CHECK PUBLIC ROUTE ALLOWANCES
         is_public = path_lower in PUBLIC_ENDPOINTS or any(path_lower.startswith(p) for p in PUBLIC_PREFIXES)
         
         if not is_public and self._is_image_or_video_authorized(path_lower, client_ip, scope):
             is_public = True
 
         if is_public:
-            # UI SECURITY CHECK
             is_ui_api = path_lower.startswith("/api/")
             if is_ui_api and path_lower not in {"/api/login", "/api/logout"} and getattr(config, "REQUIRE_AUTH_FOR_CONFIG", False):
                 token = next((v.decode().split("ui_session=")[1].split(";")[0] for k, v in scope.get("headers", []) if k.decode().lower() == "cookie" and "ui_session=" in v.decode()), None)
                 if not token or token not in getattr(state, "ui_sessions", set()):
+                    logger.warning(f"Unauthorized Web UI access attempt from {client_ip}")
                     await self._send_unauthorized(send)
                     return
             return await self.app(scope, receive, send)
 
-        # 3. JELLYFIN API AUTHENTICATION
         token = self._extract_jellyfin_token(scope)
         expected_key = getattr(config, "PROXY_API_KEY", "").strip()
         
@@ -136,12 +125,15 @@ class AuthenticationMiddleware:
             state.authenticated_ips[client_ip] = time.time()
             return await self.app(scope, receive, send)
 
-        # 4. REJECT
         state.stats["auth_failed"] += 1
-        logger.warning(f"🚫 Unauthorized access attempt to {original_path} from {client_ip}")
+        logger.warning(f"Unauthorized access attempt to {original_path} from {client_ip}")
         await self._send_unauthorized(send)
 
     async def _send_unauthorized(self, send):
         response_body = b'{"error": "Unauthorized"}'
-        await send({"type": "http.response.start", "status": 401, "headers": [[b"content-type", b"application/json"], [b"content-length", str(len(response_body)).encode()]]})
+        await send({
+            "type": "http.response.start", 
+            "status": 401, 
+            "headers": [[b"content-type", b"application/json"], [b"content-length", str(len(response_body)).encode()]]
+        })
         await send({"type": "http.response.body", "body": response_body})
