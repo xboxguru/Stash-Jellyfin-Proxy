@@ -8,7 +8,6 @@ import time
 logger = logging.getLogger(__name__)
 
 def _get_full_user():
-    """Generates a strictly-typed UserDto matched to a real Jellyfin Server response."""
     valid_jellyfin_id = "00000000-0000-0000-0000-000000000001"
     server_id = getattr(config, "SERVER_ID", "stash-proxy-server-id")
     expected_user = str(getattr(config, "SJS_USER", "admin")).strip() or "admin"
@@ -60,14 +59,10 @@ def _get_full_user():
             "EnableRemoteAccess": True,
             "EnableLiveTvManagement": False,
             "EnableLiveTvAccess": False,
-            
-            # --- THE FIX: Tell strict clients they are allowed to use Transcodes! ---
             "EnableMediaPlayback": True,
             "EnableAudioPlaybackTranscoding": True,
             "EnableVideoPlaybackTranscoding": True,
             "EnablePlaybackRemuxing": True,
-            # ------------------------------------------------------------------------
-            
             "ForceRemoteSourceTranscoding": False,
             "EnableContentDeletion": False,
             "EnableContentDeletionFromFolders": [],
@@ -94,7 +89,6 @@ def _get_full_user():
     }
 
 def _build_session_info(fake_user: dict, request_data: dict, server_id: str, client_ip: str) -> dict:
-    """Responsibility: Construct the Jellyfin SessionInfo metadata payload."""
     return {
         "PlayState": {
             "CanSeek": False, "IsPaused": False, "IsMuted": False,
@@ -127,12 +121,11 @@ def _build_session_info(fake_user: dict, request_data: dict, server_id: str, cli
     }
 
 async def endpoint_public_users(request: Request):
-    """Findroid uses this to list users on the login screen. MUST be a simple PublicUserInfo object."""
+    logger.debug("Generating public users list for login screen.")
     valid_jellyfin_id = "00000000-0000-0000-0000-000000000001"
     expected_user = str(getattr(config, "SJS_USER", "admin")).strip() or "admin"
     has_pass = bool(str(getattr(config, "SJS_PASSWORD", "")).strip())
     
-    # Do NOT include Policy or Configuration here, or Kotlin parsers will crash!
     public_user = {
         "Name": expected_user,
         "Id": valid_jellyfin_id,
@@ -142,19 +135,16 @@ async def endpoint_public_users(request: Request):
         "HasConfiguredEasyPassword": False,
         "PrimaryImageTag": None
     }
-    
     return JSONResponse([public_user])
 
 async def endpoint_user(request: Request):
-    """Returns the user details when Jellycon verifies the login."""
+    logger.debug(f"Client requested detailed user configuration profile.")
     return JSONResponse(_get_full_user())
 
 async def endpoint_users(request: Request):
-    """Returns a fake user list containing our single proxy user."""
     return JSONResponse([_get_full_user()])
 
 async def endpoint_authenticate_by_name(request: Request):
-    """Authenticates the user and hands the client our Proxy API Key."""
     try: data = await request.json()
     except Exception: data = {}
         
@@ -163,18 +153,17 @@ async def endpoint_authenticate_by_name(request: Request):
     
     expected_user = str(getattr(config, "SJS_USER", "")).strip()
     expected_pass = str(getattr(config, "SJS_PASSWORD", "")).strip()
-    
-    # ENFORCE SECURITY: Check credentials
-    if expected_user:
-        if username.lower() != expected_user.lower() or password != expected_pass:
-            logger.warning(f"Failed login attempt for user: {username}")
-            return JSONResponse({"error": "Invalid username or password"}, status_code=401)
-            
-    fake_user = _get_full_user()
-    server_id = getattr(config, "SERVER_ID", "stash-proxy-server-id")
     client_ip = request.client.host if request.client else "127.0.0.1"
     
-    # Clean, beautiful route handler
+    if expected_user:
+        if username.lower() != expected_user.lower() or password != expected_pass:
+            logger.warning(f"Failed Jellyfin Client login attempt for user '{username}' from IP {client_ip}")
+            return JSONResponse({"error": "Invalid username or password"}, status_code=401)
+            
+    logger.info(f"User '{username}' successfully authenticated from {client_ip}")
+    fake_user = _get_full_user()
+    server_id = getattr(config, "SERVER_ID", "stash-proxy-server-id")
+    
     return JSONResponse({
         "User": fake_user,
         "SessionInfo": _build_session_info(fake_user, data, server_id, client_ip),
@@ -184,7 +173,6 @@ async def endpoint_authenticate_by_name(request: Request):
 
 async def endpoint_system_info_public(request: Request):
     host = request.headers.get("host", "192.168.0.21:8096") 
-    
     return JSONResponse({
         "LocalAddress": f"http://{host}",
         "ServerName": getattr(config, "SERVER_NAME", "Stash Proxy"),
@@ -218,57 +206,35 @@ async def endpoint_system_ping(request: Request):
     return PlainTextResponse("Jellyfin Server")
 
 async def endpoint_branding_configuration(request: Request):
-    """Feeds native clients an empty branding config so they don't panic."""
     return JSONResponse({})
 
 async def endpoint_client_log(request: Request):
-    """Intercepts client application logs and saves them to disk for debugging."""
     try:
-        # Jellyfin clients usually send the log as raw text/plain or multipart/form-data
         body = await request.body()
         client_ip = request.client.host if request.client else "unknown"
-        
-        # Create a 'client_logs' folder inside your mapped config directory
         log_dir = os.path.join(getattr(config, "LOG_DIR", "."), "client_logs")
         os.makedirs(log_dir, exist_ok=True)
-        
-        # Save it with a timestamp
-        filename = os.path.join(log_dir, f"wholphin_{client_ip}_{int(time.time())}.log")
+        filename = os.path.join(log_dir, f"client_{client_ip}_{int(time.time())}.log")
         
         with open(filename, "wb") as f:
             f.write(body)
-            
-        logger.info(f"📥 Client log successfully caught and saved to {filename}")
-        
+        logger.debug(f"Intercepted and saved client debug log to {filename}")
     except Exception as e:
         logger.error(f"Failed to save client log: {e}")
-        
     return PlainTextResponse("OK")
 
 async def endpoint_blackhole(request: Request):
-    """
-    Catch-all for the official Jellyfin Web UI. 
-    Logs the missing endpoint and returns safe empty data to prevent UI lockups.
-    """
     path_lower = request.url.path.lower()
-    logger.debug(f"🕳️ WEB UI BLACKHOLE: {request.method} {request.url.path}")
+    logger.debug(f"Unhandled Web UI Path Intercepted: {request.method} {request.url.path}")
     
-    # 1. SyncPlay (Multi-user watching icon in top right)
     if "syncplay" in path_lower: return JSONResponse([])
-    
-    # 2. Cast/PlayTo (Casting icon)
     if "sessions" in path_lower and request.method == "GET": return JSONResponse([])
+    if "branding/css" in path_lower: return Response(content="", media_type="text/css")
 
-    # 3. CSS intercepts (Must return correct MIME type)
-    if "branding/css" in path_lower:
-        return Response(content="", media_type="text/css")
-
-    # 4. Administration & Metadata Dashboard Spinners
     array_endpoints = ["/plugins", "/scheduledtasks", "/channels", "/livetv", "/providers"]
     if any(x in path_lower for x in array_endpoints):
         return JSONResponse([])
         
-    # 4. User settings (Prevents the User Editing page from breaking)
     if "configuration" in path_lower:
         return JSONResponse({"PlayDefaultAudioTrack": True, "SubtitleMode": "Default"})
 

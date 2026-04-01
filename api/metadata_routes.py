@@ -10,7 +10,6 @@ from core.jellyfin_mapper import encode_id, decode_id, build_folder, generate_im
 logger = logging.getLogger(__name__)
 
 async def _build_nav_folder_metadata(decoded_id: str, item_id: str, server_id: str, cache_version: int) -> dict:
-    """Responsibility: Construct Jellyfin metadata dictionaries for purely virtual proxy folders."""
     clean_dec = decoded_id.replace("\x00", "").strip()
     is_root = clean_dec.startswith("root-")
     is_nav_folder = clean_dec in ["root-filters", "root-tags", "root-stashtags", "root-alltags"]
@@ -39,8 +38,6 @@ async def _build_nav_folder_metadata(decoded_id: str, item_id: str, server_id: s
         if match: item_name = match.get("name", "Folder")
     
     is_collection = is_root and not is_nav_folder
-    
-    # Delegated layout to central mapper!
     return build_folder(item_name, item_id, server_id, cache_version, is_collection)
 
 async def endpoint_item_details(request: Request):
@@ -48,6 +45,8 @@ async def endpoint_item_details(request: Request):
     decoded_id = decode_id(item_id)
     server_id = getattr(config, "SERVER_ID", "stash-proxy")
     cache_version = getattr(config, "CACHE_VERSION", 0)
+    
+    logger.debug(f"Metadata Request -> Item Details for Decoded ID: {decoded_id}")
     
     if "root-" in decoded_id or "tag-" in decoded_id or "filter-" in decoded_id:
         return JSONResponse(await _build_nav_folder_metadata(decoded_id, item_id, server_id, cache_version))
@@ -71,10 +70,15 @@ async def endpoint_item_details(request: Request):
         return JSONResponse({"Name": "Person", "SortName": "Person", "Id": item_id, "ServerId": server_id, "Type": "Person", "IsFolder": False})
         
     number_match = re.search(r'\d+', decoded_id)
-    if not number_match: return JSONResponse({"error": f"Invalid ID format: {decoded_id}"}, status_code=400)
+    if not number_match: 
+        logger.warning(f"Invalid ID format requested: {decoded_id}")
+        return JSONResponse({"error": f"Invalid ID format: {decoded_id}"}, status_code=400)
         
     scene = await stash_client.get_scene(number_match.group())
-    if scene: return JSONResponse(jellyfin_mapper.format_jellyfin_item(scene))
+    if scene: 
+        return JSONResponse(jellyfin_mapper.format_jellyfin_item(scene))
+        
+    logger.debug(f"Item not found in Stash: {decoded_id}")
     return JSONResponse({"error": "Item not found"}, status_code=404)
 
 async def endpoint_tags(request: Request):
@@ -82,19 +86,24 @@ async def endpoint_tags(request: Request):
     server_id = getattr(config, "SERVER_ID", "stash-proxy")
     search_term = next((v.lower() for k, v in request.query_params.items() if k.lower() == "searchterm"), "")
     
+    logger.debug(f"Metadata Request -> All {item_type}s (Search Term: '{search_term}')")
+    
     stash_tags = await stash_client.get_all_tags()
-    if search_term: stash_tags = [t for t in stash_tags if search_term in t.get("name", "").lower()]
+    if search_term: 
+        stash_tags = [t for t in stash_tags if search_term in t.get("name", "").lower()]
     
     jelly_tags = [{"Name": t.get("name"), "Id": encode_id("tag", str(t.get('id'))), "Type": item_type, "ServerId": server_id, "IsFolder": False} for t in stash_tags]
     return JSONResponse({"Items": jelly_tags, "TotalRecordCount": len(jelly_tags), "StartIndex": 0})
 
 async def endpoint_years(request: Request):
+    logger.debug("Metadata Request -> Years List")
     current_year = datetime.datetime.now().year
     server_id = getattr(config, "SERVER_ID", "stash-proxy")
     years = [{"Name": str(y), "Id": encode_id("year", str(y)), "Type": "Year", "ProductionYear": y, "ServerId": server_id, "IsFolder": False} for y in range(current_year, 1989, -1)]
     return JSONResponse({"Items": years, "TotalRecordCount": len(years), "StartIndex": 0})
 
 async def endpoint_studios(request: Request):
+    logger.debug("Metadata Request -> Studios List")
     studios = await stash_client.get_all_studios()
     cache_version = getattr(config, "CACHE_VERSION", 0)
     server_id = getattr(config, "SERVER_ID", "stash-proxy")
@@ -109,11 +118,20 @@ async def endpoint_delete_item(request: Request):
     decoded_id = decode_id(request.path_params.get("item_id", ""))
     deletion_mode = getattr(config, "ALLOW_CLIENT_DELETION", "Disabled").lower()
     
-    if deletion_mode == "disabled": return Response(status_code=403)
+    logger.info(f"Client requested deletion for {decoded_id}. Mode: {deletion_mode}")
+    
+    if deletion_mode == "disabled": 
+        return Response(status_code=403)
     
     if decoded_id.startswith("scene-"):
         raw_id = decoded_id.replace("scene-", "")
         success = await stash_client.destroy_scene(raw_id, delete_file=(deletion_mode == "delete"))
-        return Response(status_code=204 if success else 500)
+        
+        if success:
+            logger.info(f"Successfully deleted scene {raw_id}")
+            return Response(status_code=204)
+        else:
+            logger.error(f"Failed to delete scene {raw_id}")
+            return Response(status_code=500)
 
     return Response(status_code=403)

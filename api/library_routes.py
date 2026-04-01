@@ -256,19 +256,24 @@ async def endpoint_items(request: Request):
     query = _parse_item_query(request)
     
     if query.search_term and (query.item_types or query.media_types): 
+        logger.debug(f"Router -> Global Search Hit. Term: '{query.search_term}'")
         return await _handle_global_search(query.search_term, query.item_types, query.media_types, query.exclude_types, query.start_index, query.original_limit)
         
     if not any([query.parent_id, query.ids_param, query.search_term, query.recursive, query.person_ids, query.tags_param, query.filters_string]):
         if "movie" not in query.item_types and "episode" not in query.item_types:
+            logger.debug(f"Router -> Boot/Root Library Fetch.")
             views = await _get_libraries()
             return JSONResponse({"Items": views, "TotalRecordCount": len(views), "StartIndex": 0})
             
     if query.decoded_parent_id and query.decoded_parent_id.startswith("scene-"): 
+        logger.debug(f"Router -> Intercepted child request on Scene item. Returning empty array.")
         return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": 0})
         
     if query.ids_param: 
+        logger.debug(f"Router -> Exact ID Lookup. IDs: {query.ids_param}")
         return await _handle_exact_ids(query.ids_param, query.parent_id)
         
+    logger.debug(f"Router -> Standard Library Browse. Parent: {query.decoded_parent_id}")
     return await _handle_library_browse(request, query)
 
 async def endpoint_empty_list(request: Request): return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": 0})

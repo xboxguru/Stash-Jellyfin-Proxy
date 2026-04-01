@@ -1,11 +1,13 @@
 import time
 import os
 import json
+import logging
 import config
+
+logger = logging.getLogger(__name__)
 
 ui_sessions = set()
 
-# --- FILE PATHS ---
 if os.path.exists("/.dockerenv") and os.path.isdir("/config"):
     AUTH_IPS_FILE = "/config/authenticated_IPs.json"
     STATS_FILE = "/config/stats.json"
@@ -15,59 +17,53 @@ else:
     STATS_FILE = os.path.join(config.SCRIPT_DIR, "stats.json")
     PREFS_FILE = os.path.join(config.SCRIPT_DIR, "display_preferences.json")
 
+# --- DRY File I/O Helpers ---
+def _load_json(filepath: str, default_val: dict) -> dict:
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Error loading state file {filepath}: {e}")
+    return default_val
+
+def _save_json(filepath: str, data: dict):
+    try:
+        with open(filepath, 'w') as f:
+            json.dump(data, f)
+    except Exception as e:
+        logger.error(f"Error saving state file {filepath}: {e}")
+
+# --- Display Preferences ---
 display_preferences = {}
 
 def load_prefs():
     global display_preferences
-    if os.path.exists(PREFS_FILE):
-        try:
-            with open(PREFS_FILE, 'r') as f:
-                display_preferences = json.load(f)
-        except Exception as e:
-            print(f"Error loading display preferences: {e}")
+    display_preferences = _load_json(PREFS_FILE, {})
 
 def save_prefs():
-    try:
-        with open(PREFS_FILE, 'w') as f:
-            json.dump(display_preferences, f)
-    except Exception as e:
-        print(f"Error saving display preferences: {e}")
+    _save_json(PREFS_FILE, display_preferences)
 
-# --- AUTH IPs PERSISTENCE ---
+# --- Authenticated IPs ---
 def load_auth_ips():
-    if os.path.exists(AUTH_IPS_FILE):
-        try:
-            with open(AUTH_IPS_FILE, 'r') as f:
-                data = json.load(f)
-                
-                # Scenario 1: It's a dictionary {"ips": ...}
-                if isinstance(data, dict):
-                    ips = data.get("ips", {})
-                    # If it's already the new timestamped format
-                    if isinstance(ips, dict): 
-                        return ips
-                    # If it's the wrapped legacy list {"ips": ["1.2.3.4"]}
-                    elif isinstance(ips, list): 
-                        return {ip: time.time() for ip in ips}
-                
-                # Scenario 2: It's a raw legacy list ["1.2.3.4", "5.6.7.8"]
-                elif isinstance(data, list):
-                    return {ip: time.time() for ip in data}
-                    
-        except Exception as e:
-            print(f"Error loading authenticated IPs: {e}")
+    data = _load_json(AUTH_IPS_FILE, {})
+    if isinstance(data, dict):
+        ips = data.get("ips", {})
+        if isinstance(ips, dict): return ips
+        elif isinstance(ips, list): return {ip: time.time() for ip in ips}
+    elif isinstance(data, list):
+        return {ip: time.time() for ip in data}
     return {}
 
 def save_auth_ips(ips_dict):
-    try:
-        with open(AUTH_IPS_FILE, 'w') as f:
-            json.dump({"ips": ips_dict}, f)
-    except Exception as e:
-        print(f"Error saving authenticated IPs: {e}")
+    # CRITICAL FIX: Ensure sets are cast to dicts before saving to prevent JSON crashes
+    if isinstance(ips_dict, set):
+        ips_dict = {ip: time.time() for ip in ips_dict}
+    _save_json(AUTH_IPS_FILE, {"ips": ips_dict})
 
 authenticated_ips = load_auth_ips()
 
-# --- STATS PERSISTENCE ---
+# --- Stats ---
 stats = {
     "streams_today": 0,
     "total_streams": 0,
@@ -78,24 +74,15 @@ stats = {
 }
 
 def load_stats():
-    if os.path.exists(STATS_FILE):
-        try:
-            with open(STATS_FILE, 'r') as f:
-                data = json.load(f)
-                if "top_played" in data: stats["top_played"] = data["top_played"]
-                if "total_streams" in data: stats["total_streams"] = data["total_streams"]
-        except Exception as e:
-            print(f"Error loading stats: {e}")
+    data = _load_json(STATS_FILE, {})
+    if "top_played" in data: stats["top_played"] = data["top_played"]
+    if "total_streams" in data: stats["total_streams"] = data["total_streams"]
 
 def save_stats():
-    try:
-        with open(STATS_FILE, 'w') as f:
-            json.dump({
-                "top_played": stats["top_played"],
-                "total_streams": stats["total_streams"]
-            }, f)
-    except Exception as e:
-        print(f"Error saving stats: {e}")
+    _save_json(STATS_FILE, {
+        "top_played": stats["top_played"],
+        "total_streams": stats["total_streams"]
+    })
 
 load_stats()
 load_prefs()
