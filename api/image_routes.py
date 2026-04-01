@@ -44,7 +44,8 @@ async def endpoint_item_image(request: Request):
             return await _proxy_image(stash_img_url)
 
     if any(item_id.startswith(p) for p in ["root-", "tag-", "filter-"]) or item_id == raw_item_id:
-        logo_path = os.path.join(os.getcwd(), "logo.png")
+        logo_path = os.path.join(config.LOG_DIR, "logo.png") 
+        
         if os.path.exists(logo_path):
             return FileResponse(logo_path, media_type="image/png")
 
