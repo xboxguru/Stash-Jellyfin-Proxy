@@ -71,9 +71,14 @@ async def _get_libraries():
     ]
     
     recent_days = getattr(config, "RECENT_DAYS", 14)
-    if recent_days > 0: views.insert(1, build_folder(f"Recently Added ({recent_days} Days)", encode_id("root", "recent"), server_id, cache_version, is_user_view=True))
-    if getattr(config, "ENABLE_FILTERS", True): views.append(build_folder("Saved Filters", encode_id("root", "filters"), server_id, cache_version, is_user_view=True))
-    if getattr(config, "ENABLE_TAG_FILTERS", False): views.append(build_folder("Stash Tags", encode_id("root", "stashtags"), server_id, cache_version, is_user_view=True))
+    if recent_days > 0: 
+        views.insert(1, build_folder(f"Recently Added ({recent_days} Days)", encode_id("root", "recent"), server_id, cache_version, is_user_view=True))
+        
+    if getattr(config, "ENABLE_FILTERS", True): 
+        views.append(build_folder("Saved Filters", encode_id("root", "filters"), server_id, cache_version, is_user_view=True))
+        
+    if getattr(config, "ENABLE_TAG_FILTERS", False): 
+        views.append(build_folder("Stash Tags", encode_id("root", "stashtags"), server_id, cache_version, is_user_view=True))
     
     tag_names = getattr(config, "TAG_GROUPS", [])
     if tag_names:
@@ -81,17 +86,32 @@ async def _get_libraries():
         for name in tag_names:
             search_name = name.strip().lower()
             match = next((t for t in all_tags if t['name'].strip().lower() == search_name), None)
-            if match: views.append(build_folder(match['name'], encode_id("tag", str(match['id'])), server_id, cache_version, is_user_view=True))
+            if match: 
+                views.append(build_folder(match['name'], encode_id("tag", str(match['id'])), server_id, cache_version, is_user_view=True))
 
     return views
 
 async def endpoint_views(request: Request):
+    logger.debug("Router -> Client requested UserViews (Home Screen Libraries)")
     views = await _get_libraries()
     return JSONResponse({"Items": views, "TotalRecordCount": len(views), "StartIndex": 0})
 
 async def endpoint_virtual_folders(request: Request):
+    logger.debug("Router -> Client requested VirtualFolders (Tunarr/ErsatzTV Library Sync)")
     views = await _get_libraries() 
-    virtual_folders = [{"Name": v.get("Name"), "Locations": [], "CollectionType": v.get("CollectionType", "movies"), "LibraryOptions": {}, "ItemId": v.get("Id"), "PrimaryImageItemId": v.get("Id"), "RefreshProgress": 0, "RefreshStatus": "Idle"} for v in views]
+    virtual_folders = [
+        {
+            "Name": v.get("Name"), 
+            "Locations": [], 
+            "CollectionType": v.get("CollectionType", "movies"), 
+            "LibraryOptions": {"PathInfos": []}, 
+            "ItemId": v.get("Id"), 
+            "PrimaryImageItemId": v.get("Id"), 
+            "RefreshProgress": 0, 
+            "RefreshStatus": "Idle"
+        } 
+        for v in views
+    ]
     return JSONResponse(virtual_folders)
 
 async def _handle_global_search(search_term, item_types, media_types, exclude_types, start_index, original_limit):
@@ -197,14 +217,17 @@ async def _handle_virtual_folder_contents(decoded_parent_id, start_index, origin
                 search_name = name.strip().lower()
                 match = next((t for t in all_tags if t['name'].strip().lower() == search_name), None)
                 if match: jellyfin_items.append(build_folder(match['name'], encode_id("tag", str(match['id'])), server_id, cache_version))
-        if getattr(config, "ENABLE_ALL_TAGS", False): jellyfin_items.append(build_folder("All Tags", encode_id("root", "alltags"), server_id, cache_version))
+        if getattr(config, "ENABLE_ALL_TAGS", False): 
+            jellyfin_items.append(build_folder("All Tags", encode_id("root", "alltags"), server_id, cache_version))
             
     elif decoded_parent_id == "root-alltags":
         tags = await stash_client.get_all_tags()
         jellyfin_items = [build_folder(t.get("name"), encode_id("tag", str(t.get("id"))), server_id, cache_version) for t in tags]
             
     total_record_count = len(jellyfin_items)
-    if original_limit > 0: jellyfin_items = jellyfin_items[start_index : start_index + original_limit]
+    if original_limit > 0: 
+        jellyfin_items = jellyfin_items[start_index : start_index + original_limit]
+        
     return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": total_record_count, "StartIndex": start_index})
 
 async def _handle_library_browse(request: Request, query: JellyfinItemQuery):
@@ -219,7 +242,6 @@ async def _handle_library_browse(request: Request, query: JellyfinItemQuery):
     if exclude_types and "movie" in exclude_types: 
         return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": query.start_index})
 
-    # Use the new builder class
     builder = StashQueryBuilder(request, asdict(query))
     filter_args, scene_filter, _, updated_limit = await builder.build()
 
@@ -261,12 +283,12 @@ async def endpoint_items(request: Request):
         
     if not any([query.parent_id, query.ids_param, query.search_term, query.recursive, query.person_ids, query.tags_param, query.filters_string]):
         if "movie" not in query.item_types and "episode" not in query.item_types:
-            logger.debug(f"Router -> Boot/Root Library Fetch.")
+            logger.debug("Router -> Boot/Root Library Fetch.")
             views = await _get_libraries()
             return JSONResponse({"Items": views, "TotalRecordCount": len(views), "StartIndex": 0})
             
     if query.decoded_parent_id and query.decoded_parent_id.startswith("scene-"): 
-        logger.debug(f"Router -> Intercepted child request on Scene item. Returning empty array.")
+        logger.debug("Router -> Intercepted child request on Scene item. Returning empty array.")
         return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": 0})
         
     if query.ids_param: 

@@ -20,6 +20,7 @@ def build_folder(name: str, folder_id: str, server_id: str, cache_version: int, 
         "Name": name, 
         "SortName": name, 
         "Id": folder_id, 
+        "Etag": logo_hash, # <-- FIX: Added Etag for Tunarr
         "DisplayPreferencesId": folder_id,
         "ServerId": server_id, 
         "Type": "UserView" if is_user_view else ("CollectionFolder" if is_collection else "Folder"), 
@@ -163,7 +164,11 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
     backdrop_tag = generate_image_tag("backdrop", raw_id, cache_version)
 
     item = {
-        "Name": title, "SortName": title, "Id": item_id, "ServerId": getattr(config, "SERVER_ID", "stash-proxy"),
+        "Name": title, 
+        "SortName": title, 
+        "Id": item_id, 
+        "Etag": primary_tag, # <-- FIX: Added Etag for Tunarr
+        "ServerId": getattr(config, "SERVER_ID", "stash-proxy"),
         "Type": "Movie", "IsFolder": False, "MediaType": "Video", "ParentId": parent_id if parent_id else encode_id("root", "scenes"),
         "HasPrimaryImage": True, "HasBackdrop": True, "ImageTags": {"Primary": primary_tag, "Thumb": primary_tag}, 
         "PrimaryImageAspectRatio": 1.777, "BackdropImageTags": [backdrop_tag],
