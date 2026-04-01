@@ -5,6 +5,7 @@ import asyncio
 import logging
 import socket
 import subprocess
+from contextlib import asynccontextmanager
 from hypercorn.config import Config
 from hypercorn.asyncio import serve
 from starlette.applications import Starlette
@@ -203,7 +204,15 @@ routes = [
     Route("/{path:path}", auth_routes.endpoint_blackhole, methods=["GET", "POST", "OPTIONS", "DELETE"]),
 ]
 
-app = Starlette(debug=(config.LOG_LEVEL == "DEBUG"), routes=routes)
+@asynccontextmanager
+async def lifespan(app):
+    yield
+    logger.info("Shutting down global HTTP connection pools...")
+    await stash_client._manager.client.aclose()
+    await stream_routes.stream_client.aclose()
+    await image_routes.image_client.aclose()
+
+app = Starlette(debug=(config.LOG_LEVEL == "DEBUG"), routes=routes, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -214,13 +223,6 @@ app.add_middleware(
 )
 
 asgi_app = AuthenticationMiddleware(app)
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    logger.info("Shutting down global HTTP connection pools...")
-    await stash_client._manager.client.aclose()
-    await stream_routes.stream_client.aclose()
-    await image_routes.image_client.aclose()
 
 async def background_pruner():
     while True:
