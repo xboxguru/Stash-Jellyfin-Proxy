@@ -30,27 +30,63 @@ def _get_full_user() -> dict:
         "LastLoginDate": "2026-01-01T00:00:00.0000000Z",
         "LastActivityDate": "2026-01-01T00:00:00.0000000Z",
         "Configuration": {
-            "AudioLanguagePreference": "", "PlayDefaultAudioTrack": True, "SubtitleLanguagePreference": "",
-            "DisplayMissingEpisodes": True, "GroupedFolders": [], "SubtitleMode": "Default",
-            "DisplayCollectionsView": False, "EnableLocalPassword": False, "OrderedViews": [],
-            "LatestItemsExcludes": [], "MyMediaExcludes": [], "HidePlayedInLatest": True,
-            "RememberAudioSelections": True, "RememberSubtitleSelections": True, "EnableNextEpisodeAutoPlay": True,
+            "AudioLanguagePreference": "",
+            "PlayDefaultAudioTrack": True,
+            "SubtitleLanguagePreference": "",
+            "DisplayMissingEpisodes": True,
+            "GroupedFolders": [],             # Required
+            "SubtitleMode": "Default",        # Required
+            "DisplayCollectionsView": False,  # Required
+            "EnableLocalPassword": False,     # Required
+            "OrderedViews": [],               # Required
+            "LatestItemsExcludes": [],        # Required
+            "MyMediaExcludes": [],            # Required
+            "HidePlayedInLatest": True,       # Required
+            "RememberAudioSelections": True,
+            "RememberSubtitleSelections": True,
+            "EnableNextEpisodeAutoPlay": True,
             "CastReceiverId": "F007D354" 
         },
         "Policy": {
-            "IsAdministrator": True, "IsHidden": False, "EnableCollectionManagement": False, 
-            "EnableSubtitleManagement": False, "EnableLyricManagement": False, "IsDisabled": False,
-            "BlockedTags": [], "AllowedTags": [], "EnableUserPreferenceAccess": True,
-            "AccessSchedules": [], "BlockUnratedItems": [], "EnableRemoteControlOfOtherUsers": True,
-            "EnableSharedDeviceControl": True, "EnableRemoteAccess": True, "EnableLiveTvManagement": False,
-            "EnableLiveTvAccess": False, "EnableMediaPlayback": True, "EnableAudioPlaybackTranscoding": True,
-            "EnableVideoPlaybackTranscoding": True, "EnablePlaybackRemuxing": True, "ForceRemoteSourceTranscoding": False,
-            "EnableContentDeletion": False, "EnableContentDeletionFromFolders": [], "EnableContentDownloading": True,
-            "EnableSyncTranscoding": False, "EnableMediaConversion": False, "EnabledDevices": [],
-            "EnableAllDevices": True, "EnabledChannels": [], "EnableAllChannels": True, "EnabledFolders": [],
-            "EnableAllFolders": True, "InvalidLoginAttemptCount": 0, "LoginAttemptsBeforeLockout": -1, 
-            "MaxActiveSessions": 0, "EnablePublicSharing": False, "BlockedMediaFolders": [],
-            "BlockedChannels": [], "RemoteClientBitrateLimit": 0,
+            "IsAdministrator": True,
+            "IsHidden": False,
+            "EnableCollectionManagement": False, 
+            "EnableSubtitleManagement": False,   
+            "EnableLyricManagement": False,      
+            "IsDisabled": False,
+            "BlockedTags": [],
+            "AllowedTags": [],                   
+            "EnableUserPreferenceAccess": True,
+            "AccessSchedules": [],
+            "BlockUnratedItems": [],
+            "EnableRemoteControlOfOtherUsers": True,
+            "EnableSharedDeviceControl": True,
+            "EnableRemoteAccess": True,
+            "EnableLiveTvManagement": False,
+            "EnableLiveTvAccess": False,
+            "EnableMediaPlayback": True,
+            "EnableAudioPlaybackTranscoding": True,
+            "EnableVideoPlaybackTranscoding": True,
+            "EnablePlaybackRemuxing": True,
+            "ForceRemoteSourceTranscoding": False,
+            "EnableContentDeletion": False,
+            "EnableContentDeletionFromFolders": [],
+            "EnableContentDownloading": True,
+            "EnableSyncTranscoding": False,
+            "EnableMediaConversion": False,
+            "EnabledDevices": [],
+            "EnableAllDevices": True,
+            "EnabledChannels": [],
+            "EnableAllChannels": True,
+            "EnabledFolders": [],
+            "EnableAllFolders": True,
+            "InvalidLoginAttemptCount": 0,
+            "LoginAttemptsBeforeLockout": -1, 
+            "MaxActiveSessions": 0,
+            "EnablePublicSharing": False,
+            "BlockedMediaFolders": [],
+            "BlockedChannels": [],
+            "RemoteClientBitrateLimit": 0,
             "AuthenticationProviderId": "Jellyfin.Server.Implementations.Users.DefaultAuthenticationProvider",
             "PasswordResetProviderId": "Jellyfin.Server.Implementations.Users.DefaultPasswordResetProvider",
             "SyncPlayAccess": "CreateAndJoinGroups"
@@ -160,7 +196,7 @@ async def endpoint_authenticate_by_name(request: Request):
         return JSONResponse({"error": "Invalid username or password"}, status_code=401)
             
     logger.info(f"User '{username}' successfully authenticated from {client_ip}")
-    return JSONResponse(_build_auth_payload(request, _get_full_user(), data))
+    return JSONResponse(_build_auth_payload(request, _get_full_user(), {}))
 
 # --- System Endpoints ---
 
@@ -223,28 +259,22 @@ async def endpoint_quickconnect_initiate(request: Request):
     return JSONResponse({"Secret": secret, "Code": code})
 
 async def endpoint_quickconnect_connect(request: Request):
-    """
-    Handles the client polling for QuickConnect status.
-    Returns the status object as found in a real Jellyfin server trace.
-    """
     secret = request.query_params.get("secret")
     session = state.quick_connect_sessions.get(secret)
     
     if not session:
-        logger.debug(f"QuickConnect polling failed: Invalid secret {secret}")
         return Response(status_code=404)
         
-    # Standard response structure based on the Thunder Client pull
-    # Note: Authenticated flips to true once the Web UI calls /authorize
+    # Standard Jellyfin SDK response structure
     response_data = {
-        "Authenticated": session.get("authorized", False),
+        "Authenticated": session.get("authorized", False), # Required
         "Secret": secret,
         "Code": session["code"],
-        "DeviceId": "proxy-device", 
-        "DeviceName": "Stash Proxy",
-        "AppName": "Jellyfin Proxy",
-        "AppVersion": "1.0.0",
-        "DateAdded": datetime.fromtimestamp(session["timestamp"], tz=timezone.utc).isoformat().replace("+00:00", "Z")
+        "DeviceId": "proxy-handshake-device", # Required
+        "DeviceName": "Stash Proxy Handshake", # Required
+        "AppName": "Stash-Jellyfin-Proxy", # Required
+        "AppVersion": "1.0.0", # Required
+        "DateAdded": datetime.fromtimestamp(session["timestamp"], tz=timezone.utc).isoformat().replace("+00:00", "Z") # Required
     }
 
     return JSONResponse(response_data)

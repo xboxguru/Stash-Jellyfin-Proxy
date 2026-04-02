@@ -11,7 +11,7 @@ PUBLIC_ENDPOINTS = {
     "/", "/system/info/public", "/system/info", "/public/system/info",
     "/web/index.html", "/health", "/users/authenticatebyname", "/system/ping",
     "/users/public", "/quickconnect/initiate", "/quickconnect/enabled",
-    "/quickconnect/connect", "/quickconnect/authorize", "/favicon.ico", "/branding/configuration", 
+    "/quickconnect/connect", "/quickconnect/authorize", "/users/authenticatewithquickconnect", "/favicon.ico", "/branding/configuration", 
     "/clientlog/document"
 }
 PUBLIC_PREFIXES = ["/web/", "/assets/", "/api/"]
