@@ -2,6 +2,7 @@ import logging
 import uuid
 import random
 import time
+from datetime import datetime, timezone
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.requests import Request
 import config
@@ -57,36 +58,69 @@ def _get_full_user() -> dict:
     }
 
 def _build_auth_payload(request: Request, fake_user: dict, request_data: dict) -> dict:
+    # IMPORTANT: This MUST match what is in endpoint_system_info_public
     server_id = getattr(config, "SERVER_ID", "stash-proxy-server-id")
-    client_ip = request.client.host if request.client else "127.0.0.1"
+    access_token = getattr(config, "PROXY_API_KEY", "proxy-api-key")
     
-    session_info = {
-        "PlayState": {
-            "CanSeek": False, "IsPaused": False, "IsMuted": False,
-            "RepeatMode": "RepeatNone", "PlaybackOrder": "Default"
+    # Ensure the User object is complete. Clients crash without 'Configuration'.
+    user_payload = {
+        "Name": str(fake_user.get("Name", "StashUser")),
+        "Id": str(fake_user.get("Id", "00000000000000000000000000000001")),
+        "HasPassword": False,
+        "HasConfigAccess": True,
+        "HasSubFolders": True,
+        "EnableUserPreferenceAccess": True,
+        "Configuration": {
+            "AudioLanguagePreference": "en",
+            "PlayDefaultAudioTrack": True,
+            "SubtitleLanguagePreference": "en",
+            "DisplayMissingEpisodes": False,
+            "HidePlayedInLatestVideo": False,
+            "RememberAudioSelections": True,
+            "RememberSubtitleSelections": True,
+            "EnableNextEpisodeAutoPlay": True
         },
-        "AdditionalUsers": [],
-        "Capabilities": {
-            "PlayableMediaTypes": [], "SupportedCommands": [],
-            "SupportsMediaControl": False, "SupportsPersistentIdentifier": True
-        },
-        "RemoteEndPoint": client_ip, "PlayableMediaTypes": [],
-        "Id": "00000000000000000000000000000002", "UserId": fake_user["Id"], "UserName": fake_user["Name"],
-        "Client": request_data.get("Client", "Findroid"),
-        "LastActivityDate": "2026-01-01T00:00:00.0000000Z", "LastPlaybackCheckIn": "0001-01-01T00:00:00.0000000Z",
-        "DeviceName": request_data.get("Device", "Device"),
-        "DeviceId": request_data.get("DeviceId", "12345"),
-        "ApplicationVersion": request_data.get("Version", "1.0.0"),
-        "IsActive": True, "SupportsMediaControl": False, "SupportsRemoteControl": False,
-        "NowPlayingQueue": [], "NowPlayingQueueFullItems": [],
-        "HasCustomDeviceName": False, "ServerId": server_id, "SupportedCommands": []
+        "Policy": {
+            "IsAdministrator": True,
+            "IsDisabled": False,
+            "IsHidden": False,
+            "IsHiddenFromUnusedDevices": False,
+            "EnableSharedDeviceControl": True,
+            "EnableLiveTvManagement": True,
+            "EnableLiveTvAccess": True,
+            "EnableMediaPlayback": True,
+            "EnableAudioPlaybackTranscoding": True,
+            "EnableVideoPlaybackTranscoding": True,
+            "EnablePlaybackRemuxing": True,
+            "EnableContentDeletion": False,
+            "EnableContentDownloading": True,
+            "EnableSyncTranscoding": True,
+            "EnabledDevices": [],
+            "EnableAllDevices": True,
+            "EnabledChannels": [],
+            "EnableAllChannels": True,
+            "EnabledFolders": [],
+            "EnableAllFolders": True,
+            "InvalidLoginAttemptCount": 0,
+            "EnablePublicSharing": True,
+            "BlockedTags": [],
+            "IsTagBlockingModeInclusive": False,
+            "RemoteClientBitrateLimit": 0,
+            "AuthenticationProviderId": "ProxyProvider"
+        }
     }
     
     return {
-        "User": fake_user,
-        "SessionInfo": session_info,
-        "AccessToken": getattr(config, "PROXY_API_KEY", ""),
-        "ServerId": server_id
+        "User": user_payload,
+        "AccessToken": str(access_token),
+        "ServerId": str(server_id),
+        "SessionInfo": {
+            "Id": "00000000000000000000000000000002",
+            "UserId": user_payload["Id"],
+            "UserName": user_payload["Name"],
+            "IsActive": True,
+            "ServerId": str(server_id)
+        }
     }
 
 # --- Standard Auth Endpoints ---
@@ -171,17 +205,28 @@ async def endpoint_client_log(request: Request):
 # --- Quick Connect Endpoints ---
 
 async def endpoint_quickconnect_enabled(request: Request):
-    return JSONResponse(True)
+    # Starlette JSONResponse(True) works, but Response("true") is completely bulletproof for strict clients
+    return Response(content="true", media_type="application/json")
 
 async def endpoint_quickconnect_initiate(request: Request):
-    state.clean_expired_quick_connects()
+    state.clean_expired_quick_connects() 
+    
     secret = str(uuid.uuid4())
     code = str(random.randint(100000, 999999))
-    state.quick_connect_sessions[secret] = {"code": code, "authorized": False, "timestamp": time.time()}
-    logger.info(f"QuickConnect initiated. Code: {code}")
+    
+    state.quick_connect_sessions[secret] = {
+        "code": code, 
+        "authorized": False, 
+        "timestamp": time.time()
+    }
+    logger.info(f"QuickConnect initiated. Code: {code} | Secret: {secret}")
     return JSONResponse({"Secret": secret, "Code": code})
 
 async def endpoint_quickconnect_connect(request: Request):
+    """
+    Handles the client polling for QuickConnect status.
+    Returns the status object as found in a real Jellyfin server trace.
+    """
     secret = request.query_params.get("secret")
     session = state.quick_connect_sessions.get(secret)
     
@@ -189,14 +234,20 @@ async def endpoint_quickconnect_connect(request: Request):
         logger.debug(f"QuickConnect polling failed: Invalid secret {secret}")
         return Response(status_code=404)
         
-    if not session["authorized"]:
-        return JSONResponse({"Secret": secret, "Code": session["code"]})
-        
-    logger.info(f"QuickConnect authorized for code {session['code']}! Dispatching token.")
-    del state.quick_connect_sessions[secret]
-    
-    # We pass an empty dict for request_data since this is a background polling request
-    return JSONResponse(_build_auth_payload(request, _get_full_user(), {}))
+    # Standard response structure based on the Thunder Client pull
+    # Note: Authenticated flips to true once the Web UI calls /authorize
+    response_data = {
+        "Authenticated": session.get("authorized", False),
+        "Secret": secret,
+        "Code": session["code"],
+        "DeviceId": "proxy-device", 
+        "DeviceName": "Stash Proxy",
+        "AppName": "Jellyfin Proxy",
+        "AppVersion": "1.0.0",
+        "DateAdded": datetime.fromtimestamp(session["timestamp"], tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    }
+
+    return JSONResponse(response_data)
 
 async def endpoint_quickconnect_authorize(request: Request):
     code = request.query_params.get("code")
@@ -225,3 +276,23 @@ async def endpoint_blackhole(request: Request):
         return JSONResponse({"PlayDefaultAudioTrack": True, "SubtitleMode": "Default"})
 
     return JSONResponse({})
+
+async def endpoint_authenticate_by_quickconnect(request: Request):
+    try:
+        data = await request.json()
+        secret = data.get("Secret")
+    except:
+        return Response(status_code=400)
+
+    session = state.quick_connect_sessions.get(secret)
+    if not session or not session.get("authorized"):
+        return Response(status_code=401)
+
+    logger.info(f"Finalizing QuickConnect login for secret: {secret}")
+    
+    user_data = _get_full_user()
+    response_payload = _build_auth_payload(request, user_data, {})
+    
+    del state.quick_connect_sessions[secret]
+    
+    return JSONResponse(response_payload)

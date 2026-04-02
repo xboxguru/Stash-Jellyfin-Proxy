@@ -100,6 +100,7 @@ routes = [
     Route("/api/cache/increment", ui_routes.api_increment_cache_version, methods=["POST"]),
     Route("/api/stats/top_played", ui_routes.api_clear_top_played, methods=["DELETE"]),
     Route("/api/stats/top_played/{item_id}", ui_routes.api_remove_top_played_item, methods=["DELETE"]),
+    Route('/api/quickconnect/authorize', auth_routes.endpoint_quickconnect_authorize, methods=['POST']),
     
     Route("/system/info/public", auth_routes.endpoint_system_info_public, methods=["GET"]),
     Route("/public/system/info", auth_routes.endpoint_system_info_public, methods=["GET"]),
@@ -109,10 +110,10 @@ routes = [
     Route("/users/authenticatebyname", auth_routes.endpoint_authenticate_by_name, methods=["POST"]),
     Route("/users/{user_id}", auth_routes.endpoint_user, methods=["GET"]),
     Route("/users", auth_routes.endpoint_users, methods=["GET"]),
+    Route('/users/authenticatebyquickconnect', auth_routes.endpoint_authenticate_by_quickconnect, methods=['POST']),
     Route('/quickconnect/enabled', auth_routes.endpoint_quickconnect_enabled, methods=['GET']),
     Route('/quickconnect/initiate', auth_routes.endpoint_quickconnect_initiate, methods=['GET', 'POST']),
     Route('/quickconnect/connect', auth_routes.endpoint_quickconnect_connect, methods=['GET']),
-    Route('/quickconnect/authorize', auth_routes.endpoint_quickconnect_authorize, methods=['POST']),
     Route("/branding/configuration", auth_routes.endpoint_branding_configuration, methods=["GET"]),
     
     Route("/userviews", library_routes.endpoint_views, methods=["GET"]),

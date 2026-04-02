@@ -11,7 +11,8 @@ PUBLIC_ENDPOINTS = {
     "/", "/system/info/public", "/system/info", "/public/system/info",
     "/web/index.html", "/health", "/users/authenticatebyname", "/system/ping",
     "/users/public", "/quickconnect/initiate", "/quickconnect/enabled",
-    "/favicon.ico", "/branding/configuration", "/clientlog/document"
+    "/quickconnect/connect", "/quickconnect/authorize", "/favicon.ico", "/branding/configuration", 
+    "/clientlog/document"
 }
 PUBLIC_PREFIXES = ["/web/", "/assets/", "/api/"]
 
@@ -81,6 +82,11 @@ class AuthenticationMiddleware:
         start_time = time.time()
         original_path = scope.get("path", "")
         path_lower = original_path.lower()
+        
+        # FIX: Strip trailing slashes so Jellyfin clients don't 404/401 randomly
+        if path_lower != "/" and path_lower.endswith("/"):
+            path_lower = path_lower[:-1]
+
         method = scope.get("method", "UNK")
         client_ip = get_client_ip(scope)
 
