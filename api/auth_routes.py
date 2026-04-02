@@ -202,7 +202,6 @@ async def endpoint_authenticate_by_name(request: Request):
     logger.info(f"User '{username}' successfully authenticated from {client_ip}")
     return JSONResponse(_build_auth_payload(request, _get_full_user(), data))
 
-
 # --- System Endpoints ---
 
 async def endpoint_system_info_public(request: Request):
@@ -230,8 +229,36 @@ async def endpoint_branding_configuration(request: Request):
     return JSONResponse({})
 
 async def endpoint_client_log(request: Request):
+    """Intercepts client application logs and saves them to disk for debugging."""
+    try:
+        # 1. Grab the raw log text sent by the app
+        body = await request.body()
+        client_ip = request.client.host if request.client else "unknown"
+        
+        # 2. Extract the actual Client Name using our existing helper
+        client_info = _parse_client_info(request, {})
+        client_name = client_info.get("Client", "UnknownClient")
+        
+        # Sanitize the client name so it's safe for Windows/Linux filesystems
+        safe_client_name = "".join(c if c.isalnum() else "_" for c in client_name).strip("_")
+        
+        # 3. Ensure the client_logs directory exists
+        log_dir = os.path.join(getattr(config, "LOG_DIR", "."), "client_logs")
+        os.makedirs(log_dir, exist_ok=True)
+        
+        # 4. Save with format: Jellyfin_AndroidTV_192.168.0.173_1775085060.log
+        filename = os.path.join(log_dir, f"{safe_client_name}_{client_ip}_{int(time.time())}.log")
+        
+        with open(filename, "wb") as f:
+            f.write(body)
+            
+        logger.info(f"📥 Client crash log successfully caught and saved to {filename}")
+        
+    except Exception as e:
+        logger.error(f"Failed to save client log: {e}")
+        
+    # Always return OK so the client knows it was received
     return PlainTextResponse("OK")
-
 
 # --- Quick Connect Endpoints ---
 

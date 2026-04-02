@@ -186,6 +186,60 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
         }
     }
     
+    # --- NEW: Map Stash Markers to Jellyfin Chapters (Path B - Router) ---
+    try:
+        chapters = []
+        seen_ticks = set()
+        
+        # 1. 0-tick starting chapter (Maps to image_index = 0)
+        chapters.append({
+            "StartPositionTicks": 0,
+            "Name": "Start",
+            "ImageTag": generate_image_tag("chapter", f"{raw_id}_0", cache_version),
+            "ImageDateModified": "0001-01-01T00:00:00.0000000Z"
+        })
+        seen_ticks.add(0)
+        
+        # 2. Sort markers FIRST so array indexes perfectly match Jellyfin requests
+        markers = scene.get("scene_markers") or []
+        markers.sort(key=lambda x: float(x.get("seconds", 0)))
+        
+        for idx, marker in enumerate(markers):
+            raw_seconds = marker.get("seconds")
+            if raw_seconds is None: 
+                continue
+                
+            seconds = float(raw_seconds)
+            ticks = int(seconds * 10000000)
+            
+            if ticks in seen_ticks: 
+                continue
+            seen_ticks.add(ticks)
+            
+            marker_title = marker.get("title")
+            if not marker_title and marker.get("primary_tag"):
+                marker_title = marker["primary_tag"].get("name")
+                
+            final_title = str(marker_title).strip() if marker_title else f"Chapter {len(chapters)}"
+            
+            # Use idx + 1 because 0 is the "Start" chapter
+            chapter_img_tag = generate_image_tag("chapter", f"{raw_id}_{idx+1}", cache_version)
+            
+            chapters.append({
+                "StartPositionTicks": ticks,
+                "Name": final_title,
+                "ImageTag": chapter_img_tag,
+                "ImageDateModified": "0001-01-01T00:00:00.0000000Z"
+            })
+            
+        if len(chapters) > 1:
+            item["Chapters"] = chapters
+            
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Failed to parse markers for scene {raw_id}: {e}")
+    # ------------------------------------------------------------
+    
     now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
     dates_info = _build_dates(scene.get("date"), scene.get("created_at"), now_iso, getattr(config, "RECENT_DAYS", 14))
     
@@ -200,4 +254,5 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
     overview_parts = [scene.get("details", "")] if scene.get("details") else []
     if scene.get("studio") and scene["studio"].get("name"): overview_parts.append(f"Studio: {scene['studio']['name']}")
     item["Overview"] = "\n\n".join(overview_parts)
+
     return item

@@ -1,18 +1,25 @@
 import logging
 import asyncio
+import time
 import httpx
 from typing import Dict, Any, Optional
 import config
 
 logger = logging.getLogger(__name__)
 
-SCENE_FIELDS = """
+# Lightweight fields for fast library browsing (Grid View)
+BASE_SCENE_FIELDS = """
     id title code date details o_counter play_count rating100 created_at organized resume_time
     files { path duration video_codec audio_codec frame_rate bit_rate width height format size } 
     studio { id name image_path } 
     tags { name } 
     performers { name id image_path } 
     captions { language_code caption_type }
+"""
+
+# Heavy fields including Markers for individual scene details and playback
+DETAILED_SCENE_FIELDS = BASE_SCENE_FIELDS + """
+    scene_markers { id seconds title primary_tag { name } }
 """
 
 class _StashConnectionManager:
@@ -43,29 +50,37 @@ class _StashConnectionManager:
         if variables: 
             payload["variables"] = variables
 
-        logger.debug(f"GraphQL Request -> Query: {query[:100]}... | Variables: {variables}")
-
+        query_preview = query.replace('\n', ' ')[:80]
+        
         for attempt in range(1, getattr(config, "STASH_RETRIES", 3) + 1):
+            start_time = time.time()
             try:
                 response = await self.client.post(url, headers=self.get_headers(), json=payload)
-                response.raise_for_status()
+                elapsed = time.time() - start_time
+                
+                # Detailed Error Logging for Stash 500/504s
+                if response.status_code != 200:
+                    logger.warning(f"GraphQL HTTP {response.status_code} on attempt {attempt}. Response: {response.text[:200]}")
+                    response.raise_for_status()
+
                 result = response.json()
                 
                 if "errors" in result: 
-                    logger.error(f"GraphQL Response Error: {result['errors']}")
+                    logger.error(f"GraphQL Data Error [{elapsed:.2f}s]: {result['errors']}")
                     return None
                     
-                logger.debug(f"GraphQL Request successful (Attempt {attempt}).")
+                logger.debug(f"GraphQL Request successful in {elapsed:.2f}s | Query: {query_preview}...")
                 return result.get("data")
                 
             except Exception as e:
-                logger.warning(f"GraphQL request failed (Attempt {attempt}/{getattr(config, 'STASH_RETRIES', 3)}): {e}")
+                elapsed = time.time() - start_time
+                logger.warning(f"GraphQL request failed in {elapsed:.2f}s (Attempt {attempt}/{getattr(config, 'STASH_RETRIES', 3)}): {e}")
                 if attempt == getattr(config, "STASH_RETRIES", 3): 
                     logger.error("Max retries reached for GraphQL request.")
                     return None
                 await asyncio.sleep(1.0)
 
-# Singleton instance to be used by module functions
+# Singleton instance
 _manager = _StashConnectionManager()
 
 async def test_stash_connection() -> bool:
@@ -83,14 +98,22 @@ async def call_graphql(query: str, variables: Optional[Dict[str, Any]] = None) -
     return await _manager.execute(query, variables)
 
 async def get_scene(scene_id: str) -> Optional[Dict[str, Any]]:
-    data = await call_graphql(f"query FindScene($id: ID!) {{ findScene(id: $id) {{ {SCENE_FIELDS} }} }}", {"id": scene_id})
+    """Uses DETAILED fields (includes Markers) because we are only asking for 1 scene."""
+    data = await call_graphql(f"query FindScene($id: ID!) {{ findScene(id: $id) {{ {DETAILED_SCENE_FIELDS} }} }}", {"id": scene_id})
     return data["findScene"] if data and data.get("findScene") else None
 
-async def fetch_scenes(filter_args: Dict[str, Any], page: int = 1, per_page: int = 50, scene_filter: Dict[str, Any] = None) -> Dict[str, Any]:
+async def fetch_scenes(filter_args: Dict[str, Any], page: int = 1, per_page: int = 50, scene_filter: Dict[str, Any] = None, ignore_sync_level: bool = False) -> Dict[str, Any]:
+    """Uses BASE fields (NO Markers) to prevent Stash from choking on 50-100 items at once."""
     sf = scene_filter or {}
     if "title" in filter_args: sf["title"] = filter_args.pop("title")
     
-    query = f"query FindScenes($filter: FindFilterType, $scene_filter: SceneFilterType) {{ findScenes(filter: $filter, scene_filter: $scene_filter) {{ count scenes {{ {SCENE_FIELDS} }} }} }}"
+    # Optional: Keep your ignore_sync_level logic if you had it implemented previously
+    if not ignore_sync_level:
+        sync_mode = getattr(config, "SYNC_LEVEL", "Everything")
+        if sync_mode == "Organized": sf["organized"] = True
+        elif sync_mode == "Tagged": sf["tags"] = {"modifier": "NOT_NULL"}
+    
+    query = f"query FindScenes($filter: FindFilterType, $scene_filter: SceneFilterType) {{ findScenes(filter: $filter, scene_filter: $scene_filter) {{ count scenes {{ {BASE_SCENE_FIELDS} }} }} }}"
     filter_args.update({"page": page, "per_page": per_page})
     
     data = await call_graphql(query, {"filter": filter_args, "scene_filter": sf})

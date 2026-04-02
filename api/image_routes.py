@@ -6,6 +6,7 @@ from starlette.requests import Request
 from starlette.background import BackgroundTask
 import config
 from core.jellyfin_mapper import decode_id
+from core.stash_client import call_graphql
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,42 @@ async def endpoint_item_image(request: Request):
     item_id = decode_id(raw_item_id)
     image_type = request.path_params.get("image_type", "Primary").lower()
     
-    logger.debug(f"Image Request -> ID: '{item_id}', Type: '{image_type}'")
+    # Extract the index if it was passed in the URL path
+    image_index = request.path_params.get("image_index")
+    # Fallback to query parameters just in case Jellyfin formats it as ?index=1
+    if not image_index:
+        image_index = request.query_params.get("index", "0")
+        
+    logger.debug(f"Image Request -> ID: '{item_id}', Type: '{image_type}', Index: '{image_index}'")
+
+    # --- Chapter Image Router (Path B) ---
+    if image_type == "chapter" and item_id.startswith("scene-"):
+        raw_scene_id = item_id.replace("scene-", "")
+        stash_base = config.get_stash_base()
+        apikey = getattr(config, "STASH_API_KEY", "")
+        
+        if str(image_index) == "0":
+            url = f"{stash_base}/scene/{raw_scene_id}/screenshot"
+            if apikey: url += f"?apikey={apikey}"
+            return await _proxy_image(url)
+        else:
+            from core.stash_client import call_graphql
+            query = """query($id: ID!) { findScene(id: $id) { scene_markers { id seconds } } }"""
+            data = await call_graphql(query, {"id": raw_scene_id})
+            markers = data.get("findScene", {}).get("scene_markers", []) if data else []
+            
+            markers.sort(key=lambda x: float(x.get("seconds", 0)))
+            
+            idx = int(image_index) - 1
+            if 0 <= idx < len(markers):
+                marker_id = markers[idx]["id"]
+                url = f"{stash_base}/scene/{raw_scene_id}/scene_marker/{marker_id}/screenshot"
+                if apikey: url += f"?apikey={apikey}"
+                return await _proxy_image(url)
+                
+            logger.warning(f"Chapter image {image_index} out of bounds for scene {raw_scene_id}")
+            return Response(status_code=404)
+    # ------------------------------------------
 
     type_map = {
         "scene-": ("scene", "screenshot"),
@@ -40,12 +76,10 @@ async def endpoint_item_image(request: Request):
             
             stash_img_url = f"{stash_base}/{stash_route}/{raw_id}/{stash_suffix}"
             if apikey: stash_img_url += f"?apikey={apikey}"
-                
             return await _proxy_image(stash_img_url)
 
     if any(item_id.startswith(p) for p in ["root-", "tag-", "filter-"]) or item_id == raw_item_id:
         logo_path = os.path.join(config.LOG_DIR, "logo.png") 
-        
         if os.path.exists(logo_path):
             return FileResponse(logo_path, media_type="image/png")
 
