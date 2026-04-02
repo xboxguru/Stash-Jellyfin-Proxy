@@ -163,6 +163,9 @@ routes = [
     Route("/items/{item_id}/images/{image_type}", image_routes.endpoint_item_image, methods=["GET"]),
     Route("/items/{item_id}/images/{image_type}/{image_index}", image_routes.endpoint_item_image, methods=["GET"]),
     
+    Route("/users/{user_id}/items/{item_id}/images/{image_type}", image_routes.endpoint_item_image, methods=["GET"]),
+    Route("/users/{user_id}/items/{item_id}/images/{image_type}/{image_index}", image_routes.endpoint_item_image, methods=["GET"]),
+    
     Route("/users/{item_id}/images/{image_type}", image_routes.endpoint_item_image, methods=["GET"]),
     Route("/users/{user_id}/items/{item_id}/images/{image_type}", image_routes.endpoint_item_image, methods=["GET"]),
     Route("/videos/{item_id}/trickplay/{width}/{file_name}", image_routes.endpoint_trickplay_image, methods=["GET"]),

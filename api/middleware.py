@@ -80,15 +80,22 @@ class AuthenticationMiddleware:
             return await self.app(scope, receive, send)
 
         start_time = time.time()
+        
         original_path = scope.get("path", "")
+        query_string = scope.get("query_string", b"").decode("utf-8", errors="ignore")
+        method = scope.get("method", "UNK")
+        client_ip = get_client_ip(scope)
+        
+        # --- EXTREME CATCH-ALL LOGGING ---
+        full_url_for_log = f"{original_path}?{query_string}" if query_string else original_path
+        logger.error(f"[[ INBOUND ]] {method} {full_url_for_log} | IP: {client_ip}")
+        # ---------------------------------
+
         path_lower = original_path.lower()
         
         # FIX: Strip trailing slashes so Jellyfin clients don't 404/401 randomly
         if path_lower != "/" and path_lower.endswith("/"):
             path_lower = path_lower[:-1]
-
-        method = scope.get("method", "UNK")
-        client_ip = get_client_ip(scope)
 
         if not path_lower.startswith("/web/") and not path_lower.startswith("/assets/"):
             scope["path"] = path_lower
@@ -143,6 +150,8 @@ class AuthenticationMiddleware:
         try:
             response = await self.app(scope, receive, send)
             elapsed = time.time() - start_time
+            # Optional: Keep the debug log if you want to see how long it took, 
+            # but the INBOUND error log above is the real star of the show.
             logger.debug(f"Completed {scope['method']} {scope['path']} in {elapsed:.3f}s")
             return response
         except Exception as e:

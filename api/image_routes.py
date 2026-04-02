@@ -26,9 +26,9 @@ async def endpoint_item_image(request: Request):
     
     # Extract the index if it was passed in the URL path
     image_index = request.path_params.get("image_index")
-    # Fallback to query parameters just in case Jellyfin formats it as ?index=1
+    # FIX: Safely extract case-insensitive query parameters (?imageIndex=1 or ?Index=1)
     if not image_index:
-        image_index = request.query_params.get("index", "0")
+        image_index = next((v for k, v in request.query_params.items() if k.lower() in ("index", "imageindex")), "0")
         
     logger.debug(f"Image Request -> ID: '{item_id}', Type: '{image_type}', Index: '{image_index}'")
 
@@ -43,7 +43,6 @@ async def endpoint_item_image(request: Request):
             if apikey: url += f"?apikey={apikey}"
             return await _proxy_image(url)
         else:
-            from core.stash_client import call_graphql
             query = """query($id: ID!) { findScene(id: $id) { scene_markers { id seconds } } }"""
             data = await call_graphql(query, {"id": raw_scene_id})
             markers = data.get("findScene", {}).get("scene_markers", []) if data else []
@@ -94,6 +93,11 @@ async def _proxy_image(url: str):
         if r.status_code == 200:
             content_type = r.headers.get("content-type", "image/jpeg")
             
+            # FIX: Android WebViews often abort image streams if Content-Length is missing
+            headers = {"Cache-Control": "public, max-age=31536000"}
+            if "content-length" in r.headers:
+                headers["Content-Length"] = r.headers["content-length"]
+            
             async def stream_generator():
                 async for chunk in r.aiter_bytes(chunk_size=8192):
                     yield chunk
@@ -101,7 +105,12 @@ async def _proxy_image(url: str):
             async def cleanup():
                 await r.aclose()
 
-            return StreamingResponse(stream_generator(), media_type=content_type, background=BackgroundTask(cleanup))
+            return StreamingResponse(
+                stream_generator(), 
+                media_type=content_type, 
+                headers=headers, 
+                background=BackgroundTask(cleanup)
+            )
         else:
             await r.aclose()
             logger.debug(f"Upstream returned {r.status_code} for image {url}")
