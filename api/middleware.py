@@ -8,20 +8,10 @@ import state
 logger = logging.getLogger(__name__)
 
 PUBLIC_ENDPOINTS = {
-    "/",
-    "/system/info/public", 
-    "/system/info",
-    "/public/system/info",
-    "/web/index.html", 
-    "/health", 
-    "/users/authenticatebyname", 
-    "/system/ping",
-    "/users/public",
-    "/quickconnect/initiate",
-    "/quickconnect/enabled",
-    "/favicon.ico",
-    "/branding/configuration",
-    "/clientlog/document"
+    "/", "/system/info/public", "/system/info", "/public/system/info",
+    "/web/index.html", "/health", "/users/authenticatebyname", "/system/ping",
+    "/users/public", "/quickconnect/initiate", "/quickconnect/enabled",
+    "/favicon.ico", "/branding/configuration", "/clientlog/document"
 }
 PUBLIC_PREFIXES = ["/web/", "/assets/", "/api/"]
 
@@ -64,19 +54,16 @@ class AuthenticationMiddleware:
         if "/images/" not in path_lower and "/videos/" not in path_lower:
             return False
             
-        # 1. Check permanent static config first (Your UI Text Box)
         static_ips = getattr(config, "AUTHENTICATED_IPS", [])
-        if client_ip in static_ips:
-            return True
+        if client_ip in static_ips: return True
             
-        # 2. Check dynamic state (Temporary API tokens)
         auth_ips = getattr(state, "authenticated_ips", {})
         if isinstance(auth_ips, set): 
             auth_ips = {ip: time.time() for ip in auth_ips}
             state.authenticated_ips = auth_ips
         
         if client_ip in auth_ips:
-            state.authenticated_ips[client_ip] = time.time() # Refresh the timer
+            state.authenticated_ips[client_ip] = time.time()
             return True
             
         all_allowed = set(auth_ips.keys()).union(set(static_ips))
@@ -85,13 +72,13 @@ class AuthenticationMiddleware:
                 header_val = value.decode("utf-8", errors="ignore")
                 if any(re.search(rf"\b{re.escape(ip)}\b", header_val) for ip in all_allowed):
                     return True
-                    
         return False
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
 
+        start_time = time.time()
         original_path = scope.get("path", "")
         path_lower = original_path.lower()
         method = scope.get("method", "UNK")
@@ -108,6 +95,8 @@ class AuthenticationMiddleware:
         elif path_lower.startswith("/jellyfin/"): scope["path"] = path_lower[9:]
         elif path_lower == "/jellyfin": scope["path"] = "/"
         path_lower = scope["path"]
+        
+        logger.debug(f"Request: {method} {original_path} (Routed as: {path_lower}) from {client_ip}")
 
         is_public = path_lower in PUBLIC_ENDPOINTS or any(path_lower.startswith(p) for p in PUBLIC_PREFIXES)
         
@@ -120,9 +109,10 @@ class AuthenticationMiddleware:
                 token = next((v.decode().split("ui_session=")[1].split(";")[0] for k, v in scope.get("headers", []) if k.decode().lower() == "cookie" and "ui_session=" in v.decode()), None)
                 if not token or token not in getattr(state, "ui_sessions", set()):
                     logger.warning(f"Unauthorized Web UI access attempt from {client_ip}")
-                    await self._send_unauthorized(send)
-                    return
-            return await self.app(scope, receive, send)
+                    return await self._send_unauthorized(send)
+
+            response = await self._process_request(scope, receive, send, start_time)
+            return response
 
         token = self._extract_jellyfin_token(scope)
         expected_key = getattr(config, "PROXY_API_KEY", "").strip()
@@ -135,11 +125,23 @@ class AuthenticationMiddleware:
                 if not hasattr(state, "authenticated_ips") or isinstance(state.authenticated_ips, set):
                     state.authenticated_ips = {}
                 state.authenticated_ips[client_ip] = time.time()
-            return await self.app(scope, receive, send)
+                
+            response = await self._process_request(scope, receive, send, start_time)
+            return response
 
         state.stats["auth_failed"] += 1
-        logger.warning(f"Unauthorized access attempt to {original_path} from {client_ip}")
+        logger.warning(f"Unauthorized API request to {original_path} from {client_ip}")
         await self._send_unauthorized(send)
+        
+    async def _process_request(self, scope, receive, send, start_time):
+        try:
+            response = await self.app(scope, receive, send)
+            elapsed = time.time() - start_time
+            logger.debug(f"Completed {scope['method']} {scope['path']} in {elapsed:.3f}s")
+            return response
+        except Exception as e:
+            logger.error(f"Server Error during {scope['method']} {scope['path']}: {e}", exc_info=True)
+            raise
 
     async def _send_unauthorized(self, send):
         response_body = b'{"error": "Unauthorized"}'

@@ -109,8 +109,10 @@ routes = [
     Route("/users/authenticatebyname", auth_routes.endpoint_authenticate_by_name, methods=["POST"]),
     Route("/users/{user_id}", auth_routes.endpoint_user, methods=["GET"]),
     Route("/users", auth_routes.endpoint_users, methods=["GET"]),
-    Route("/quickconnect/enabled", auth_routes.endpoint_quickconnect_enabled, methods=["GET"]),
-    Route("/quickconnect/initiate", auth_routes.endpoint_quickconnect_initiate, methods=["POST"]),
+    Route('/quickconnect/enabled', auth_routes.endpoint_quickconnect_enabled, methods=['GET']),
+    Route('/quickconnect/initiate', auth_routes.endpoint_quickconnect_initiate, methods=['GET', 'POST']),
+    Route('/quickconnect/connect', auth_routes.endpoint_quickconnect_connect, methods=['GET']),
+    Route('/quickconnect/authorize', auth_routes.endpoint_quickconnect_authorize, methods=['POST']),
     Route("/branding/configuration", auth_routes.endpoint_branding_configuration, methods=["GET"]),
     
     Route("/userviews", library_routes.endpoint_views, methods=["GET"]),
