@@ -14,10 +14,11 @@ logger = logging.getLogger(__name__)
 # --- DRY Helpers ---
 
 def _get_full_user() -> dict:
+    """Generates a strictly-typed UserDto matched to a real Jellyfin Server response."""
     valid_jellyfin_id = "00000000-0000-0000-0000-000000000001"
-    server_id = getattr(config, "SERVER_ID", "stash-proxy-server-id")
-    expected_user = str(getattr(config, "SJS_USER", "admin")).strip() or "admin"
-    has_pass = bool(str(getattr(config, "SJS_PASSWORD", "")).strip())
+    server_id = getattr(config, "SERVER_ID", "354ce9ec39db43b9a0961f6dafbca521")
+    expected_user = str(getattr(config, "SJS_USER", "josh")).strip()
+    has_pass = True 
 
     return {
         "Name": expected_user,
@@ -34,14 +35,14 @@ def _get_full_user() -> dict:
             "PlayDefaultAudioTrack": True,
             "SubtitleLanguagePreference": "",
             "DisplayMissingEpisodes": True,
-            "GroupedFolders": [],             # Required
-            "SubtitleMode": "Default",        # Required
-            "DisplayCollectionsView": False,  # Required
-            "EnableLocalPassword": False,     # Required
-            "OrderedViews": [],               # Required
-            "LatestItemsExcludes": [],        # Required
-            "MyMediaExcludes": [],            # Required
-            "HidePlayedInLatest": True,       # Required
+            "GroupedFolders": [],
+            "SubtitleMode": "Default",
+            "DisplayCollectionsView": False,
+            "EnableLocalPassword": False,
+            "OrderedViews": [],
+            "LatestItemsExcludes": [],
+            "MyMediaExcludes": [],
+            "HidePlayedInLatest": True,
             "RememberAudioSelections": True,
             "RememberSubtitleSelections": True,
             "EnableNextEpisodeAutoPlay": True,
@@ -94,66 +95,17 @@ def _get_full_user() -> dict:
     }
 
 def _build_auth_payload(request: Request, fake_user: dict, request_data: dict) -> dict:
-    # IMPORTANT: This MUST match what is in endpoint_system_info_public
-    server_id = getattr(config, "SERVER_ID", "stash-proxy-server-id")
+    server_id = getattr(config, "SERVER_ID", "354ce9ec39db43b9a0961f6dafbca521")
     access_token = getattr(config, "PROXY_API_KEY", "proxy-api-key")
     
-    # Ensure the User object is complete. Clients crash without 'Configuration'.
-    user_payload = {
-        "Name": str(fake_user.get("Name", "StashUser")),
-        "Id": str(fake_user.get("Id", "00000000000000000000000000000001")),
-        "HasPassword": False,
-        "HasConfigAccess": True,
-        "HasSubFolders": True,
-        "EnableUserPreferenceAccess": True,
-        "Configuration": {
-            "AudioLanguagePreference": "en",
-            "PlayDefaultAudioTrack": True,
-            "SubtitleLanguagePreference": "en",
-            "DisplayMissingEpisodes": False,
-            "HidePlayedInLatestVideo": False,
-            "RememberAudioSelections": True,
-            "RememberSubtitleSelections": True,
-            "EnableNextEpisodeAutoPlay": True
-        },
-        "Policy": {
-            "IsAdministrator": True,
-            "IsDisabled": False,
-            "IsHidden": False,
-            "IsHiddenFromUnusedDevices": False,
-            "EnableSharedDeviceControl": True,
-            "EnableLiveTvManagement": True,
-            "EnableLiveTvAccess": True,
-            "EnableMediaPlayback": True,
-            "EnableAudioPlaybackTranscoding": True,
-            "EnableVideoPlaybackTranscoding": True,
-            "EnablePlaybackRemuxing": True,
-            "EnableContentDeletion": False,
-            "EnableContentDownloading": True,
-            "EnableSyncTranscoding": True,
-            "EnabledDevices": [],
-            "EnableAllDevices": True,
-            "EnabledChannels": [],
-            "EnableAllChannels": True,
-            "EnabledFolders": [],
-            "EnableAllFolders": True,
-            "InvalidLoginAttemptCount": 0,
-            "EnablePublicSharing": True,
-            "BlockedTags": [],
-            "IsTagBlockingModeInclusive": False,
-            "RemoteClientBitrateLimit": 0,
-            "AuthenticationProviderId": "ProxyProvider"
-        }
-    }
-    
     return {
-        "User": user_payload,
+        "User": fake_user, # This now contains the full Policy and Configuration
         "AccessToken": str(access_token),
         "ServerId": str(server_id),
         "SessionInfo": {
             "Id": "00000000000000000000000000000002",
-            "UserId": user_payload["Id"],
-            "UserName": user_payload["Name"],
+            "UserId": str(fake_user["Id"]),
+            "UserName": str(fake_user["Name"]),
             "IsActive": True,
             "ServerId": str(server_id)
         }
@@ -276,7 +228,7 @@ async def endpoint_quickconnect_connect(request: Request):
         "AppVersion": "1.0.0", # Required
         "DateAdded": datetime.fromtimestamp(session["timestamp"], tz=timezone.utc).isoformat().replace("+00:00", "Z") # Required
     }
-
+    logger.debug(f"DEBUG: Poll Result - Authenticated: {response_data['Authenticated']}, Code: {response_data['Code']}")
     return JSONResponse(response_data)
 
 async def endpoint_quickconnect_authorize(request: Request):
@@ -324,5 +276,7 @@ async def endpoint_authenticate_by_quickconnect(request: Request):
     response_payload = _build_auth_payload(request, user_data, {})
     
     del state.quick_connect_sessions[secret]
-    
+    import json
+    logger.debug(f"DEBUG: Outgoing Auth Payload keys: {list(response_payload.keys())}")
+    logger.debug(f"DEBUG: User Configuration keys: {list(response_payload['User']['Configuration'].keys())}")
     return JSONResponse(response_payload)
