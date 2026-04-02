@@ -2,23 +2,22 @@ import logging
 import uuid
 import random
 import time
+import os
 from datetime import datetime, timezone
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.requests import Request
 import config
 import state
-import os
 
 logger = logging.getLogger(__name__)
 
-# --- DRY Helpers ---
-
 def _get_full_user() -> dict:
-    """Generates a strictly-typed UserDto matched to a real Jellyfin Server response."""
+    """Generates a strictly-typed UserDto matched EXACTLY to the main branch."""
     valid_jellyfin_id = "00000000-0000-0000-0000-000000000001"
-    server_id = getattr(config, "SERVER_ID", "354ce9ec39db43b9a0961f6dafbca521")
-    expected_user = str(getattr(config, "SJS_USER", "josh")).strip()
-    has_pass = True 
+    server_id = getattr(config, "SERVER_ID", "stash-proxy-server-id")
+    expected_user = str(getattr(config, "SJS_USER", "admin")).strip() or "admin"
+    expected_pass = str(getattr(config, "SJS_PASSWORD", "")).strip()
+    has_pass = bool(expected_pass)
 
     return {
         "Name": expected_user,
@@ -41,7 +40,7 @@ def _get_full_user() -> dict:
             "EnableLocalPassword": False,
             "OrderedViews": [],
             "LatestItemsExcludes": [],
-            "MyMediaExcludes": [],
+            "MyMediaExcludes": [],  
             "HidePlayedInLatest": True,
             "RememberAudioSelections": True,
             "RememberSubtitleSelections": True,
@@ -94,39 +93,92 @@ def _get_full_user() -> dict:
         }
     }
 
-def _build_auth_payload(request: Request, fake_user: dict, request_data: dict) -> dict:
-    server_id = getattr(config, "SERVER_ID", "354ce9ec39db43b9a0961f6dafbca521")
-    access_token = getattr(config, "PROXY_API_KEY", "proxy-api-key")
+def _parse_client_info(request: Request, body_data: dict) -> dict:
+    """Extracts client details from the JSON body or X-Emby-Authorization header."""
+    info = {"Client": "Jellyfin-Client", "Device": "Device", "DeviceId": "proxy-v2-id", "Version": "1.0.0"}
+    if body_data:
+        info.update(body_data)
     
+    auth_header = request.headers.get("authorization", "") or request.headers.get("x-emby-authorization", "")
+    if auth_header:
+        parts = auth_header.replace("MediaBrowser ", "").split(",")
+        for part in parts:
+            if "=" in part:
+                k, v = part.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip('"')
+                if k == "Client": info["Client"] = v
+                elif k == "Device": info["Device"] = v
+                elif k == "DeviceId": info["DeviceId"] = v
+                elif k == "Version": info["Version"] = v
+    return info
+
+def _build_auth_payload(request: Request, fake_user: dict, request_data: dict) -> dict:
+    """Builds the full auth payload, completely mirroring the main branch SessionInfo."""
+    server_id = getattr(config, "SERVER_ID", "stash-proxy-server-id")
+    access_token = getattr(config, "PROXY_API_KEY", "")
+    client_info = _parse_client_info(request, request_data)
+
     return {
-        "User": fake_user, # This now contains the full Policy and Configuration
-        "AccessToken": str(access_token),
-        "ServerId": str(server_id),
+        "User": fake_user,
         "SessionInfo": {
+            "PlayState": {
+                "CanSeek": False,
+                "IsPaused": False,
+                "IsMuted": False,
+                "RepeatMode": "RepeatNone",
+                "PlaybackOrder": "Default"
+            },
+            "AdditionalUsers": [],
+            "Capabilities": {
+                "PlayableMediaTypes": [],
+                "SupportedCommands": [],
+                "SupportsMediaControl": False,
+                "SupportsPersistentIdentifier": True
+            },
+            "RemoteEndPoint": request.client.host if request.client else "127.0.0.1",
+            "PlayableMediaTypes": [],
             "Id": "00000000000000000000000000000002",
-            "UserId": str(fake_user["Id"]),
-            "UserName": str(fake_user["Name"]),
+            "UserId": fake_user["Id"],
+            "UserName": fake_user["Name"],
+            "Client": client_info.get("Client"),
+            "LastActivityDate": "2026-01-01T00:00:00.0000000Z",
+            "LastPlaybackCheckIn": "0001-01-01T00:00:00.0000000Z",
+            "DeviceName": client_info.get("Device"),
+            "DeviceId": client_info.get("DeviceId"),
+            "ApplicationVersion": client_info.get("Version"),
             "IsActive": True,
-            "ServerId": str(server_id)
-        }
+            "SupportsMediaControl": False,
+            "SupportsRemoteControl": False,
+            "NowPlayingQueue": [],
+            "NowPlayingQueueFullItems": [],
+            "HasCustomDeviceName": False,
+            "ServerId": server_id,
+            "SupportedCommands": []
+        },
+        "AccessToken": str(access_token),
+        "ServerId": str(server_id)
     }
+
 
 # --- Standard Auth Endpoints ---
 
 async def endpoint_public_users(request: Request):
-    logger.debug("Generating public users list for login screen.")
+    valid_jellyfin_id = "00000000-0000-0000-0000-000000000001"
+    expected_user = str(getattr(config, "SJS_USER", "admin")).strip() or "admin"
+    has_pass = bool(str(getattr(config, "SJS_PASSWORD", "")).strip())
+    
     return JSONResponse([{
-        "Name": str(getattr(config, "SJS_USER", "admin")).strip() or "admin",
-        "Id": "00000000-0000-0000-0000-000000000001",
+        "Name": expected_user,
+        "Id": valid_jellyfin_id,
         "ServerId": getattr(config, "SERVER_ID", ""),
-        "HasPassword": bool(str(getattr(config, "SJS_PASSWORD", "")).strip()),
-        "HasConfiguredPassword": bool(str(getattr(config, "SJS_PASSWORD", "")).strip()),
+        "HasPassword": has_pass,
+        "HasConfiguredPassword": has_pass,
         "HasConfiguredEasyPassword": False,
         "PrimaryImageTag": None
     }])
 
 async def endpoint_user(request: Request):
-    logger.debug("Detailed user configuration profile requested.")
     return JSONResponse(_get_full_user())
 
 async def endpoint_users(request: Request):
@@ -148,7 +200,8 @@ async def endpoint_authenticate_by_name(request: Request):
         return JSONResponse({"error": "Invalid username or password"}, status_code=401)
             
     logger.info(f"User '{username}' successfully authenticated from {client_ip}")
-    return JSONResponse(_build_auth_payload(request, _get_full_user(), {}))
+    return JSONResponse(_build_auth_payload(request, _get_full_user(), data))
+
 
 # --- System Endpoints ---
 
@@ -177,38 +230,43 @@ async def endpoint_branding_configuration(request: Request):
     return JSONResponse({})
 
 async def endpoint_client_log(request: Request):
-    try:
-        body = await request.body()
-        client_ip = request.client.host if request.client else "unknown"
-        log_dir = os.path.join(getattr(config, "LOG_DIR", "."), "client_logs")
-        os.makedirs(log_dir, exist_ok=True)
-        filename = os.path.join(log_dir, f"client_{client_ip}_{int(time.time())}.log")
-        with open(filename, "wb") as f:
-            f.write(body)
-        logger.debug(f"Intercepted and saved client debug log to {filename}")
-    except Exception as e:
-        logger.error(f"Failed to save client log: {e}", exc_info=True)
     return PlainTextResponse("OK")
+
 
 # --- Quick Connect Endpoints ---
 
 async def endpoint_quickconnect_enabled(request: Request):
-    # Starlette JSONResponse(True) works, but Response("true") is completely bulletproof for strict clients
     return Response(content="true", media_type="application/json")
 
 async def endpoint_quickconnect_initiate(request: Request):
     state.clean_expired_quick_connects() 
-    
     secret = str(uuid.uuid4())
     code = str(random.randint(100000, 999999))
+    timestamp = time.time()
     
     state.quick_connect_sessions[secret] = {
         "code": code, 
         "authorized": False, 
-        "timestamp": time.time()
+        "timestamp": timestamp
     }
     logger.info(f"QuickConnect initiated. Code: {code} | Secret: {secret}")
-    return JSONResponse({"Secret": secret, "Code": code})
+    
+    # Parse the client info to populate the required fields
+    client_info = _parse_client_info(request, {})
+    
+    # Return the full QuickConnectResult object instead of just Secret/Code
+    response_data = {
+        "Authenticated": False,
+        "Secret": secret,
+        "Code": code,
+        "DeviceId": client_info.get("DeviceId", "proxy-handshake-device"),
+        "DeviceName": client_info.get("Device", "Stash Proxy Handshake"),
+        "AppName": client_info.get("Client", "Stash-Jellyfin-Proxy"),
+        "AppVersion": client_info.get("Version", "1.0.0"),
+        "DateAdded": datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    }
+    
+    return JSONResponse(response_data)
 
 async def endpoint_quickconnect_connect(request: Request):
     secret = request.query_params.get("secret")
@@ -217,18 +275,18 @@ async def endpoint_quickconnect_connect(request: Request):
     if not session:
         return Response(status_code=404)
         
-    # Standard Jellyfin SDK response structure
+    client_info = _parse_client_info(request, {})
+    
     response_data = {
-        "Authenticated": session.get("authorized", False), # Required
+        "Authenticated": session.get("authorized", False),
         "Secret": secret,
         "Code": session["code"],
-        "DeviceId": "proxy-handshake-device", # Required
-        "DeviceName": "Stash Proxy Handshake", # Required
-        "AppName": "Stash-Jellyfin-Proxy", # Required
-        "AppVersion": "1.0.0", # Required
-        "DateAdded": datetime.fromtimestamp(session["timestamp"], tz=timezone.utc).isoformat().replace("+00:00", "Z") # Required
+        "DeviceId": client_info.get("DeviceId", "proxy-handshake-device"),
+        "DeviceName": client_info.get("Device", "Stash Proxy Handshake"),
+        "AppName": client_info.get("Client", "Stash-Jellyfin-Proxy"),
+        "AppVersion": client_info.get("Version", "1.0.0"),
+        "DateAdded": datetime.fromtimestamp(session["timestamp"], tz=timezone.utc).isoformat().replace("+00:00", "Z")
     }
-    logger.debug(f"DEBUG: Poll Result - Authenticated: {response_data['Authenticated']}, Code: {response_data['Code']}")
     return JSONResponse(response_data)
 
 async def endpoint_quickconnect_authorize(request: Request):
@@ -239,31 +297,14 @@ async def endpoint_quickconnect_authorize(request: Request):
             logger.info(f"QuickConnect Web UI approved code: {code}")
             return JSONResponse({"Success": True})
             
-    logger.warning(f"QuickConnect Web UI rejected invalid code attempt: {code}")
     return JSONResponse({"Error": "Invalid code"}, status_code=400)
 
-async def endpoint_blackhole(request: Request):
-    path_lower = request.url.path.lower()
-    logger.debug(f"Blackholed Web UI Path: {request.method} {request.url.path}")
-    
-    if "syncplay" in path_lower: return JSONResponse([])
-    if "sessions" in path_lower and request.method == "GET": return JSONResponse([])
-    if "branding/css" in path_lower: return Response(content="", media_type="text/css")
-
-    array_endpoints = ["/plugins", "/scheduledtasks", "/channels", "/livetv", "/providers"]
-    if any(x in path_lower for x in array_endpoints):
-        return JSONResponse([])
-        
-    if "configuration" in path_lower:
-        return JSONResponse({"PlayDefaultAudioTrack": True, "SubtitleMode": "Default"})
-
-    return JSONResponse({})
-
 async def endpoint_authenticate_by_quickconnect(request: Request):
+    """Finalizes QuickConnect by swapping Secret for Token."""
     try:
         data = await request.json()
         secret = data.get("Secret")
-    except:
+    except Exception:
         return Response(status_code=400)
 
     session = state.quick_connect_sessions.get(secret)
@@ -273,10 +314,22 @@ async def endpoint_authenticate_by_quickconnect(request: Request):
     logger.info(f"Finalizing QuickConnect login for secret: {secret}")
     
     user_data = _get_full_user()
-    response_payload = _build_auth_payload(request, user_data, {})
+    response_payload = _build_auth_payload(request, user_data, data)
     
     del state.quick_connect_sessions[secret]
-    import json
-    logger.debug(f"DEBUG: Outgoing Auth Payload keys: {list(response_payload.keys())}")
-    logger.debug(f"DEBUG: User Configuration keys: {list(response_payload['User']['Configuration'].keys())}")
     return JSONResponse(response_payload)
+
+async def endpoint_blackhole(request: Request):
+    path_lower = request.url.path.lower()
+    
+    if "syncplay" in path_lower: return JSONResponse([])
+    if "sessions" in path_lower and request.method == "GET": return JSONResponse([])
+    if "branding/css" in path_lower: return Response(content="", media_type="text/css")
+
+    array_endpoints = ["/plugins", "/scheduledtasks", "/channels", "/livetv", "/providers"]
+    if any(x in path_lower for x in array_endpoints): return JSONResponse([])
+        
+    if "configuration" in path_lower:
+        return JSONResponse({"PlayDefaultAudioTrack": True, "SubtitleMode": "Default"})
+
+    return JSONResponse({})
