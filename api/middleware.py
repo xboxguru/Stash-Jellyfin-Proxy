@@ -88,7 +88,7 @@ class AuthenticationMiddleware:
         
         # --- EXTREME CATCH-ALL LOGGING ---
         full_url_for_log = f"{original_path}?{query_string}" if query_string else original_path
-        logger.error(f"[[ INBOUND ]] {method} {full_url_for_log} | IP: {client_ip}")
+        logger.debug(f"[[ INBOUND ]] {method} {full_url_for_log} | IP: {client_ip}")
         # ---------------------------------
 
         path_lower = original_path.lower()
