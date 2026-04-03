@@ -290,9 +290,7 @@ async def _handle_library_browse(request: Request, query: JellyfinItemQuery):
                 elif query.name_starts_with:
                     if not is_bottom_symbol and title.startswith(query.name_starts_with.lower()): 
                         count += 1
-                # ---------------------------------------------
-            if query.name_less_than:
-                logger.info(f"ALPHABET JUMP: Client requested '< {query.name_less_than}' -> Proxy calculated index {count}")    
+                # ---------------------------------------------  
             return JSONResponse({"Items": [], "TotalRecordCount": count, "StartIndex": 0})
         
         # Slow Path: Client actually clicked the letter to render a filtered view of the items
@@ -302,12 +300,39 @@ async def _handle_library_browse(request: Request, query: JellyfinItemQuery):
             
             filtered_scenes = []
             for s in all_scenes:
-                title = str(s.get("title") or s.get("code") or "").lower()
-                if query.name_less_than and title < query.name_less_than.lower(): filtered_scenes.append(s)
-                elif query.name_starts_with and title.startswith(query.name_starts_with.lower()): filtered_scenes.append(s)
-                elif query.name_starts_with_or_greater and title >= query.name_starts_with_or_greater.lower(): filtered_scenes.append(s)
+                # --- FIX: Mirror the Fast Path fallback and stripping logic ---
+                raw_title = s.get("title")
+                if not raw_title: 
+                    raw_title = s.get("code")
+                if not raw_title and s.get("files") and len(s.get("files")) > 0:
+                    raw_title = s.get("files")[0].get("basename")
+                    
+                title = str(raw_title or "").lower().strip()
+                
+                sort_title = title
+                for article in ["the ", "a ", "an "]:
+                    if sort_title.startswith(article):
+                        sort_title = sort_title[len(article):]
+                        break
+                        
+                is_bottom_symbol = not sort_title or not sort_title[0].isalnum()
+                
+                if query.name_less_than:
+                    if not is_bottom_symbol and sort_title < query.name_less_than.lower(): 
+                        filtered_scenes.append(s)
+                        
+                elif query.name_starts_with_or_greater:
+                    if is_bottom_symbol or sort_title >= query.name_starts_with_or_greater.lower(): 
+                        filtered_scenes.append(s)
+                        
+                elif query.name_starts_with:
+                    if not is_bottom_symbol and sort_title.startswith(query.name_starts_with.lower()): 
+                        filtered_scenes.append(s)
+                # --------------------------------------------------------------
             
             total_count = len(filtered_scenes)
+            
+            # Now paginate the filtered results to respect the client's Limit
             if query.original_limit > 0:
                 filtered_scenes = filtered_scenes[query.start_index : query.start_index + query.original_limit]
                 
