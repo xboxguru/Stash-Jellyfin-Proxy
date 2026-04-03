@@ -148,6 +148,13 @@ routes = [
     Route("/users/{user_id}/items/{item_id}", metadata_routes.endpoint_delete_item, methods=["DELETE"]),
     Route("/items/{item_id}", metadata_routes.endpoint_item_details, methods=["GET"]),
     Route("/items/{item_id}", metadata_routes.endpoint_delete_item, methods=["DELETE"]),
+    Route("/items/{item_id}/metadataeditor", metadata_routes.endpoint_metadata_editor, methods=["GET"]),
+    Route("/users/{user_id}/items/{item_id}/metadataeditor", metadata_routes.endpoint_metadata_editor, methods=["GET"]),
+    
+    Route("/items/{item_id}", metadata_routes.endpoint_update_item, methods=["POST"]),
+    Route("/users/{user_id}/items/{item_id}", metadata_routes.endpoint_update_item, methods=["POST"]),
+    Route("/items/{item_id}/images", metadata_routes.endpoint_item_images_info, methods=["GET"]),
+    Route("/users/{user_id}/items/{item_id}/images", metadata_routes.endpoint_item_images_info, methods=["GET"]),
     
     Route("/users/{user_id}/items/{item_id}/thememedia", library_routes.endpoint_theme_songs, methods=["GET"]),
     Route("/users/{user_id}/items/{item_id}/themesongs", library_routes.endpoint_theme_songs, methods=["GET"]),

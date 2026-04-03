@@ -167,9 +167,17 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
         "Name": title, 
         "SortName": title, 
         "Id": item_id, 
-        "Etag": primary_tag, # <-- FIX: Added Etag for Tunarr
+        "Etag": primary_tag,
+        "OfficialRating": "XXX",
+        "CommunityRating": scene.get("o_counter"),
+        "CriticRating": scene.get("rating100"),
         "ServerId": getattr(config, "SERVER_ID", "stash-proxy"),
         "Type": "Movie", "IsFolder": False, "MediaType": "Video", "ParentId": parent_id if parent_id else encode_id("root", "scenes"),
+        "LocationType": "FileSystem",
+        "LockedFields": [],
+        "LockData": False,
+        "CanDelete": True,
+        "CanDownload": True,
         "HasPrimaryImage": True, "HasBackdrop": True, "ImageTags": {"Primary": primary_tag, "Thumb": primary_tag}, 
         "PrimaryImageAspectRatio": 1.777, "BackdropImageTags": [backdrop_tag],
         "ImageBlurHashes": {"Primary": {primary_tag: fake_blurhash}, "Thumb": {primary_tag: fake_blurhash}, "Backdrop": {backdrop_tag: fake_blurhash}},
@@ -256,3 +264,25 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
     item["Overview"] = "\n\n".join(overview_parts)
 
     return item
+
+def get_metadata_editor_info() -> Dict[str, Any]:
+    """Responsibility: Provide the static layout options for the Jellyfin Metadata Editor UI."""
+    return {
+        "ParentalRatingOptions": [
+            {"Name": "Unrated", "Value": 0},
+            {"Name": "PG-13", "Value": 13},
+            {"Name": "R", "Value": 17},
+            {"Name": "XXX", "Value": 1000}
+        ],
+        "Countries": [
+            {"Name": "US", "DisplayName": "United States", "TwoLetterISORegionName": "US", "ThreeLetterISORegionName": "USA"},
+            {"Name": "JP", "DisplayName": "Japan", "TwoLetterISORegionName": "JP", "ThreeLetterISORegionName": "JPN"}
+        ],
+        "Cultures": [
+            {"Name": "English", "DisplayName": "English", "TwoLetterISOLanguageName": "en", "ThreeLetterISOLanguageName": "eng"}
+        ],
+        "ExternalIdInfos": [
+            {"Name": "Stash", "Key": "Stash", "Type": "Movie"}
+        ],
+        "ContentTypeOptions": []
+    }
