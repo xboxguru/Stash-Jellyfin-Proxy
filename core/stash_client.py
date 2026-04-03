@@ -144,7 +144,7 @@ async def destroy_scene(scene_id: str, delete_file: bool = False) -> bool:
     return result is not None and result.get("sceneDestroy") is True
 
 async def get_all_tags() -> list:
-    data = await call_graphql("""query { findTags(filter: {per_page: -1, sort: "name", direction: ASC}) { tags { id name } } }""")
+    data = await call_graphql("""query { findTags(filter: {per_page: -1, sort: "name", direction: ASC}, tag_filter: {scene_count: {value: 0, modifier: GREATER_THAN}}) { tags { id name } } }""")
     return data.get("findTags", {}).get("tags", []) if data else []
 
 async def get_saved_filters() -> list:
