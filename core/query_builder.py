@@ -26,6 +26,14 @@ class StashQueryBuilder:
         result = {}
         for key, value in object_filter.items():
             if value is None: continue
+            
+            if key in ('has_markers', 'is_missing'):
+                if isinstance(value, dict) and 'value' in value:
+                    result[key] = str(value['value']).lower()
+                else:
+                    result[key] = str(value).lower()
+                continue
+            
             if key in ('AND', 'OR', 'NOT'):
                 if isinstance(value, list): result[key] = [self._transform_saved_filter(v) for v in value if v]
                 elif isinstance(value, dict): result[key] = self._transform_saved_filter(value)
