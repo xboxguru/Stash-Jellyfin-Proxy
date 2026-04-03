@@ -160,3 +160,39 @@ async def get_performer(performer_id: str) -> dict:
 async def get_scene_sprite(scene_id: str) -> str:
     data = await call_graphql("""query($id: ID!) { findScene(id: $id) { paths { sprite } } }""", {"id": scene_id})
     return data.get("findScene", {}).get("paths", {}).get("sprite") if data else None
+
+async def ensure_tags_exist(tag_names: list) -> list:
+    """Responsibility: Match Jellyfin string tags to Stash Tag IDs, creating missing ones dynamically."""
+    if not tag_names: return []
+    
+    existing_tags = await get_all_tags()
+    tag_map = {t["name"].lower(): str(t["id"]) for t in existing_tags}
+    
+    final_ids = []
+    for name in tag_names:
+        clean_name = str(name).strip()
+        if not clean_name: continue
+        
+        lower_name = clean_name.lower()
+        if lower_name in tag_map:
+            final_ids.append(tag_map[lower_name])
+        else:
+            logger.info(f"Creating new Stash tag: '{clean_name}'")
+            res = await call_graphql(
+                "mutation($name: String!) { tagCreate(input: {name: $name}) { id } }", 
+                {"name": clean_name}
+            )
+            if res and res.get("tagCreate"):
+                final_ids.append(str(res["tagCreate"]["id"]))
+                
+    return list(set(final_ids))
+
+async def update_scene(update_input: dict) -> bool:
+    """Responsibility: Submit the SceneUpdateInput payload to Stash."""
+    query = """
+    mutation SceneUpdate($input: SceneUpdateInput!) {
+        sceneUpdate(input: $input) { id }
+    }
+    """
+    result = await call_graphql(query, {"input": update_input})
+    return result is not None and result.get("sceneUpdate") is not None

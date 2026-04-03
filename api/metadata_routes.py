@@ -135,3 +135,89 @@ async def endpoint_delete_item(request: Request):
             return Response(status_code=500)
 
     return Response(status_code=403)
+
+async def endpoint_metadata_editor(request: Request):
+    """Feeds the Jellyfin Web UI the required layout data for the Edit Metadata screen."""
+    return JSONResponse(jellyfin_mapper.get_metadata_editor_info())
+
+async def endpoint_update_item(request: Request):
+    """Intercepts Jellyfin UI metadata edits and syncs them to Stash."""
+    raw_item_id = request.path_params.get("item_id", "")
+    decoded_id = decode_id(raw_item_id)
+    
+    if not decoded_id.startswith("scene-"):
+        return Response(status_code=400)
+        
+    raw_scene_id = decoded_id.replace("scene-", "")
+    
+    try:
+        data = await request.json()
+    except Exception as e:
+        logger.error(f"Failed to parse metadata edit payload: {e}")
+        return Response(status_code=400)
+
+    stash_update_payload = {"id": raw_scene_id}
+    
+    # Map basic text fields
+    if "Name" in data:
+        stash_update_payload["title"] = data["Name"]
+    if "Overview" in data:
+        stash_update_payload["details"] = data["Overview"]
+    
+    # Map Jellyfin CriticRating back to Stash rating100
+    if "CriticRating" in data:
+        try:
+            val = int(float(data["CriticRating"]))
+            stash_update_payload["rating100"] = max(0, min(100, val))
+        except (ValueError, TypeError):
+            pass
+
+    # Map Jellyfin CommunityRating back to Stash o_counter
+    if "CommunityRating" in data:
+        try:
+            stash_update_payload["o_counter"] = int(float(data["CommunityRating"]))
+        except (ValueError, TypeError):
+            pass
+
+    # Format date from Jellyfin ISO to Stash YYYY-MM-DD
+    if "PremiereDate" in data:
+        if data["PremiereDate"]:
+            stash_update_payload["date"] = str(data["PremiereDate"]).split("T")[0]
+        else:
+            stash_update_payload["date"] = ""
+
+    if "Tags" in data or "Genres" in data:
+        raw_tags = data.get("Tags", []) + data.get("Genres", [])
+        dynamic_tags_to_ignore = {"recently added", "onot0"}
+        
+        jellyfin_tags = [
+            tag for tag in raw_tags 
+            if str(tag).strip().lower() not in dynamic_tags_to_ignore
+        ]
+        
+        logger.debug(f"Syncing {len(jellyfin_tags)} tags for scene {raw_scene_id}")
+        
+        tag_ids = await stash_client.ensure_tags_exist(jellyfin_tags)
+        stash_update_payload["tag_ids"] = tag_ids
+
+    logger.info(f"Applying metadata update to scene {raw_scene_id}...")
+    success = await stash_client.update_scene(stash_update_payload)
+    
+    # Return 204 No Content for a successful Jellyfin save
+    return Response(status_code=204 if success else 500)
+
+async def endpoint_item_images_info(request: Request):
+    """
+    Returns the list of available images for an item. 
+    Required by native apps like Fladder to build the Metadata Editor Image tab without crashing.
+    """
+    return JSONResponse([
+        {
+            "ImageType": "Primary",
+            "ImageIndex": 0
+        },
+        {
+            "ImageType": "Backdrop",
+            "ImageIndex": 0
+        }
+    ])
