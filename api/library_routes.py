@@ -258,31 +258,41 @@ async def _handle_library_browse(request: Request, query: JellyfinItemQuery):
         
         # Fast Path: Client just wants the index count for the alphabet scrollbar (Limit = 0)
         if query.original_limit == 0:
-            graphql_query = """query FindScenes($filter: FindFilterType, $scene_filter: SceneFilterType) { findScenes(filter: $filter, scene_filter: $scene_filter) { scenes { title code } } }"""
+            graphql_query = """query FindScenes($filter: FindFilterType, $scene_filter: SceneFilterType) { findScenes(filter: $filter, scene_filter: $scene_filter) { scenes { title code files { basename } } } }"""
             data = await stash_client.call_graphql(graphql_query, {"filter": filter_args, "scene_filter": scene_filter})
             scenes = data.get("findScenes", {}).get("scenes", []) if data else []
             
-            is_desc = filter_args.get("direction") == "DESC"
+            # --- FIX: Pure mathematical counting (No directional flipping!) ---
             count = 0
-            
             for s in scenes:
-                title = str(s.get("title") or s.get("code") or "").lower()
-                if query.name_less_than:
-                    target = query.name_less_than.lower()
-                    if is_desc:
-                        if title >= target: count += 1 # Z-to-A: Count down from Z to find offset
-                    else:
-                        if title < target: count += 1  # A-to-Z: Count up from A to find offset
-                elif query.name_starts_with_or_greater:
-                    target = query.name_starts_with_or_greater.lower()
-                    if is_desc:
-                        if title <= target: count += 1
-                    else:
-                        if title >= target: count += 1
-                elif query.name_starts_with:
-                    if title.startswith(query.name_starts_with.lower()): count += 1
-            # --------------------------------------------------
+                raw_title = s.get("title")
+                if not raw_title: 
+                    raw_title = s.get("code")
+                if not raw_title and s.get("files") and len(s.get("files")) > 0:
+                    raw_title = s.get("files")[0].get("basename")
                     
+                title = str(raw_title or "").lower().strip()
+                
+                # --- FIX: Define Wholphin's Sorting Tiers ---
+                # If it's empty or starts with a symbol, Wholphin puts it at the absolute bottom
+                is_bottom_symbol = not title or not title[0].isalnum()
+                
+                if query.name_less_than:
+                    # Symbols are at the bottom, so they are NEVER less than a letter
+                    if not is_bottom_symbol and title < query.name_less_than.lower(): 
+                        count += 1
+                        
+                elif query.name_starts_with_or_greater:
+                    # Symbols are at the bottom, so they are ALWAYS greater than any letter
+                    if is_bottom_symbol or title >= query.name_starts_with_or_greater.lower(): 
+                        count += 1
+                        
+                elif query.name_starts_with:
+                    if not is_bottom_symbol and title.startswith(query.name_starts_with.lower()): 
+                        count += 1
+                # ---------------------------------------------
+            if query.name_less_than:
+                logger.info(f"ALPHABET JUMP: Client requested '< {query.name_less_than}' -> Proxy calculated index {count}")    
             return JSONResponse({"Items": [], "TotalRecordCount": count, "StartIndex": 0})
         
         # Slow Path: Client actually clicked the letter to render a filtered view of the items

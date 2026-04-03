@@ -256,12 +256,12 @@ async def endpoint_client_log(request: Request):
         
     except Exception as e:
         logger.error(f"Failed to save client log: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
         
     # Always return OK so the client knows it was received
-    return PlainTextResponse("OK")
+    return JSONResponse({"FileName": os.path.basename(filename)})
 
 # --- Quick Connect Endpoints ---
-
 async def endpoint_quickconnect_enabled(request: Request):
     return Response(content="true", media_type="application/json")
 
