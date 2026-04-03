@@ -10,7 +10,7 @@ from hypercorn.config import Config
 from hypercorn.asyncio import serve
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import RedirectResponse
+from starlette.responses import RedirectResponse, Response
 from starlette.routing import Route, WebSocketRoute, Mount
 from starlette.websockets import WebSocket
 from logging.handlers import RotatingFileHandler

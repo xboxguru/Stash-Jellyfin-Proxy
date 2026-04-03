@@ -34,6 +34,9 @@ class JellyfinItemQuery:
     item_types: str
     media_types: str
     exclude_types: str
+    name_less_than: str
+    name_starts_with: str
+    name_starts_with_or_greater: str
 
 def _parse_item_query(request: Request) -> JellyfinItemQuery:
     parent_id = _get_query_param(request, "ParentId")
@@ -54,10 +57,13 @@ def _parse_item_query(request: Request) -> JellyfinItemQuery:
         tags_param=_get_query_param(request, "Tags") or _get_query_param(request, "TagIds") or _get_query_param(request, "GenreIds"),
         studio_ids_param=_get_query_param(request, "StudioIds"),
         filters_string=_get_query_param(request, "Filters", ""),
-        recursive=_get_query_param(request, "Recursive", "false").lower() == "true",
+        recursive="true" in _get_query_param(request, "Recursive", "false").lower(),
         item_types=_get_query_param(request, "IncludeItemTypes", "").lower(),
         media_types=_get_query_param(request, "MediaTypes", "").lower(),
-        exclude_types=_get_query_param(request, "ExcludeItemTypes", "").lower()
+        exclude_types=_get_query_param(request, "ExcludeItemTypes", "").lower(),
+        name_less_than=_get_query_param(request, "NameLessThan", ""),
+        name_starts_with=_get_query_param(request, "NameStartsWith", ""),
+        name_starts_with_or_greater=_get_query_param(request, "NameStartsWithOrGreater", "")
     )
 
 async def _get_libraries():
@@ -246,6 +252,98 @@ async def _handle_library_browse(request: Request, query: JellyfinItemQuery):
     filter_args, scene_filter, _, updated_limit = await builder.build()
 
     filter_list = [f.strip() for f in query.filters_string.split(",")] if query.filters_string else []
+
+    if query.name_less_than or query.name_starts_with or query.name_starts_with_or_greater:
+        filter_args["per_page"] = -1 # We need all records to filter locally
+        
+        # Fast Path: Client just wants the index count for the alphabet scrollbar (Limit = 0)
+        if query.original_limit == 0:
+            graphql_query = """query FindScenes($filter: FindFilterType, $scene_filter: SceneFilterType) { findScenes(filter: $filter, scene_filter: $scene_filter) { scenes { title code files { basename } } } }"""
+            data = await stash_client.call_graphql(graphql_query, {"filter": filter_args, "scene_filter": scene_filter})
+            scenes = data.get("findScenes", {}).get("scenes", []) if data else []
+            
+            # --- FIX: Pure mathematical counting (No directional flipping!) ---
+            count = 0
+            for s in scenes:
+                raw_title = s.get("title")
+                if not raw_title: 
+                    raw_title = s.get("code")
+                if not raw_title and s.get("files") and len(s.get("files")) > 0:
+                    raw_title = s.get("files")[0].get("basename")
+                    
+                title = str(raw_title or "").lower().strip()
+                
+                # --- FIX: Define Wholphin's Sorting Tiers ---
+                # If it's empty or starts with a symbol, Wholphin puts it at the absolute bottom
+                is_bottom_symbol = not title or not title[0].isalnum()
+                
+                if query.name_less_than:
+                    # Symbols are at the bottom, so they are NEVER less than a letter
+                    if not is_bottom_symbol and title < query.name_less_than.lower(): 
+                        count += 1
+                        
+                elif query.name_starts_with_or_greater:
+                    # Symbols are at the bottom, so they are ALWAYS greater than any letter
+                    if is_bottom_symbol or title >= query.name_starts_with_or_greater.lower(): 
+                        count += 1
+                        
+                elif query.name_starts_with:
+                    if not is_bottom_symbol and title.startswith(query.name_starts_with.lower()): 
+                        count += 1
+                # ---------------------------------------------  
+            return JSONResponse({"Items": [], "TotalRecordCount": count, "StartIndex": 0})
+        
+        # Slow Path: Client actually clicked the letter to render a filtered view of the items
+        else:
+            stash_data = await stash_client.fetch_scenes(filter_args, page=1, per_page=-1, scene_filter=scene_filter)
+            all_scenes = stash_data.get("scenes", []) if stash_data else []
+            
+            filtered_scenes = []
+            for s in all_scenes:
+                # --- FIX: Mirror the Fast Path fallback and stripping logic ---
+                raw_title = s.get("title")
+                if not raw_title: 
+                    raw_title = s.get("code")
+                if not raw_title and s.get("files") and len(s.get("files")) > 0:
+                    raw_title = s.get("files")[0].get("basename")
+                    
+                title = str(raw_title or "").lower().strip()
+                
+                sort_title = title
+                for article in ["the ", "a ", "an "]:
+                    if sort_title.startswith(article):
+                        sort_title = sort_title[len(article):]
+                        break
+                        
+                is_bottom_symbol = not sort_title or not sort_title[0].isalnum()
+                
+                if query.name_less_than:
+                    if not is_bottom_symbol and sort_title < query.name_less_than.lower(): 
+                        filtered_scenes.append(s)
+                        
+                elif query.name_starts_with_or_greater:
+                    if is_bottom_symbol or sort_title >= query.name_starts_with_or_greater.lower(): 
+                        filtered_scenes.append(s)
+                        
+                elif query.name_starts_with:
+                    if not is_bottom_symbol and sort_title.startswith(query.name_starts_with.lower()): 
+                        filtered_scenes.append(s)
+                # --------------------------------------------------------------
+            
+            total_count = len(filtered_scenes)
+            
+            # Now paginate the filtered results to respect the client's Limit
+            if query.original_limit > 0:
+                filtered_scenes = filtered_scenes[query.start_index : query.start_index + query.original_limit]
+                
+            jellyfin_items = []
+            safe_root = encode_id("root", "scenes")
+            for scene in filtered_scenes:
+                if "IsResumable" in filter_list and (not scene.get("resume_time") or scene.get("resume_time") <= 0): continue
+                try: jellyfin_items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=query.parent_id or safe_root))
+                except Exception: pass
+                
+            return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": total_count, "StartIndex": query.start_index})
 
     if query.original_limit == 0 and not query.search_term and "IsResumable" not in filter_list:
         stash_data = await stash_client.fetch_scenes(filter_args, page=1, per_page=1, scene_filter=scene_filter)

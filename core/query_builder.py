@@ -100,12 +100,15 @@ class StashQueryBuilder:
             raw_p_ids = [re.search(r'\d+', decode_id(p)).group() for p in person_ids.split(",") if re.search(r'\d+', decode_id(p))]
             if raw_p_ids: self.scene_filter["performers"] = {"value": raw_p_ids, "modifier": "INCLUDES"}
 
-        sort_by = self._get_query_param("SortBy").lower()
+        sort_by = self._get_query_param("SortBy").split(",")[0].lower()
         if "random" in sort_by: self.filter_args["sort"] = "random"
         elif "datecreated" in sort_by: self.filter_args["sort"] = "created_at"
         elif "dateplayed" in sort_by: self.filter_args["sort"] = "updated_at" 
         elif "name" in sort_by or "sortname" in sort_by: self.filter_args["sort"] = "title"
-        if self._get_query_param("SortOrder").lower() == "ascending": self.filter_args["direction"] = "ASC"
+
+        sort_order = self._get_query_param("SortOrder").split(",")[0].lower()
+        if sort_order == "ascending": self.filter_args["direction"] = "ASC"
+        else: self.filter_args["direction"] = "DESC"
 
         filters_string = self.q.get("filters_string")
         filter_list = [f.strip() for f in filters_string.split(",")] if filters_string else []
