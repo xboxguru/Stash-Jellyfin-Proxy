@@ -106,7 +106,13 @@ def _build_people(performers: list, cache_version: int, fake_blurhash: str) -> l
     people_list = []
     for p in performers:
         if p.get("name") and p.get("id"):
-            person = {"Name": p.get("name"), "Type": "Actor", "Role": "Actor", "Id": encode_id("person", str(p["id"])), "ImageBlurHashes": {}}
+            person = {
+                "Name": p.get("name"), 
+                "Type": "Actor", 
+                "Role": "Actor", 
+                "Id": encode_id("person", str(p["id"])), 
+                "ImageBlurHashes": {}
+            }
             if p.get("image_path"):
                 p_tag = generate_image_tag("person", p['id'], cache_version)
                 person["PrimaryImageTag"] = p_tag

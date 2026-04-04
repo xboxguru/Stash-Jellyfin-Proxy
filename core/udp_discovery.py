@@ -21,12 +21,17 @@ class JellyfinDiscoveryProtocol(asyncio.DatagramProtocol):
         logger.debug(f"Received UDP datagram from {addr[0]}: {message}")
         
         if "who is" in message.lower():
+            raw_config_ip = getattr(config, 'HOST_IP', None)
+            bind_ip = raw_config_ip if raw_config_ip else self.local_ip
+            
+            logger.debug(f"UDP Discovery Eval -> Config HOST_IP: '{raw_config_ip}', Auto-detected local_ip: '{self.local_ip}', Final bind_ip: '{bind_ip}'")
+            
             response = {
-                "Address": f"http://{self.local_ip}:{getattr(config, 'PROXY_PORT', 8096)}",
-                "EndpointAddress": f"http://{self.local_ip}:{getattr(config, 'PROXY_PORT', 8096)}",
-                "Id": getattr(config, "SERVER_ID", "stash-proxy-unique-id"),
+                "Address": f"http://{bind_ip}:{getattr(config, 'PROXY_PORT', 8096)}",
+                "EndpointAddress": f"http://{bind_ip}:{getattr(config, 'PROXY_PORT', 8096)}",
+                "Id": getattr(config, "SERVER_ID", "stash-proxy"), 
                 "Name": getattr(config, "SERVER_NAME", "Stash Proxy"),
                 "Version": "10.11.6" 
             }
-            logger.debug(f"Answering discovery ping from {addr[0]} with cached IP {self.local_ip}")
+            logger.debug(f"Answering discovery ping from {addr[0]} with response IP {bind_ip}")
             self.transport.sendto(json.dumps(response).encode('utf-8'), addr)

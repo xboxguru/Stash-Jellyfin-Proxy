@@ -153,9 +153,9 @@ async def get_saved_filters() -> list:
     data_legacy = await call_graphql("""query { findSavedFilters(mode: SCENES) { id name filter find_filter { q sort direction } } }""")
     return data_legacy.get("findSavedFilters", []) if data_legacy else []
 
-async def get_performer(performer_id: str) -> dict:
-    data = await call_graphql("""query FindPerformer($id: ID!) { findPerformer(id: $id) { id name image_path } }""", {"id": performer_id})
-    return data.get("findPerformer", {}) if data else {}
+async def get_performer(performer_id: str):
+    data = await call_graphql("""query FindPerformer($id: ID!) { findPerformer(id: $id) { id name image_path alias_list gender birthdate country ethnicity hair_color eye_color height_cm weight measurements piercings tattoos details fake_tits career_length penis_length circumcised } }""", {"id": performer_id})
+    return data.get("findPerformer") if data else None
 
 async def get_scene_sprite(scene_id: str) -> str:
     data = await call_graphql("""query($id: ID!) { findScene(id: $id) { paths { sprite } } }""", {"id": scene_id})

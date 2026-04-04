@@ -52,22 +52,111 @@ async def endpoint_item_details(request: Request):
         return JSONResponse(await _build_nav_folder_metadata(decoded_id, item_id, server_id, cache_version))
 
     if decoded_id.startswith("studio-"):
-        safe_id = encode_id("studio", decoded_id.replace("studio-", ""))
+        raw_id = decoded_id.replace("studio-", "")
+        safe_id = encode_id("studio", raw_id)
+        
+        logger.debug(f"RICH STUDIO HIT: Jellyfin requested studio ID '{raw_id}'. Querying Stash...")
+        
+        query = "query($id: ID!) { findStudio(id: $id) { name details image_path url parent_studio { name } } }"
+        data = await stash_client.call_graphql(query, {"id": raw_id})
+        studio = data.get("findStudio") if data else None
+        
+        logger.debug(f"RICH STUDIO RESULT: {studio}")
+
+        if studio:
+            s_tag = generate_image_tag("studio", raw_id, cache_version)
+            studio_name = studio.get("name", "Unknown Studio")
+            
+            overview_parts = []
+            if studio.get("parent_studio"): overview_parts.append(f"Parent Studio: {studio['parent_studio']['name']}")
+            if studio.get("url"): overview_parts.append(f"Website: {studio['url']}")
+            if studio.get("details"): overview_parts.append(f"\n{studio['details']}")
+
+            return JSONResponse({
+                "Name": studio_name, 
+                "SortName": studio_name, 
+                "Id": safe_id, 
+                "ServerId": server_id, 
+                "Type": "Studio", 
+                "IsFolder": False,
+                "Overview": "\n".join(overview_parts),
+                "ImageTags": {"Primary": s_tag} if studio.get("image_path") else {},
+                "HasPrimaryImage": bool(studio.get("image_path"))
+            })
+            
         return JSONResponse({"Name": "Studio", "SortName": "Studio", "Id": safe_id, "ServerId": server_id, "Type": "Studio", "IsFolder": False})
 
     if decoded_id.startswith("person-"):
         raw_id = decoded_id.replace("person-", "")
+        
+        logger.debug(f"RICH CAST HIT: Jellyfin requested person ID '{raw_id}'. Querying Stash...")
+        
         perf = await stash_client.get_performer(raw_id)
+        
+        logger.debug(f"RICH CAST RESULT: {perf}")
+        
         if perf:
             p_tag = generate_image_tag("person", raw_id, cache_version)
             perf_name = perf.get("name", "Unknown Person")
+            
+            # --- RICH CAST UPDATE: Build IMDb-style Biography ---
+            bio_parts = []
+            
+            if perf.get("alias_list"): bio_parts.append(f"Aliases: {', '.join(perf['alias_list'])}")
+            if perf.get("gender"): bio_parts.append(f"Gender: {perf['gender']}")
+            if perf.get("career_length"): bio_parts.append(f"Career Length: {perf['career_length']}")
+            if perf.get("country"): bio_parts.append(f"Country: {perf['country']}")
+            if perf.get("ethnicity"): bio_parts.append(f"Ethnicity: {perf['ethnicity']}")
+            if perf.get("hair_color"): bio_parts.append(f"Hair: {perf['hair_color']}")
+            if perf.get("eye_color"): bio_parts.append(f"Eyes: {perf['eye_color']}")
+            
+            # Height Conversion (cm to ft/in)
+            height_cm = perf.get("height_cm")
+            if height_cm:
+                try:
+                    total_inches = round(int(height_cm) / 2.54)
+                    ft = total_inches // 12
+                    inch = total_inches % 12
+                    bio_parts.append(f"Height: {height_cm} cm ({ft}' {inch}\")")
+                except ValueError:
+                    bio_parts.append(f"Height: {height_cm} cm")
+            
+            if perf.get("weight"): bio_parts.append(f"Weight: {perf['weight']} kg")
+            if perf.get("measurements"): bio_parts.append(f"Measurements: {perf['measurements']}")
+            if perf.get("fake_tits"): bio_parts.append(f"Fake Tits: {perf['fake_tits']}")
+            
+            # Penis Length Conversion (cm to in)
+            penis_cm = perf.get("penis_length")
+            if penis_cm:
+                try:
+                    p_inches = round(float(penis_cm) / 2.54, 1)
+                    bio_parts.append(f"Penis Length: {penis_cm} cm ({p_inches}\")")
+                except ValueError:
+                    bio_parts.append(f"Penis Length: {penis_cm} cm")
+            
+            if perf.get("circumcised"): bio_parts.append(f"Circumcised: {str(perf['circumcised']).capitalize()}")
+            if perf.get("piercings"): bio_parts.append(f"Piercings: {perf['piercings']}")
+            if perf.get("tattoos"): bio_parts.append(f"Tattoos: {perf['tattoos']}")
+            
+            # Add a double line break before the main details paragraph
+            if perf.get("details"): bio_parts.append(f"\n\n{perf['details']}") 
+            
+            premiere_date = f"{perf['birthdate']}T00:00:00.0000000Z" if perf.get("birthdate") else None
+            
             return JSONResponse({
-                "Name": perf_name, "SortName": perf_name, "Id": item_id, "ServerId": server_id, "Type": "Person", "IsFolder": False,
-                "ImageTags": {"Primary": p_tag} if perf.get("image_path") else {}, "HasPrimaryImage": bool(perf.get("image_path")),
+                "Name": perf_name, 
+                "SortName": perf_name, 
+                "Id": item_id, 
+                "ServerId": server_id, 
+                "Type": "Person", 
+                "IsFolder": False,
+                "Overview": "  \n".join(bio_parts),
+                "PremiereDate": premiere_date,
+                "ImageTags": {"Primary": p_tag} if perf.get("image_path") else {}, 
+                "HasPrimaryImage": bool(perf.get("image_path")),
                 "MovieCount": 1, "ChildCount": 1,
                 "UserData": {"PlaybackPositionTicks": 0, "PlayCount": 0, "IsFavorite": False, "Played": False, "Key": f"Person-{perf_name}", "ItemId": item_id}
             })
-        return JSONResponse({"Name": "Person", "SortName": "Person", "Id": item_id, "ServerId": server_id, "Type": "Person", "IsFolder": False})
         
     number_match = re.search(r'\d+', decoded_id)
     if not number_match: 
