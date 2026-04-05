@@ -1,6 +1,6 @@
 import os
 import logging
-import datetime
+import datetime, time
 import secrets
 from starlette.responses import JSONResponse, HTMLResponse, PlainTextResponse
 from starlette.requests import Request
@@ -33,54 +33,39 @@ async def serve_index(request: Request):
         return HTMLResponse(f"<h1>Error loading UI</h1><p>{e}</p>", status_code=500)
 
 async def api_get_config(request: Request):
-    """Exposes all configuration and state data to the Web UI."""
-    config_data = {
-        "STASH_URL": getattr(config, "STASH_URL", ""),
-        "STASH_API_KEY": getattr(config, "STASH_API_KEY", ""),
-        "PROXY_API_KEY": getattr(config, "PROXY_API_KEY", ""),
-        "PROXY_BIND": getattr(config, "PROXY_BIND", "0.0.0.0"),
-        "HOST_IP": getattr(config, "HOST_IP", ""),
-        "PROXY_PORT": getattr(config, "PROXY_PORT", 8096),
-        "UI_PORT": getattr(config, "UI_PORT", 8097),
-        "SJS_USER": getattr(config, "SJS_USER", ""),
-        "SJS_PASSWORD": getattr(config, "SJS_PASSWORD", ""),
-        "REQUIRE_AUTH_FOR_CONFIG": getattr(config, "REQUIRE_AUTH_FOR_CONFIG", False),
-        "SERVER_NAME": getattr(config, "SERVER_NAME", "Stash Media Server"),
-        "SERVER_ID": getattr(config, "SERVER_ID", ""),
-        "RECENT_DAYS": getattr(config, "RECENT_DAYS", 14),
-        "FAVORITE_ACTION": getattr(config, "FAVORITE_ACTION", "o_counter"),
-        "ALLOW_CLIENT_DELETION": getattr(config, "ALLOW_CLIENT_DELETION", "Disabled"),
-        "ENABLE_FILTERS": getattr(config, "ENABLE_FILTERS", True),
-        "ENABLE_TAG_FILTERS": getattr(config, "ENABLE_TAG_FILTERS", False),
-        "ENABLE_ALL_TAGS": getattr(config, "ENABLE_ALL_TAGS", False),
-        "STASH_VERIFY_TLS": getattr(config, "STASH_VERIFY_TLS", False),
-        "CACHE_VERSION": getattr(config, "CACHE_VERSION", 0),
-        "TAG_GROUPS": getattr(config, "TAG_GROUPS", []),
-        "LATEST_GROUPS": getattr(config, "LATEST_GROUPS", ["Scenes"]),
-        "SYNC_LEVEL": getattr(config, "SYNC_LEVEL", "Everything"),
-        "STASH_GRAPHQL_PATH": getattr(config, "STASH_GRAPHQL_PATH", "/graphql"),
-        "STASH_TIMEOUT": getattr(config, "STASH_TIMEOUT", 30),
-        "STASH_RETRIES": getattr(config, "STASH_RETRIES", 3),
-        "DEFAULT_PAGE_SIZE": getattr(config, "DEFAULT_PAGE_SIZE", 50),
-        "MAX_PAGE_SIZE": getattr(config, "MAX_PAGE_SIZE", 200),
-        "LOG_LEVEL": getattr(config, "LOG_LEVEL", "INFO"),
-        "LOG_DIR": getattr(config, "LOG_DIR", "/config"),
-        "LOG_FILE": getattr(config, "LOG_FILE", "stash_jellyfin_proxy.log"),
-        "LOG_MAX_SIZE_MB": getattr(config, "LOG_MAX_SIZE_MB", 10),
-        "LOG_BACKUP_COUNT": getattr(config, "LOG_BACKUP_COUNT", 3),
-        "BAN_THRESHOLD": getattr(config, "BAN_THRESHOLD", 10),
-        "BAN_WINDOW_MINUTES": getattr(config, "BAN_WINDOW_MINUTES", 15),
-        "BANNED_IPS": list(getattr(config, "BANNED_IPS", set())),
-        "AUTHENTICATED_IPS": list(getattr(state, "authenticated_ips", set())),
-        "AUTH_IP_TIMEOUT_MINUTES": getattr(config, "AUTH_IP_TIMEOUT_MINUTES", 60),
-        "TOP_PLAYED_RETENTION_DAYS": getattr(config, "TOP_PLAYED_RETENTION_DAYS", 0),
-    }
+    """Exposes all configuration and state data to the Web UI dynamically."""
+    config_data = {k: getattr(config, k) for k in dir(config) if k.isupper() and not k.startswith("_")}
+    
+    for k, v in config_data.items():
+        if isinstance(v, set):
+            config_data[k] = list(v)
+            
+    # Safely fetch the dynamic auto-whitelist
+    raw_dynamic = getattr(state, "authenticated_ips", {})
+    if isinstance(raw_dynamic, set): 
+        raw_dynamic = {ip: time.time() for ip in raw_dynamic}
+        
+    # --- THE FIX: Filter out statically configured IPs ---
+    static_ips = getattr(config, "AUTHENTICATED_IPS", [])
+    dynamic_ips = {ip: ts for ip, ts in raw_dynamic.items() if ip not in static_ips}
+    # -----------------------------------------------------
     
     return JSONResponse({
         "config": config_data,
+        "dynamic_ips": dynamic_ips,
         "env_fields": getattr(config, "env_overrides", []),
         "defined_fields": list(getattr(config, "config_defined_keys", set()))
     })
+
+async def api_prune_dynamic_ip(request: Request):
+    """Allows the UI to manually revoke an auto-whitelisted IP."""
+    ip_to_prune = request.path_params.get("ip")
+    if hasattr(state, "authenticated_ips") and isinstance(state.authenticated_ips, dict):
+        if ip_to_prune in state.authenticated_ips:
+            del state.authenticated_ips[ip_to_prune]
+            if hasattr(state, "save_auth_ips"):
+                state.save_auth_ips(state.authenticated_ips)
+    return JSONResponse({"status": "success"})
 
 async def api_post_config(request: Request):
     """Saves settings sent from the UI to memory and persistent storage."""
@@ -93,12 +78,6 @@ async def api_post_config(request: Request):
         
         # 2. Apply settings to memory and specific persistent files
         for key, value in data.items():
-            if key == "AUTHENTICATED_IPS":
-                # Handle the trusted IP JSON storage
-                new_ips = set(value) if isinstance(value, list) else set()
-                state.authenticated_ips = new_ips
-                state.save_auth_ips(new_ips)
-            else:
                 setattr(config, key, value)
             
         # 3. Save standard config to .conf

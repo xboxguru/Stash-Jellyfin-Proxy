@@ -4,34 +4,33 @@ import time
 import asyncio
 import logging
 import socket
-import json
+import subprocess
+from contextlib import asynccontextmanager
 from hypercorn.config import Config
 from hypercorn.asyncio import serve
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import RedirectResponse
+from starlette.responses import RedirectResponse, Response
 from starlette.routing import Route, WebSocketRoute, Mount
 from starlette.websockets import WebSocket
 from logging.handlers import RotatingFileHandler
 from starlette.middleware.cors import CORSMiddleware
 from starlette.staticfiles import StaticFiles
 import mimetypes
+
 mimetypes.add_type('application/javascript', '.js')
 mimetypes.add_type('text/css', '.css')
 
-# Import our custom modules
 import config
+import state
 from core import stash_client
+from core.udp_discovery import JellyfinDiscoveryProtocol
 from api.middleware import AuthenticationMiddleware
 from api import ui_routes, auth_routes, library_routes, metadata_routes, stream_routes, userdata_routes, image_routes
 
-# Configure Logging with Log Rotation (Max 5MB, keeps 2 backups)
 if not os.path.exists(config.LOG_DIR):
-    try:
-        os.makedirs(config.LOG_DIR, exist_ok=True)
-    except Exception as e:
-        print(f"Warning: Could not create LOG_DIR {config.LOG_DIR}. Falling back to '.' - {e}")
-        config.LOG_DIR = "."
+    try: os.makedirs(config.LOG_DIR, exist_ok=True)
+    except Exception: config.LOG_DIR = "."
 
 logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL, logging.INFO),
@@ -47,14 +46,14 @@ logging.basicConfig(
     ]
 )
 
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 logger = logging.getLogger("proxy_main")
 
-# --- STATIC IP CACHER (Prevents UDP Blocking) ---
-def get_local_ip():
-    # 1. Prioritize explicitly configured Docker Host IP
+def _get_local_ip():
     local_ip = getattr(config, "HOST_IP", "").strip()
     if not local_ip:
-        # 2. Try to automatically detect the network IP
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.settimeout(1.0)
@@ -62,39 +61,29 @@ def get_local_ip():
             local_ip = s.getsockname()[0]
             s.close()
         except Exception:
-            # 3. Fall back to the bind address
             local_ip = getattr(config, "PROXY_BIND", "127.0.0.1")
-            if local_ip == "0.0.0.0":
-                local_ip = "127.0.0.1"
+            if local_ip == "0.0.0.0": local_ip = "127.0.0.1"
     return local_ip
 
-CACHED_LOCAL_IP = get_local_ip()
+CACHED_LOCAL_IP = _get_local_ip()
 
 async def dummy_websocket(websocket: WebSocket):
-    """Holds WebSocket connections open to prevent strict clients (Wholphin) from panicking."""
     await websocket.accept()
+    logger.debug("WebSocket connection opened to prevent strict client panic.")
     try:
-        while True:
-            # We just silently catch and ignore any heartbeats the client sends
-            await websocket.receive_text()
-    except Exception:
-        pass
+        while True: await websocket.receive_text()
+    except Exception: pass
 
 async def root_router(request: Request):
-    """Routes traffic based on the port requested."""
     ui_port = getattr(config, "UI_PORT", 8097)
-    
-    # If accessed via the dedicated UI port, serve the proxy dashboard
     if request.url.port == ui_port:
         return await ui_routes.serve_index(request)
-        
-    # Otherwise (port 8096 or a standard web proxy), send them to the Jellyfin Web UI
     return RedirectResponse(url="/web/index.html", status_code=302)
 
 routes = [
-    # --- UI Routes (Proxy Web Dashboard) ---
     Route("/", root_router, methods=["GET"]),
     Route("/favicon.ico", lambda r: RedirectResponse(url="/web/favicon.ico", status_code=302), methods=["GET"]),
+    
     Route("/api/config", ui_routes.api_get_config, methods=["GET"]),
     Route("/api/config", ui_routes.api_post_config, methods=["POST"]),
     Route("/api/logs", ui_routes.api_get_logs, methods=["GET"]),
@@ -107,11 +96,12 @@ routes = [
     Route("/api/auth/check", ui_routes.api_auth_check, methods=["GET"]),
     Route("/api/auth/login", ui_routes.api_login, methods=["POST"]),
     Route("/api/auth/logout", ui_routes.api_logout, methods=["POST"]),
+    Route("/api/auth/dynamic_ips/{ip}", ui_routes.api_prune_dynamic_ip, methods=["DELETE"]),
     Route("/api/cache/increment", ui_routes.api_increment_cache_version, methods=["POST"]),
     Route("/api/stats/top_played", ui_routes.api_clear_top_played, methods=["DELETE"]),
     Route("/api/stats/top_played/{item_id}", ui_routes.api_remove_top_played_item, methods=["DELETE"]),
+    Route('/api/quickconnect/authorize', auth_routes.endpoint_quickconnect_authorize, methods=['POST']),
     
-    # --- System & Auth ---
     Route("/system/info/public", auth_routes.endpoint_system_info_public, methods=["GET"]),
     Route("/public/system/info", auth_routes.endpoint_system_info_public, methods=["GET"]),
     Route("/system/info", auth_routes.endpoint_system_info, methods=["GET"]),
@@ -120,11 +110,12 @@ routes = [
     Route("/users/authenticatebyname", auth_routes.endpoint_authenticate_by_name, methods=["POST"]),
     Route("/users/{user_id}", auth_routes.endpoint_user, methods=["GET"]),
     Route("/users", auth_routes.endpoint_users, methods=["GET"]),
-    Route("/quickconnect/enabled", auth_routes.endpoint_quickconnect_enabled, methods=["GET"]),
-    Route("/quickconnect/initiate", auth_routes.endpoint_quickconnect_initiate, methods=["POST"]),
+    Route('/users/authenticatewithquickconnect', auth_routes.endpoint_authenticate_by_quickconnect, methods=['POST']),
+    Route('/quickconnect/enabled', auth_routes.endpoint_quickconnect_enabled, methods=['GET']),
+    Route('/quickconnect/initiate', auth_routes.endpoint_quickconnect_initiate, methods=['GET', 'POST']),
+    Route('/quickconnect/connect', auth_routes.endpoint_quickconnect_connect, methods=['GET']),
     Route("/branding/configuration", auth_routes.endpoint_branding_configuration, methods=["GET"]),
     
-    # --- Specific Library Routes (Static paths MUST come before variable paths) ---
     Route("/userviews", library_routes.endpoint_views, methods=["GET"]),
     Route("/users/{user_id}/views", library_routes.endpoint_views, methods=["GET"]),
     Route("/library/virtualfolders", library_routes.endpoint_virtual_folders, methods=["GET"]),
@@ -134,7 +125,6 @@ routes = [
     Route("/items/latest", library_routes.endpoint_latest, methods=["GET"]),
     Route("/items/suggestions", library_routes.endpoint_empty_list, methods=["GET"]),
     
-    # --- ANDROID TV & WHOLPHIN STUBS ---
     Route("/sessions/capabilities", auth_routes.endpoint_system_ping, methods=["POST"]),
     Route("/movies/recommendations", library_routes.endpoint_empty_array, methods=["GET"]),
     Route("/items/filters", library_routes.endpoint_filters, methods=["GET"]),
@@ -150,55 +140,56 @@ routes = [
     Route("/persons", library_routes.endpoint_empty_list, methods=["GET"]),
     Route("/artists", library_routes.endpoint_empty_list, methods=["GET"]),
     
-    # Generic item listing
     Route("/items", library_routes.endpoint_items, methods=["GET"]),
     Route("/users/{user_id}/items", library_routes.endpoint_items, methods=["GET"]),
     Route("/search/hints", library_routes.endpoint_search_hints, methods=["GET"]),
 
-    # --- Item Detail & Image Routes ---
     Route("/users/{user_id}/items/{item_id}", metadata_routes.endpoint_item_details, methods=["GET"]),
     Route("/users/{user_id}/items/{item_id}", metadata_routes.endpoint_delete_item, methods=["DELETE"]),
     Route("/items/{item_id}", metadata_routes.endpoint_item_details, methods=["GET"]),
     Route("/items/{item_id}", metadata_routes.endpoint_delete_item, methods=["DELETE"]),
+    Route("/items/{item_id}/metadataeditor", metadata_routes.endpoint_metadata_editor, methods=["GET"]),
+    Route("/users/{user_id}/items/{item_id}/metadataeditor", metadata_routes.endpoint_metadata_editor, methods=["GET"]),
     
-    # Pre-Flight Detail Stubs
+    Route("/items/{item_id}", metadata_routes.endpoint_update_item, methods=["POST"]),
+    Route("/users/{user_id}/items/{item_id}", metadata_routes.endpoint_update_item, methods=["POST"]),
+    Route("/items/{item_id}/images", metadata_routes.endpoint_item_images_info, methods=["GET"]),
+    Route("/users/{user_id}/items/{item_id}/images", metadata_routes.endpoint_item_images_info, methods=["GET"]),
+    
     Route("/users/{user_id}/items/{item_id}/thememedia", library_routes.endpoint_theme_songs, methods=["GET"]),
     Route("/users/{user_id}/items/{item_id}/themesongs", library_routes.endpoint_theme_songs, methods=["GET"]),
     Route("/users/{user_id}/items/{item_id}/similar", library_routes.endpoint_empty_list, methods=["GET"]),
     Route("/users/{user_id}/items/{item_id}/specialfeatures", library_routes.endpoint_empty_array, methods=["GET"]),
     Route("/users/{user_id}/items/{item_id}/intros", library_routes.endpoint_empty_list, methods=["GET"]),
-    
     Route("/items/{item_id}/thememedia", library_routes.endpoint_theme_songs, methods=["GET"]),
     Route("/items/{item_id}/themesongs", library_routes.endpoint_theme_songs, methods=["GET"]),
     Route("/items/{item_id}/similar", library_routes.endpoint_empty_list, methods=["GET"]),
     Route("/items/{item_id}/specialfeatures", library_routes.endpoint_empty_array, methods=["GET"]),
     Route("/items/{item_id}/intros", library_routes.endpoint_empty_list, methods=["GET"]),
     
-    # Catch ALL Images (Primary, Backdrop, Thumb, Logo)
     Route("/items/{item_id}/images/{image_type}", image_routes.endpoint_item_image, methods=["GET"]),
     Route("/items/{item_id}/images/{image_type}/{image_index}", image_routes.endpoint_item_image, methods=["GET"]),
     
-    # Fladder Specific: Catch User Profile Avatar Image & Prefixed item images
+    Route("/users/{user_id}/items/{item_id}/images/{image_type}", image_routes.endpoint_item_image, methods=["GET"]),
+    Route("/users/{user_id}/items/{item_id}/images/{image_type}/{image_index}", image_routes.endpoint_item_image, methods=["GET"]),
+    
     Route("/users/{item_id}/images/{image_type}", image_routes.endpoint_item_image, methods=["GET"]),
     Route("/users/{user_id}/items/{item_id}/images/{image_type}", image_routes.endpoint_item_image, methods=["GET"]),
     Route("/videos/{item_id}/trickplay/{width}/{file_name}", image_routes.endpoint_trickplay_image, methods=["GET"]),
     
-    # --- Playback ---
     Route("/users/{user_id}/items/{item_id}/playbackinfo", stream_routes.endpoint_playback_info, methods=["POST", "GET"]),
     Route("/items/{item_id}/playbackinfo", stream_routes.endpoint_playback_info, methods=["POST", "GET"]),
     
-    # HLS Segment Pipeline
     Route("/videos/{item_id}/hls/{segment}", stream_routes.endpoint_hls_segment, methods=["GET"]),
     Route("/videos/{item_id}/master.m3u8", stream_routes.endpoint_stream, methods=["GET", "HEAD"]),
     Route("/videos/{item_id}/main.m3u8", stream_routes.endpoint_stream, methods=["GET", "HEAD"]),
-    
     Route("/videos/{item_id}/stream.mp4", stream_routes.endpoint_stream, methods=["GET", "HEAD"]),
     Route("/videos/{item_id}/stream", stream_routes.endpoint_stream, methods=["GET", "HEAD"]),
+    
     Route("/sessions/playing", userdata_routes.endpoint_sessions_playing, methods=["POST"]),
     Route("/sessions/playing/progress", userdata_routes.endpoint_sessions_playing, methods=["POST"]),
     Route("/sessions/playing/stopped", userdata_routes.endpoint_sessions_stopped, methods=["POST"]),
     
-    # --- Watched Status ---
     Route("/users/{user_id}/playeditems/{item_id}", userdata_routes.endpoint_mark_played, methods=["POST"]),
     Route("/users/{user_id}/playeditems/{item_id}", userdata_routes.endpoint_mark_unplayed, methods=["DELETE"]),
     Route("/userplayeditems/{item_id}", userdata_routes.endpoint_mark_played, methods=["POST"]),
@@ -206,39 +197,36 @@ routes = [
     Route("/useritems/{item_id}/userdata", userdata_routes.endpoint_update_userdata, methods=["POST"]),
     Route("/users/{user_id}/items/{item_id}/userdata", userdata_routes.endpoint_update_userdata, methods=["POST"]),
     
-    # --- Favorites ---
     Route("/users/{user_id}/favoriteitems/{item_id}", userdata_routes.endpoint_mark_favorite, methods=["POST"]),
     Route("/users/{user_id}/favoriteitems/{item_id}", userdata_routes.endpoint_unmark_favorite, methods=["DELETE"]),
     Route("/userfavoriteitems/{item_id}", userdata_routes.endpoint_mark_favorite, methods=["POST"]),
     Route("/userfavoriteitems/{item_id}", userdata_routes.endpoint_unmark_favorite, methods=["DELETE"]),
     
-    Route("/displaypreferences/{display_id}", library_routes.endpoint_empty_list, methods=["GET"]),
-    Route("/users/{user_id}/displaypreferences/{display_id}", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/displaypreferences/{display_id}", library_routes.endpoint_display_preferences, methods=["GET", "POST"]),
+    Route("/users/{user_id}/displaypreferences/{display_id}", library_routes.endpoint_display_preferences, methods=["GET", "POST"]),
     Route("/users/{user_id}/policy", auth_routes.endpoint_user, methods=["GET"]),
     Route("/users/{user_id}/configuration", auth_routes.endpoint_user, methods=["GET"]),
 
-    # --- Downloads ---
     Route("/items/{item_id}/download", stream_routes.endpoint_stream, methods=["GET"]),
     Route("/users/{user_id}/items/{item_id}/download", stream_routes.endpoint_stream, methods=["GET"]),
 
-    # --- Logs ---
     Route("/clientlog/document", auth_routes.endpoint_client_log, methods=["POST"]),
 
-    # --- Websocket ---
     WebSocketRoute("/socket", dummy_websocket),
 
-    # =================================================================
-    # --- OFFICIAL JELLYFIN WEB UI ---
-    # =================================================================
-    # 1. Serve the physical HTML/JS files
     Mount("/web", app=StaticFiles(directory="jellyfin-web", html=True), name="jellyfin-web"),
-
-    # 2. The API Blackhole (MUST BE LAST!)
     Route("/{path:path}", auth_routes.endpoint_blackhole, methods=["GET", "POST", "OPTIONS", "DELETE"]),
 ]
 
-# Initialize the Starlette App
-app = Starlette(debug=(config.LOG_LEVEL == "DEBUG"), routes=routes)
+@asynccontextmanager
+async def lifespan(app):
+    yield
+    logger.info("Shutting down global HTTP connection pools...")
+    await stash_client._manager.client.aclose()
+    await stream_routes.stream_client.aclose()
+    await image_routes.image_client.aclose()
+
+app = Starlette(debug=(config.LOG_LEVEL == "DEBUG"), routes=routes, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -248,82 +236,57 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Wrap the app in our custom Security Bouncer (AuthenticationMiddleware)
-# This ensures every request (except UI) requires the PROXY_API_KEY
 asgi_app = AuthenticationMiddleware(app)
 
-class JellyfinDiscoveryProtocol(asyncio.DatagramProtocol):
-    def connection_made(self, transport):
-        self.transport = transport
-        logger.info("📡 UDP Auto-Discovery Service listening on port 7359")
-
-    def datagram_received(self, data, addr):
-        message = data.decode('utf-8', errors='ignore').strip()
-        if "who is" in message.lower():
-            response = {
-                "Address": f"http://{CACHED_LOCAL_IP}:{getattr(config, 'PROXY_PORT', 8096)}",
-                "EndpointAddress": f"http://{CACHED_LOCAL_IP}:{getattr(config, 'PROXY_PORT', 8096)}",
-                "Id": getattr(config, "SERVER_ID", "stash-proxy-unique-id"),
-                "Name": getattr(config, "SERVER_NAME", "Stash Proxy"),
-                "Version": "10.11.6" 
-            }
-            logger.debug(f"Answering discovery ping from {addr[0]} with cached IP {CACHED_LOCAL_IP}")
-            self.transport.sendto(json.dumps(response).encode('utf-8'), addr)
-
 async def background_pruner():
-    """Silently cleans up expired top_played history and forgotten Auth IPs."""
-    import time
-    import state
     while True:
         await asyncio.sleep(60)
-        now = time.time()
-        
-        # 1. Prune Expired Auth IPs
-        timeout = getattr(config, "AUTH_IP_TIMEOUT_MINUTES", 60)
-        if timeout > 0 and hasattr(state, "authenticated_ips") and isinstance(state.authenticated_ips, dict):
-            expired_ips = [ip for ip, ts in state.authenticated_ips.items() if now - ts > (timeout * 60)]
-            if expired_ips:
-                for ip in expired_ips:
-                    del state.authenticated_ips[ip]
-                if hasattr(state, "save_auth_ips"): state.save_auth_ips(state.authenticated_ips)
+        try:
+            now = time.time()
+            
+            timeout = getattr(config, "AUTH_IP_TIMEOUT_MINUTES", 60)
+            if timeout > 0 and hasattr(state, "authenticated_ips") and isinstance(state.authenticated_ips, dict):
+                expired_ips = [ip for ip, ts in state.authenticated_ips.items() if now - ts > (timeout * 60)]
+                if expired_ips:
+                    for ip in expired_ips: del state.authenticated_ips[ip]
+                    logger.debug(f"Pruned {len(expired_ips)} expired IP authentications.")
+                    if hasattr(state, "save_auth_ips"): state.save_auth_ips(state.authenticated_ips)
 
-        # 2. Prune Expired Top Played Items
-        retention = getattr(config, "TOP_PLAYED_RETENTION_DAYS", 0)
-        if retention > 0 and "top_played" in state.stats:
-            expired_scenes = []
-            for sid, data in list(state.stats["top_played"].items()):
-                last = data.get("last_played", now)
-                if "last_played" not in data: data["last_played"] = last
-                if now - last > (retention * 86400):
-                    expired_scenes.append(sid)
-            if expired_scenes:
-                for sid in expired_scenes:
-                    del state.stats["top_played"][sid]
-                if hasattr(state, "save_stats"): state.save_stats()
+            retention = getattr(config, "TOP_PLAYED_RETENTION_DAYS", 0)
+            if retention > 0 and "top_played" in state.stats:
+                expired_scenes = [sid for sid, data in state.stats["top_played"].items() if now - data.get("last_played", now) > (retention * 86400)]
+                if expired_scenes:
+                    for sid in expired_scenes: del state.stats["top_played"][sid]
+                    logger.debug(f"Pruned {len(expired_scenes)} expired top played records.")
+                    if hasattr(state, "save_stats"): state.save_stats()
+                    
+        except Exception as e:
+            logger.error(f"Background pruner encountered an error: {e}")
 
 async def run_server():
-    """Configures and runs the Hypercorn ASGI server."""
     hypercorn_config = Config()
     hypercorn_config.bind = [f"{config.PROXY_BIND}:{config.PROXY_PORT}"]
+    hypercorn_config.graceful_timeout = 3.0 
+    
     if hasattr(config, "UI_PORT") and config.UI_PORT != config.PROXY_PORT:
         hypercorn_config.bind.append(f"{config.PROXY_BIND}:{config.UI_PORT}")
     
     logger.info("=" * 50)
-    logger.info(f"🚀 Starting Stash-Jellyfin Proxy v2")
-    logger.info(f"🌐 Proxy Listening on: {config.PROXY_BIND}:{config.PROXY_PORT}")
-    if config.PROXY_API_KEY:
-        logger.info(f"🔑 Proxy API Key Loaded: {config.PROXY_API_KEY}")
+    logger.info(f"Stash-Jellyfin Proxy v2")
+    logger.info(f"Proxy API: {config.PROXY_BIND}:{config.PROXY_PORT}")
+    if config.PROXY_API_KEY: logger.info(f"Proxy API Key Loaded")
     logger.info("=" * 50)
 
-    # Validate Stash Connection on Startup
     stash_online = await stash_client.test_stash_connection()
     if not stash_online:
-        logger.warning("⚠️ Warning: Stash is unreachable! Proxy will start, but clients will fail to load data.")
+        logger.warning("Stash is unreachable! Proxy will start, but clients will fail to load data.")
+    else:
+        logger.info("Connected to Stash successfully.")
     
     loop = asyncio.get_running_loop()
     try:
         discovery_transport, _ = await loop.create_datagram_endpoint(
-            lambda: JellyfinDiscoveryProtocol(),
+            lambda: JellyfinDiscoveryProtocol(CACHED_LOCAL_IP),
             local_addr=('0.0.0.0', 7359),
             allow_broadcast=True
         )
@@ -331,68 +294,31 @@ async def run_server():
         logger.error(f"Failed to bind UDP Discovery on port 7359: {e}")
         discovery_transport = None
         
-    shutdown_event = asyncio.Event()
-    
+    shutdown_trigger_event = asyncio.Event()
+
     async def watch_for_restart():
-        """Background task that watches for the UI restart flag and safely prunes zombie streams."""
-        import state
         while True:
-            if ui_routes.RESTART_REQUESTED:
-                logger.info("Restart flag detected. Initiating graceful shutdown...")
-                shutdown_event.set()
-                break
-                
-            current_time = time.time()
-            if hasattr(state, "active_streams"):
-                original_count = len(state.active_streams)
-                surviving_streams = []
-                
-                for s in state.active_streams:
-                    # If it hasn't pinged in 15 minutes (900s), treat it as a crashed client
-                    if current_time - s.get("last_ping", s.get("started", current_time)) >= 900:
-                        item_id = s.get("item_id", "")
-                        if item_id.startswith("scene-"):
-                            raw_id = item_id.replace("scene-", "")
-                            
-                            try:
-                                last_ticks = float(s.get("last_ticks", 0))
-                                runtime_ticks = float(s.get("runtime_ticks", 0))
-                                
-                                # Salvage the resume point or watch state before deleting it from memory!
-                                if runtime_ticks > 0:
-                                    pct = last_ticks / runtime_ticks
-                                    if 0.01 < pct < 0.90:
-                                        resume_seconds = last_ticks / 10000000.0
-                                        logger.info(f"🧟 Salvaging resume point ({resume_seconds}s) for crashed stream {s.get('id')}")
-                                        # UPDATED TO USE STASH_CLIENT:
-                                        asyncio.create_task(stash_client.update_resume_time(raw_id, resume_seconds))
-                                    elif pct >= 0.90:
-                                        logger.info(f"🧟 Salvaging watch status for crashed stream {s.get('id')}")
-                                        # UPDATED TO USE STASH_CLIENT:
-                                        asyncio.create_task(stash_client.increment_play_count(raw_id))
-                            except Exception as e:
-                                logger.error(f"Failed to salvage zombie stream data: {e}")
-                    else:
-                        surviving_streams.append(s)
-                        
-                state.active_streams = surviving_streams
-                if len(state.active_streams) < original_count:
-                    logger.info(f"🧹 Pruned {original_count - len(state.active_streams)} zombie streams from memory.")
-                    
+            try:
+                if getattr(ui_routes, "RESTART_REQUESTED", False):
+                    logger.info("Restart flag detected. Initiating graceful shutdown...")
+                    shutdown_trigger_event.set()
+                    break
+                await userdata_routes.prune_and_salvage_zombie_streams()
+            except Exception as e:
+                logger.error(f"Watch-for-restart encountered an error: {e}")
             await asyncio.sleep(60)
 
     watch_task = asyncio.create_task(watch_for_restart())
     prune_task = asyncio.create_task(background_pruner())
-    await serve(asgi_app, hypercorn_config, shutdown_trigger=shutdown_event.wait)
+    
+    await serve(asgi_app, hypercorn_config, shutdown_trigger=shutdown_trigger_event.wait)
+    
     watch_task.cancel()
     prune_task.cancel()
-    
-    if discovery_transport:
-        discovery_transport.close()
+    if discovery_transport: discovery_transport.close()
 
 def main():
-    """Main execution block with restart handling."""
-    try:
+    try: 
         asyncio.run(run_server())
     except KeyboardInterrupt:
         logger.info("Server stopped by user (CTRL+C).")
@@ -401,14 +327,20 @@ def main():
         logger.error(f"Fatal server error: {e}")
         sys.exit(1)
         
-    if ui_routes.RESTART_REQUESTED:
-        logger.info("Executing in-place server restart...")
+    if getattr(ui_routes, "RESTART_REQUESTED", False):
+        logger.info("Executing server restart...")
         time.sleep(1) 
-        try:
-            os.execv(sys.executable, [sys.executable] + sys.argv)
+        try: 
+            logging.shutdown()
+            
+            script_path = os.path.abspath(__file__)
+            args = [sys.executable, script_path] + sys.argv[1:]
+            
+            os.execv(sys.executable, args)
+            
         except Exception as e:
-            logger.error(f"Failed to execute restart: {e}")
-            sys.exit(1)
+            print(f"Failed to execute restart: {e}")
+            os._exit(1)
 
 if __name__ == "__main__":
     main()
