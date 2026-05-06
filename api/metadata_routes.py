@@ -173,14 +173,65 @@ async def endpoint_item_details(request: Request):
 async def endpoint_tags(request: Request):
     item_type = "Genre" if "genre" in request.url.path.lower() else "Tag"
     server_id = getattr(config, "SERVER_ID", "stash-proxy")
-    search_term = next((v.lower() for k, v in request.query_params.items() if k.lower() == "searchterm"), "")
-    
+
+    def _qp(key, default=""):
+        return next((v for k, v in request.query_params.items() if k.lower() == key.lower()), default)
+
+    search_term = _qp("SearchTerm", "").lower()
+    name_starts_with = _qp("NameStartsWith", "").lower()
+    name_less_than = _qp("NameLessThan", "").lower()
+    name_starts_with_or_greater = _qp("NameStartsWithOrGreater", "").lower()
+    try: start_index = int(_qp("StartIndex", "0"))
+    except: start_index = 0
+    try: limit = int(_qp("Limit", "-1"))
+    except: limit = -1
+
     logger.debug(f"Metadata Request -> All {item_type}s (Search Term: '{search_term}')")
-    
+
     stash_tags = await stash_client.get_all_tags()
-    if search_term: 
+    if search_term:
         stash_tags = [t for t in stash_tags if search_term in t.get("name", "").lower()]
-    
+
+    if name_starts_with or name_less_than or name_starts_with_or_greater:
+        # Fast Path: Client wants the index count for the alphabet scrollbar (Limit=0)
+        if limit == 0:
+            count = 0
+            for t in stash_tags:
+                name = t.get("name", "").lower().strip()
+                is_bottom_symbol = not name or not name[0].isalnum()
+                if name_less_than:
+                    if not is_bottom_symbol and name < name_less_than:
+                        count += 1
+                elif name_starts_with_or_greater:
+                    if is_bottom_symbol or name >= name_starts_with_or_greater:
+                        count += 1
+                elif name_starts_with:
+                    if not is_bottom_symbol and name.startswith(name_starts_with):
+                        count += 1
+            return JSONResponse({"Items": [], "TotalRecordCount": count, "StartIndex": 0})
+
+        # Slow Path: Client clicked a letter — filter and paginate
+        filtered = []
+        for t in stash_tags:
+            name = t.get("name", "").lower().strip()
+            is_bottom_symbol = not name or not name[0].isalnum()
+            if name_less_than:
+                if not is_bottom_symbol and name < name_less_than:
+                    filtered.append(t)
+            elif name_starts_with_or_greater:
+                if is_bottom_symbol or name >= name_starts_with_or_greater:
+                    filtered.append(t)
+            elif name_starts_with:
+                if not is_bottom_symbol and name.startswith(name_starts_with):
+                    filtered.append(t)
+
+        total_count = len(filtered)
+        if limit > 0:
+            filtered = filtered[start_index : start_index + limit]
+
+        jelly_tags = [{"Name": t.get("name"), "Id": encode_id("tag", str(t.get('id'))), "Type": item_type, "ServerId": server_id, "IsFolder": False} for t in filtered]
+        return JSONResponse({"Items": jelly_tags, "TotalRecordCount": total_count, "StartIndex": start_index})
+
     jelly_tags = [{"Name": t.get("name"), "Id": encode_id("tag", str(t.get('id'))), "Type": item_type, "ServerId": server_id, "IsFolder": False} for t in stash_tags]
     return JSONResponse({"Items": jelly_tags, "TotalRecordCount": len(jelly_tags), "StartIndex": 0})
 
