@@ -32,6 +32,24 @@ if not os.path.exists(config.LOG_DIR):
     try: os.makedirs(config.LOG_DIR, exist_ok=True)
     except Exception: config.LOG_DIR = "."
 
+# --- BEGIN CUSTOM LOGGING INJECTION ---
+NOTICE_LEVEL_NUM = 15
+TRACE_LEVEL_NUM = 5
+
+logging.addLevelName(NOTICE_LEVEL_NUM, "NOTICE")
+logging.addLevelName(TRACE_LEVEL_NUM, "TRACE")
+
+def notice(self, message, *args, **kws):
+    if self.isEnabledFor(NOTICE_LEVEL_NUM):
+        self._log(NOTICE_LEVEL_NUM, message, args, **kws)
+
+def trace(self, message, *args, **kws):
+    if self.isEnabledFor(TRACE_LEVEL_NUM):
+        self._log(TRACE_LEVEL_NUM, message, args, **kws)
+
+logging.Logger.notice = notice
+logging.Logger.trace = trace
+
 logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL, logging.INFO),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -131,7 +149,7 @@ routes = [
     Route("/items/filters", library_routes.endpoint_filters, methods=["GET"]),
     Route("/items/filters2", library_routes.endpoint_filters, methods=["GET"]),
     Route("/mediasegments/{item_id}", library_routes.endpoint_empty_list, methods=["GET"]),
-    Route("/shows/nextup", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/shows/nextup", library_routes.endpoint_next_up, methods=["GET"]),
     Route("/genres", metadata_routes.endpoint_tags, methods=["GET"]),
     Route("/users/{user_id}/genres", metadata_routes.endpoint_tags, methods=["GET"]),
     Route("/tags", metadata_routes.endpoint_tags, methods=["GET"]),
@@ -164,7 +182,7 @@ routes = [
     Route("/users/{user_id}/items/{item_id}/intros", library_routes.endpoint_empty_list, methods=["GET"]),
     Route("/items/{item_id}/thememedia", library_routes.endpoint_theme_songs, methods=["GET"]),
     Route("/items/{item_id}/themesongs", library_routes.endpoint_theme_songs, methods=["GET"]),
-    Route("/items/{item_id}/similar", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/items/{item_id}/similar", library_routes.endpoint_similar_items, methods=["GET"]),
     Route("/items/{item_id}/specialfeatures", library_routes.endpoint_empty_array, methods=["GET"]),
     Route("/items/{item_id}/intros", library_routes.endpoint_empty_list, methods=["GET"]),
     

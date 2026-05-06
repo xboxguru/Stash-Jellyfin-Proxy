@@ -3,6 +3,7 @@ import asyncio
 import re
 import json
 import datetime
+import random
 from dataclasses import dataclass, asdict
 from starlette.responses import JSONResponse, Response
 from starlette.requests import Request
@@ -494,3 +495,218 @@ async def endpoint_display_preferences(request: Request):
         return JSONResponse(saved_prefs)
 
     return JSONResponse({"Id": display_id, "Client": "emby", "SortBy": "Default", "SortOrder": "Ascending", "RememberIndexing": False, "RememberSorting": False, "ScrollDirection": "Horizontal", "ShowBackdrop": True, "ShowSidebar": False, "PrimaryImageHeight": 213, "PrimaryImageWidth": 160, "CustomPrefs": {}})
+
+# --- SMART DISCOVERY / NEXT UP LOGIC ---
+
+async def _fetch_affinity_scenes(field: str, item_id: str, limit: int, unwatched_only: bool = True, sort_dir: str = "ASC") -> list:
+    """Helper: Fetches scenes for a specific performer, studio, or tag."""
+    scene_filter = {field: {"value": [item_id], "modifier": "INCLUDES"}}
+    
+    if unwatched_only:
+        scene_filter["play_count"] = {"value": 0, "modifier": "EQUALS"}
+        
+    data = await stash_client.fetch_scenes(
+        filter_args={"sort": "date", "direction": sort_dir},
+        page=1, per_page=limit,
+        scene_filter=scene_filter
+    )
+    return data.get("scenes", []) if data else []
+
+
+async def _build_similar_pool(scene_id: str, target_limit: int = 12) -> list:
+    """Orchestrator: Fetches scenes sharing performers, studios, or tags with the target scene."""
+    raw_id = scene_id.replace("scene-", "") if scene_id.startswith("scene-") else scene_id
+    scene = await stash_client.get_scene(raw_id)
+    
+    if not scene:
+        return []
+        
+    performer_ids = [p["id"] for p in scene.get("performers", []) if p.get("id")]
+    studio_id = scene.get("studio", {}).get("id") if scene.get("studio") else None
+    tag_ids = [t["id"] for t in scene.get("tags", []) if t.get("id")]
+    
+    # Randomly select up to 3 tags to prevent firing 50 queries for heavily-tagged scenes
+    sample_tags = random.sample(tag_ids, min(len(tag_ids), 10))
+    
+    fetch_tasks = []
+    
+    # 1. Fetch 5 recent scenes from each Performer
+    for p_id in performer_ids:
+        fetch_tasks.append(_fetch_affinity_scenes("performers", p_id, 5, unwatched_only=False, sort_dir="DESC"))
+    
+    # 2. Fetch 5 recent scenes from the Studio
+    if studio_id:
+        fetch_tasks.append(_fetch_affinity_scenes("studios", studio_id, 5, unwatched_only=False, sort_dir="DESC"))
+        
+    # 3. Fetch 3 recent scenes for the sampled Tags
+    for t_id in sample_tags:
+        fetch_tasks.append(_fetch_affinity_scenes("tags", t_id, 10, unwatched_only=False, sort_dir="DESC"))
+        
+    if not fetch_tasks:
+        return []
+        
+    results = await asyncio.gather(*fetch_tasks)
+    
+    # 4. Deduplicate and ensure we don't return the exact scene the user is currently looking at
+    candidates = {}
+    for scene_list in results:
+        for s in scene_list:
+            s_id = s.get("id")
+            if s_id and str(s_id) != str(raw_id) and s_id not in candidates:
+                candidates[s_id] = s
+                
+    # 5. Shuffle and return
+    pool = list(candidates.values())
+    random.shuffle(pool)
+    return pool[:target_limit]
+
+
+async def endpoint_similar_items(request: Request):
+    """Route: Maps the similar Stash scenes to Jellyfin items."""
+    item_id = request.path_params.get("item_id", "")
+    try:
+        limit = int(_get_query_param(request, "Limit", "12"))
+    except ValueError:
+        limit = 12
+        
+    logger.notice(f"Router -> Similar Items Requested for {item_id} (Limit: {limit})")
+    
+    decoded_id = decode_id(item_id)
+    
+    # In our ecosystem, "Similar" only applies to scenes, not folders or individual performers
+    if not decoded_id.startswith("scene-"):
+        return JSONResponse({"Items": [], "TotalRecordCount": 0})
+        
+    scenes = await _build_similar_pool(decoded_id, target_limit=limit)
+    
+    jellyfin_items = []
+    safe_root = encode_id("root", "scenes")
+    
+    for scene in scenes:
+        try:
+            item = jellyfin_mapper.format_jellyfin_item(scene, parent_id=safe_root)
+            jellyfin_items.append(item)
+        except Exception as e:
+            logger.error(f"Failed to map Similar scene {scene.get('id')}: {e}")
+    
+    logger.notice(f"Similar pool generated {len(jellyfin_items)} scenes for {decoded_id}.")
+
+    return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": len(jellyfin_items), "StartIndex": 0})
+
+async def _build_next_up_pool(target_limit: int = 25) -> list:
+    """Harvests affinities from watch history and builds a randomized pool of unwatched scenes."""
+    recent_scene_ids = sorted(
+        state.stats.get("top_played", {}).keys(),
+        key=lambda k: state.stats["top_played"][k].get("last_played", 0),
+        reverse=True
+    )
+    
+    candidates = {} 
+    history_index = 0
+    batch_size = 5
+    
+    logger.notice(f"Building Next Up pool. Target: {target_limit}. Recent history size: {len(recent_scene_ids)}")
+    
+    # Recursive fallback loop
+    while len(candidates) < target_limit and history_index < len(recent_scene_ids):
+        batch_ids = recent_scene_ids[history_index:history_index + batch_size]
+        history_index += batch_size
+        
+        raw_ids = [sid.replace("scene-", "") if sid.startswith("scene-") else sid for sid in batch_ids]
+        logger.notice(f"DEBUG ID CHECK: Original batch was {batch_ids} | Cleaned raw_ids are {raw_ids}")
+
+        # 1. Fetch full details for the recent scenes to extract their affinities
+        tasks = [stash_client.get_scene(sid) for sid in raw_ids]
+        recent_scenes = await asyncio.gather(*tasks)
+        
+        performer_ids = set()
+        studio_ids = set()
+        
+        for scene in recent_scenes:
+            if not scene: continue
+            for p in scene.get("performers", []):
+                performer_ids.add(p["id"])
+            if scene.get("studio"):
+                studio_ids.add(scene["studio"]["id"])
+                
+        logger.trace(f"Next Up Batch - Extracting affinities from {len(batch_ids)} recent scenes. Found {len(performer_ids)} performers and {len(studio_ids)} studios.")
+
+        # 2. Fire concurrent Stash queries for EACH performer and studio
+        fetch_tasks = []
+        for p_id in performer_ids:
+            fetch_tasks.append(_fetch_affinity_scenes("performers", p_id, 5))
+        for s_id in studio_ids:
+            fetch_tasks.append(_fetch_affinity_scenes("studios", s_id, 5))
+            
+        if not fetch_tasks:
+            continue
+            
+        # Wait for all the individual affinity queries to complete
+        results = await asyncio.gather(*fetch_tasks)
+        
+        # 3. Deduplicate and add to candidate pool
+        for scene_list in results:
+            for s in scene_list:
+                if s["id"] not in candidates and (s.get("play_count") or 0) == 0:
+                    candidates[s["id"]] = s
+    # If we exhausted our watch history and still don't have enough candidates, 
+    # backfill with the newest unwatched scenes from the general library.
+    if len(candidates) < target_limit:
+        shortfall = target_limit - len(candidates)
+        logger.notice(f"Affinity pool short by {shortfall} scenes. Backfilling with global unwatched scenes.")
+        
+        try:
+            backfill_data = await stash_client.fetch_scenes(
+                filter_args={"sort": "date", "direction": "DESC"},
+                page=1, per_page=shortfall + 10, # Add a buffer for deduplication
+                scene_filter={
+                    "play_count": {"value": 0, "modifier": "EQUALS"}
+                }
+            )
+            
+            backfill_scenes = backfill_data.get("scenes", []) if backfill_data else []
+            for s in backfill_scenes:
+                if len(candidates) >= target_limit:
+                    break
+                if s["id"] not in candidates:
+                    candidates[s["id"]] = s
+        except Exception as e:
+            logger.error(f"Failed to fetch backfill scenes for Next Up: {e}")
+
+    # 5. Shuffle and slice the magic 25
+    pool = list(candidates.values())
+    random.shuffle(pool)
+    final_pool = pool[:target_limit]
+    
+    logger.notice(f"Next Up pool generation complete. Selected {len(final_pool)} scenes from {len(candidates)} candidates.")
+    return final_pool
+
+async def endpoint_next_up(request: Request):
+    try:
+        limit = int(_get_query_param(request, "Limit", "24"))
+    except ValueError:
+        limit = 24
+        
+    logger.notice(f"Router -> Next Up Discovery Requested (Limit: {limit})")
+    
+    scenes = await _build_next_up_pool(target_limit=limit)
+    
+    jellyfin_items = []
+    safe_root = encode_id("root", "scenes")
+    
+    for scene in scenes:
+        try:
+            item = jellyfin_mapper.format_jellyfin_item(scene, parent_id=safe_root)
+            
+            # MAP OVERRIDE: Force strict clients to render this in the Next Up row
+            item["Type"] = "Episode"
+            
+            # Treat the Studio like a TV Network/Series Name for UI polish
+            series_name = scene.get("studio", {}).get("name") if scene.get("studio") else "Stash Discovery"
+            item["SeriesName"] = series_name
+            
+            jellyfin_items.append(item)
+        except Exception as e:
+            logger.error(f"Failed to map Next Up scene {scene.get('id')}: {e}")
+            
+    return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": len(jellyfin_items), "StartIndex": 0})

@@ -66,6 +66,8 @@
         .log-INFO { color: var(--text-primary); }
         .log-WARNING { color: var(--warning); }
         .log-ERROR { color: var(--error); }
+        .log-NOTICE { color: #4a90d9; font-weight: bold; } /* Nice Blue */
+        .log-TRACE { color: #888888; font-style: italic; } /* Dimmed Grey */
         .log-controls { display: flex; gap: 12px; margin-bottom: 16px; align-items: center; }
         .log-filter { padding: 8px 12px; background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); font-size: 14px; }
         .log-count { margin-left: auto; color: var(--text-secondary); font-size: 14px; }
@@ -497,13 +499,16 @@
                         <h3 class="card-title">Logging <span class="badge-warning">Restart Required</span></h3>
                         <div class="form-row three-col">
                             <div class="form-group">
-                                <label class="form-label">Log Level</label>
+                                <label>Log Level</label>
                                 <select class="form-input" name="LOG_LEVEL">
-                                    <option value="DEBUG">DEBUG</option>
-                                    <option value="INFO">INFO</option>
-                                    <option value="WARNING">WARNING</option>
-                                    <option value="ERROR">ERROR</option>
+                                    <option value="TRACE" {% if config.LOG_LEVEL == 'TRACE' %}selected{% endif %}>TRACE (All Data)</option>
+                                    <option value="DEBUG" {% if config.LOG_LEVEL == 'DEBUG' %}selected{% endif %}>DEBUG</option>
+                                    <option value="NOTICE" {% if config.LOG_LEVEL == 'NOTICE' %}selected{% endif %}>NOTICE (Logic Flow)</option>
+                                    <option value="INFO" {% if config.LOG_LEVEL == 'INFO' %}selected{% endif %}>INFO</option>
+                                    <option value="WARNING" {% if config.LOG_LEVEL == 'WARNING' %}selected{% endif %}>WARNING</option>
+                                    <option value="ERROR" {% if config.LOG_LEVEL == 'ERROR' %}selected{% endif %}>ERROR</option>
                                 </select>
+                                <div class="help-text">Controls the verbosity of console and file logs.</div>
                             </div>
                             <div class="form-group">
                                 <label class="form-label">Log Directory</label>
@@ -543,7 +548,9 @@
                     <div class="log-controls">
                         <select id="log-level-filter" class="log-filter">
                             <option value="">All Levels</option>
+                            <option value="TRACE">TRACE</option>
                             <option value="DEBUG">DEBUG</option>
+                            <option value="NOTICE">NOTICE</option>
                             <option value="INFO">INFO</option>
                             <option value="WARNING">WARNING</option>
                             <option value="ERROR">ERROR</option>
