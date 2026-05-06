@@ -141,7 +141,7 @@ async def get_stash_stats() -> dict:
     data = await call_graphql("query Stats { stats { scene_count performer_count studio_count tag_count group_count } }")
     return data["stats"] if data and "stats" in data else {}
 
-@cached()
+@cached(ttl=300)
 async def get_all_studios():
     data = await call_graphql("query AllStudios { allStudios { id name image_path } }")
     return data.get("allStudios", []) if data else []
@@ -174,12 +174,17 @@ async def get_saved_filters() -> list:
     data_legacy = await call_graphql("""query { findSavedFilters(mode: SCENES) { id name filter find_filter { q sort direction } } }""")
     return data_legacy.get("findSavedFilters", []) if data_legacy else []
 
-@cached()
+@cached(ttl=300)
 async def get_performer(performer_id: str):
     data = await call_graphql("""query FindPerformer($id: ID!) { findPerformer(id: $id) { id name image_path alias_list gender birthdate country ethnicity hair_color eye_color height_cm weight measurements piercings tattoos details fake_tits career_length penis_length circumcised } }""", {"id": performer_id})
     return data.get("findPerformer") if data else None
 
-@cached()
+async def clear_all_caches():
+    """Flush the in-memory aiocache so fresh data is fetched from Stash on the next request."""
+    cache = caches.get("default")
+    await cache.clear()
+
+@cached(ttl=300)
 async def get_scene_sprite(scene_id: str) -> str:
     data = await call_graphql("""query($id: ID!) { findScene(id: $id) { paths { sprite } } }""", {"id": scene_id})
     return data.get("findScene", {}).get("paths", {}).get("sprite") if data else None

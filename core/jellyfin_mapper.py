@@ -138,7 +138,8 @@ def _build_dates(date_str: str, created_at_str: str, now_iso: str, recent_days_l
             result["ProductionYear"] = int(date_str[:4])
             clean_date = f"{date_str}-01-01" if len(date_str) == 4 else f"{date_str}-01" if len(date_str) == 7 else date_str
             result["PremiereDate"] = f"{clean_date}T00:00:00.0000000Z"
-        except:
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Failed to parse date '{date_str}': {e}")
             result["PremiereDate"] = formatted_created
             result["ProductionYear"] = int(formatted_created[:4])
     else:
@@ -250,8 +251,7 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
             item["Chapters"] = chapters
             
     except Exception as e:
-        import logging
-        logging.getLogger(__name__).error(f"Failed to parse markers for scene {raw_id}: {e}")
+        logger.error(f"Failed to parse markers for scene {raw_id}: {e}")
     # ------------------------------------------------------------
     
     now_iso = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.0000000Z")

@@ -1,7 +1,8 @@
 import re
 import urllib.parse
 import logging
-import time 
+import time
+import ipaddress
 import config
 import state
 
@@ -15,6 +16,21 @@ PUBLIC_ENDPOINTS = {
     "/clientlog/document"
 }
 PUBLIC_PREFIXES = ["/web/", "/assets/", "/api/"]
+
+def _ip_matches(client_ip: str, entries: list) -> bool:
+    """Check if client_ip matches any entry in the list — exact IPs or CIDR ranges (e.g. 192.168.1.0/24)."""
+    try:
+        addr = ipaddress.ip_address(client_ip)
+        for entry in entries:
+            try:
+                net = ipaddress.ip_network(str(entry), strict=False)
+                if addr in net:
+                    return True
+            except ValueError:
+                continue
+    except ValueError:
+        pass
+    return False
 
 def get_client_ip(scope) -> str:
     """Extract client IP safely, accounting for reverse proxies."""
@@ -56,7 +72,7 @@ class AuthenticationMiddleware:
             return False
             
         static_ips = getattr(config, "AUTHENTICATED_IPS", [])
-        if client_ip in static_ips: return True
+        if _ip_matches(client_ip, static_ips): return True
             
         auth_ips = getattr(state, "authenticated_ips", {})
         if isinstance(auth_ips, set): 
@@ -134,7 +150,7 @@ class AuthenticationMiddleware:
             state.stats["auth_success"] += 1
             state.stats["unique_ips_today"].add(client_ip)
             static_ips = getattr(config, "AUTHENTICATED_IPS", [])
-            if client_ip not in static_ips:
+            if not _ip_matches(client_ip, static_ips):
                 if not hasattr(state, "authenticated_ips") or isinstance(state.authenticated_ips, set):
                     state.authenticated_ips = {}
                 state.authenticated_ips[client_ip] = time.time()

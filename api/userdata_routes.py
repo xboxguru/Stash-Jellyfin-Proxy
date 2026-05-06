@@ -62,8 +62,8 @@ async def endpoint_sessions_playing(request: Request):
             if scene:
                 if title == "Unknown Scene": 
                     title = scene.get("title") or scene.get("code") or f"Scene {raw_id}"
-                if scene.get("performers"): 
-                    performer = ", ".join([p.get("name") for p in scene["performers"]])
+                if scene.get("performers"):
+                    performer = ", ".join([p.get("name") for p in scene["performers"] if p.get("name")])
                 if runtime_ticks <= 0 and scene.get("files"): 
                     runtime_ticks = float(scene["files"][0].get("duration", 0) * 10000000)
 
@@ -156,10 +156,10 @@ async def _toggle_favorite_state(request: Request, is_favorite: bool):
     item_id = decode_id(raw_item_id)
     bg_tasks = BackgroundTasks()
     play_count, resume_ticks, played = 0, 0, False
-    
+    action = getattr(config, "FAVORITE_ACTION", "o_counter").lower()
+
     if item_id.startswith("scene-"):
         raw_id = item_id.replace("scene-", "")
-        action = getattr(config, "FAVORITE_ACTION", "o_counter").lower()
         
         if action in ["o_counter", "both"]: 
             bg_tasks.add_task(stash_client.increment_o_counter, raw_id)

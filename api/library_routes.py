@@ -2,6 +2,7 @@ import logging
 import asyncio
 import re
 import json
+import datetime
 from dataclasses import dataclass, asdict
 from starlette.responses import JSONResponse, Response
 from starlette.requests import Request
@@ -398,7 +399,15 @@ async def endpoint_items(request: Request):
 
 async def endpoint_empty_list(request: Request): return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": 0})
 async def endpoint_empty_array(request: Request): return JSONResponse([])
-async def endpoint_filters(request: Request): return JSONResponse({"Tags": [], "Genres": [], "Studios": [], "OfficialRatings": [], "Years": []})
+
+async def endpoint_filters(request: Request):
+    tags = await stash_client.get_all_tags()
+    studios = await stash_client.get_all_studios()
+    tag_names = sorted([t.get("name", "") for t in tags if t.get("name")])
+    studio_names = sorted([s.get("name", "") for s in studios if s.get("name")])
+    current_year = datetime.datetime.now().year
+    years = list(range(current_year, 1989, -1))
+    return JSONResponse({"Tags": tag_names, "Genres": tag_names, "Studios": studio_names, "OfficialRatings": ["XXX"], "Years": years})
 async def endpoint_theme_songs(request: Request): return JSONResponse({"OwnerId": request.path_params.get("item_id", "unknown"), "Items": [], "TotalRecordCount": 0, "StartIndex": 0})
 async def endpoint_special_features(request: Request): return JSONResponse([])
 
@@ -413,6 +422,43 @@ async def endpoint_latest(request: Request):
     safe_root = encode_id("root", "scenes")
     
     return JSONResponse([jellyfin_mapper.format_jellyfin_item(scene, parent_id=parent_id or safe_root) for scene in stash_data.get("scenes", [])])
+
+async def endpoint_resume(request: Request):
+    parent_id = _get_query_param(request, "ParentId")
+    decoded_parent_id = decode_id(parent_id) if parent_id else None
+    try:
+        limit = int(_get_query_param(request, "Limit", "12"))
+    except (ValueError, TypeError):
+        limit = 12
+
+    builder = StashQueryBuilder(request, {"decoded_parent_id": decoded_parent_id})
+    _, scene_filter, _, _ = await builder.build()
+
+    stash_data = await stash_client.fetch_scenes(
+        {"sort": "updated_at", "direction": "DESC"},
+        page=1, per_page=100,
+        scene_filter=scene_filter
+    )
+
+    safe_root = encode_id("root", "scenes")
+    items = []
+    for scene in stash_data.get("scenes", []):
+        resume_time = scene.get("resume_time") or 0
+        if resume_time <= 0:
+            continue
+        files = scene.get("files") or []
+        if files:
+            duration = files[0].get("duration") or 0
+            if duration > 0 and (resume_time / duration) >= 0.90:
+                continue
+        try:
+            items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=parent_id or safe_root))
+        except Exception as e:
+            logger.error(f"Failed to map resume scene {scene.get('id')}: {e}")
+        if len(items) >= limit:
+            break
+
+    return JSONResponse({"Items": items, "TotalRecordCount": len(items), "StartIndex": 0})
 
 async def endpoint_search_hints(request: Request):
     response = await endpoint_items(request)
@@ -430,18 +476,21 @@ async def endpoint_search_hints(request: Request):
 
 async def endpoint_display_preferences(request: Request):
     display_id = request.path_params.get("display_id", "default").replace("-", "")
+    user_id = request.path_params.get("user_id", "shared").replace("-", "")
+    pref_key = f"{user_id}_{display_id}"
+
     if request.method == "POST":
         try:
             data = await request.json()
-            state.display_preferences[display_id] = data
+            state.display_preferences[pref_key] = data
             state.save_prefs()
-        except Exception as e: 
+        except Exception as e:
             logger.error(f"Failed to save display preferences: {e}")
         return Response(status_code=204)
-        
-    saved_prefs = state.display_preferences.get(display_id)
+
+    saved_prefs = state.display_preferences.get(pref_key)
     if saved_prefs:
         saved_prefs["Id"] = display_id
         return JSONResponse(saved_prefs)
-        
-    return JSONResponse({"Id": display_id, "Client": "emby", "SortBy": "Default", "SortOrder": "Ascending", "RememberIndexing": False, "CustomPrefs": {}})
+
+    return JSONResponse({"Id": display_id, "Client": "emby", "SortBy": "Default", "SortOrder": "Ascending", "RememberIndexing": False, "RememberSorting": False, "ScrollDirection": "Horizontal", "ShowBackdrop": True, "ShowSidebar": False, "PrimaryImageHeight": 213, "PrimaryImageWidth": 160, "CustomPrefs": {}})

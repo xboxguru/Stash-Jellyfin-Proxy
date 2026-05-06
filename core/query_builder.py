@@ -97,7 +97,7 @@ class StashQueryBuilder:
 
         person_ids = self.q.get("person_ids")
         if person_ids:
-            raw_p_ids = [re.search(r'\d+', decode_id(p)).group() for p in person_ids.split(",") if re.search(r'\d+', decode_id(p))]
+            raw_p_ids = [m.group() for p in person_ids.split(",") if (m := re.search(r'\d+', decode_id(p)))]
             if raw_p_ids: self.scene_filter["performers"] = {"value": raw_p_ids, "modifier": "INCLUDES"}
 
         sort_by = self._get_query_param("SortBy").split(",")[0].lower()
@@ -126,17 +126,17 @@ class StashQueryBuilder:
 
         years = self._get_query_param("Years")
         if years:
-            y_l = [int(re.search(r'\d{4}', decode_id(y)).group()) for y in years.split(",") if re.search(r'\d{4}', decode_id(y))]
+            y_l = [int(m.group()) for y in years.split(",") if (m := re.search(r'\d{4}', decode_id(y)))]
             if y_l: self.scene_filter["date"] = {"value": f"{min(y_l)}-01-01", "value2": f"{max(y_l)}-12-31", "modifier": "BETWEEN"}
-            
+
         tags_param = self.q.get("tags_param")
         if tags_param:
-            raw_t = [re.search(r'\d+', decode_id(t)).group() for t in tags_param.split(",") if re.search(r'\d+', decode_id(t))]
+            raw_t = [m.group() for t in tags_param.split(",") if (m := re.search(r'\d+', decode_id(t)))]
             if raw_t: self.scene_filter["tags"] = {"value": raw_t, "modifier": "INCLUDES"}
 
         studio_ids_param = self.q.get("studio_ids_param")
         if studio_ids_param:
-            raw_s_ids = [re.search(r'\d+', decode_id(s)).group() for s in studio_ids_param.split(",") if re.search(r'\d+', decode_id(s))]
+            raw_s_ids = [m.group() for s in studio_ids_param.split(",") if (m := re.search(r'\d+', decode_id(s)))]
             if raw_s_ids: self.scene_filter["studios"] = {"value": raw_s_ids, "modifier": "INCLUDES"}
 
         search_term = self.q.get("search_term")

@@ -213,6 +213,12 @@ async def api_increment_cache_version(request):
         "message": f"Global Cache Version bumped to v{config.CACHE_VERSION}. Tunarr and ErsatzTV will rebuild their libraries on the next sync."
     })
 
+async def api_clear_cache(request: Request):
+    """Flushes the in-memory metadata cache so fresh data is pulled from Stash immediately."""
+    await stash_client.clear_all_caches()
+    logger.info("Metadata cache cleared via UI request.")
+    return JSONResponse({"status": "success", "message": "Cache cleared. Fresh metadata will be fetched from Stash on the next request."})
+
 async def api_clear_top_played(request: Request):
     import state
     state.stats["top_played"] = {}
