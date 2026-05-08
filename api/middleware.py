@@ -111,10 +111,8 @@ class AuthenticationMiddleware:
 
         if is_spammy:
             logger.trace(f"[[ INBOUND ]] {method} {full_url_for_log} | IP: {client_ip}")
-            logger.trace(f"Request: {method} {original_path} (Routed as: {path_lower}) from {client_ip}")
         else:
             logger.debug(f"[[ INBOUND ]] {method} {full_url_for_log} | IP: {client_ip}")
-            logger.debug(f"Request: {method} {original_path} (Routed as: {path_lower}) from {client_ip}")
         # ---------------------------------
 
         path_lower = original_path.lower()
@@ -135,6 +133,11 @@ class AuthenticationMiddleware:
         elif path_lower == "/jellyfin": scope["path"] = "/"
         path_lower = scope["path"]
         
+        if is_spammy:
+            logger.trace(f"Request: {method} {original_path} (Routed as: {path_lower}) from {client_ip}")
+        else:
+            logger.debug(f"Request: {method} {original_path} (Routed as: {path_lower}) from {client_ip}")
+
         logger.debug(f"Request: {method} {original_path} (Routed as: {path_lower}) from {client_ip}")
 
         is_public = path_lower in PUBLIC_ENDPOINTS or any(path_lower.startswith(p) for p in PUBLIC_PREFIXES)
