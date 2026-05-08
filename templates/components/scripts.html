@@ -1,0 +1,558 @@
+    <script>
+        const state = {
+            config: {},
+            logs: [],
+            streams: [],
+            currentPage: 'dashboard'
+        };
+
+        const DEFAULTS = {
+            STASH_URL: '', STASH_API_KEY: '', SYNC_LEVEL: 'Everything',
+            STASH_GRAPHQL_PATH: '/graphql', STASH_VERIFY_TLS: false,
+            PROXY_BIND: '0.0.0.0', HOST_IP: '', PROXY_PORT: 8096, UI_PORT: 8097,
+            SJS_USER: '', SJS_PASSWORD: '', SERVER_ID: '', SERVER_NAME: 'Stash Media Server',
+            RECENT_DAYS: 14, FAVORITE_ACTION: 'o_counter', ALLOW_CLIENT_DELETION: 'Disabled',
+            TAG_GROUPS: [], LATEST_GROUPS: ['Scenes'], STASH_TIMEOUT: 30, STASH_RETRIES: 3,
+            ENABLE_FILTERS: true, ENABLE_TAG_FILTERS: false, ENABLE_ALL_TAGS: false,
+            REQUIRE_AUTH_FOR_CONFIG: false, DEFAULT_PAGE_SIZE: 50, MAX_PAGE_SIZE: 200,
+            LOG_LEVEL: 'INFO', LOG_DIR: '/config', LOG_FILE: 'stash_jellyfin_proxy.log',
+            LOG_MAX_SIZE_MB: 10, LOG_BACKUP_COUNT: 3, BAN_THRESHOLD: 10, BAN_WINDOW_MINUTES: 15,
+            BANNED_IPS: '', AUTHENTICATED_IPS: '', CACHE_VERSION: 0,
+            TOP_PLAYED_RETENTION_DAYS: 0, AUTH_IP_TIMEOUT_MINUTES: 60
+        };
+
+        let topPlayedData = [];
+        let topPlayedLimit = 10;
+
+        function escapeHTML(str) {
+            return str.replace(/[&<>'"]/g, tag => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[tag] || tag));
+        }
+
+        function formatDuration(seconds) {
+            if (!seconds || seconds < 0) return '';
+            const d = Math.floor(seconds / 86400);
+            const h = Math.floor((seconds % 86400) / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = Math.floor(seconds % 60);
+            if (d > 0) return `${d}d ${h}h ${m}m`;
+            if (h > 0) return `${h}h ${m}m`;
+            if (m > 0) return `${m}m ${s}s`;
+            return `${s}s`;
+        }
+
+        function showToast(message, type) {
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), 3000);
+        }
+
+        document.querySelectorAll('.nav-item').forEach(item => {
+            item.addEventListener('click', () => {
+                const page = item.dataset.page;
+                if(page) showPage(page);
+            });
+        });
+
+        document.querySelectorAll('.tab-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+                e.target.classList.add('active');
+                topPlayedLimit = parseInt(e.target.dataset.limit);
+                renderTopPlayed();
+            });
+        });
+
+        async function showPage(page) {
+            state.currentPage = page;
+            document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+            document.querySelector(`[data-page="${page}"]`).classList.add('active');
+            document.querySelectorAll('.page').forEach(p => p.classList.add('hidden'));
+            document.getElementById(`page-${page}`).classList.remove('hidden');
+
+            if (page === 'config') fetchConfig();
+            else if (page === 'logs') fetchLogs();
+        }
+
+        async function fetchStatus() {
+            try {
+                const res = await fetch('/api/status');
+                const data = await res.json();
+                document.getElementById('proxy-status').textContent = data.running ? 'Running' : 'Stopped';
+                document.getElementById('proxy-status').className = 'status-value ' + (data.running ? 'running' : 'stopped');
+                document.getElementById('stash-status').textContent = data.stashConnected ? 'Connected' : 'Disconnected';
+                document.getElementById('stash-status').className = 'status-value ' + (data.stashConnected ? 'connected' : 'disconnected');
+                document.getElementById('stash-version').textContent = data.stashVersion || '-';
+                document.getElementById('proxy-uptime').textContent = data.uptime ? `Uptime: ${formatDuration(data.uptime)}` : '';
+            } catch (e) {}
+        }
+
+        async function fetchStreams() {
+            try {
+                const res = await fetch('/api/streams');
+                const data = await res.json();
+                state.streams = data.streams || [];
+                document.getElementById('stream-count').textContent = state.streams.length;
+                const list = document.getElementById('streams-list');
+                if (state.streams.length === 0) {
+                    list.innerHTML = '<div class="empty-state">No active streams</div>';
+                } else {
+                    list.innerHTML = state.streams.map(s => `
+                        <div class="stream-item">
+                            ${s.item_id ? `<img class="stream-thumb" src="/Items/${s.item_id}/Images/Primary" onerror="this.style.display='none'">` : ''}
+                            <div class="stream-details">
+                                <div class="stream-title" title="${escapeHTML(s.title || s.id)}">${escapeHTML(s.performer && s.performer !== 'Unknown' ? s.performer + ': ' : '')}${escapeHTML(s.title || s.id)}</div>
+                                <div class="stream-meta">
+                                    <span class="stream-meta-item"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path></svg>${escapeHTML(s.user || 'unknown')}</span>
+                                    <span class="stream-meta-item"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"></path></svg>${escapeHTML(s.clientIp || 'unknown')}</span>
+                                    <span class="stream-meta-item"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path></svg>${escapeHTML(s.clientType || 'unknown')}</span>
+                                </div>
+                            </div>
+                            <div class="stream-time">${s.started ? formatDuration(Date.now()/1000 - s.started) : ''}</div>
+                        </div>
+                    `).join('');
+                }
+            } catch (e) {}
+        }
+
+        function renderTopPlayed() {
+            const topList = document.getElementById('top-played-list');
+            const tabsContainer = document.getElementById('top-played-tabs');
+            const tab50 = document.querySelector('.tab-btn[data-limit="50"]');
+            const tab100 = document.querySelector('.tab-btn[data-limit="100"]');
+            
+            if (topPlayedData.length > 10) {
+                tabsContainer.style.display = 'flex';
+                tab50.style.display = topPlayedData.length > 10 ? 'block' : 'none';
+                tab100.style.display = topPlayedData.length > 50 ? 'block' : 'none';
+            } else {
+                tabsContainer.style.display = 'none';
+            }
+
+            if (topPlayedData.length === 0) {
+                topList.innerHTML = '<div class="empty-state">No play data yet</div>';
+                return;
+            }
+
+            const itemsToShow = topPlayedData.slice(0, topPlayedLimit);
+            topList.innerHTML = itemsToShow.map((item, idx) => `
+                <div class="top-played-item">
+                    <span class="top-played-rank">${idx + 1}</span>
+                    <div class="top-played-info">
+                        <div class="top-played-title" title="${escapeHTML(item.title)}">${escapeHTML(item.title)}</div>
+                        <div class="top-played-performer">${escapeHTML(item.performer || 'Unknown')}</div>
+                    </div>
+                    <span class="top-played-count">${item.count}x</span>
+                </div>
+            `).join('');
+        }
+
+        async function fetchStats() {
+            try {
+                const res = await fetch('/api/stats');
+                const data = await res.json();
+                if (data.stash) {
+                    document.getElementById('stat-scenes').textContent = data.stash.scenes.toLocaleString();
+                    document.getElementById('stat-performers').textContent = data.stash.performers.toLocaleString();
+                    document.getElementById('stat-studios').textContent = data.stash.studios.toLocaleString();
+                    document.getElementById('stat-tags').textContent = data.stash.tags.toLocaleString();
+                    document.getElementById('stat-groups').textContent = data.stash.groups.toLocaleString();
+                }
+                if (data.proxy) {
+                    document.getElementById('stat-streams-today').textContent = data.proxy.streams_today.toLocaleString();
+                    document.getElementById('stat-total-streams').textContent = data.proxy.total_streams.toLocaleString();
+                    document.getElementById('stat-unique-ips').textContent = data.proxy.unique_ips_today.toLocaleString();
+                    document.getElementById('stat-auth-success').textContent = data.proxy.auth_success.toLocaleString();
+                    document.getElementById('stat-auth-failed').textContent = data.proxy.auth_failed.toLocaleString();
+
+                    topPlayedData = data.proxy.top_played || [];
+                    renderTopPlayed();
+                }
+            } catch (e) {}
+        }
+
+        async function fetchLogs() {
+            try {
+                const res = await fetch('/api/logs?limit=100');
+                const data = await res.json();
+                state.logs = data.entries || [];
+                renderLogs();
+            } catch (e) {}
+        }
+
+        function renderLogs() {
+            const levelFilter = document.getElementById('log-level-filter').value;
+            const searchFilter = document.getElementById('log-search').value.toLowerCase();
+            let filtered = state.logs;
+            if (levelFilter) filtered = filtered.filter(l => l.level === levelFilter);
+            if (searchFilter) filtered = filtered.filter(l => l.message.toLowerCase().includes(searchFilter));
+            
+            document.getElementById('log-count').textContent = `${filtered.length} entries`;
+            const html = filtered.map(l => `<div class="log-entry log-${l.level}">${l.timestamp} [${l.level}] ${escapeHTML(l.message)}</div>`).join('');
+            document.getElementById('full-logs').innerHTML = html || '<div class="empty-state">No logs</div>';
+            
+            if (state.currentPage === 'dashboard') {
+                const dashboardHtml = filtered.slice(-10).map(l => `<div class="log-entry log-${l.level}">${l.timestamp} [${l.level}] ${escapeHTML(l.message)}</div>`).join('');
+                document.getElementById('dashboard-logs').innerHTML = dashboardHtml || '<div class="empty-state">No logs</div>';
+            }
+        }
+
+        async function fetchConfig() {
+            try {
+                const res = await fetch('/api/config');
+                const data = await res.json();
+                const config = data.config || data;
+                const envFields = data.env_fields || [];
+                const definedFields = data.defined_fields || [];
+                
+                const dynList = document.getElementById('dynamic-ips-list');
+                if (dynList) {
+                    const dynIps = data.dynamic_ips || {};
+                    if (Object.keys(dynIps).length === 0) {
+                        dynList.style.display = 'block';
+                        dynList.innerHTML = '<span style="color: var(--text-secondary);">No active dynamic IPs</span>';
+                    } else {
+                        const timeoutMins = config.AUTH_IP_TIMEOUT_MINUTES || 60;
+                        dynList.style.display = 'flex';
+                        dynList.style.flexWrap = 'wrap';
+                        dynList.style.gap = '8px';
+                        
+                        dynList.innerHTML = Object.entries(dynIps).map(([ip, ts]) => {
+                            const minutesLeft = Math.max(0, Math.round((timeoutMins * 60 - (Date.now() / 1000 - ts)) / 60));
+                            return `<div style="display: inline-flex; align-items: center; background: rgba(255,255,255,0.08); border: 1px solid var(--border); border-radius: 16px; padding: 2px 8px 2px 10px; font-size: 13px;">
+                                <span>${ip} <span style="color:var(--text-secondary); font-size:11px; margin-left: 2px;">(~${minutesLeft}m)</span></span>
+                                <button type="button" onclick="pruneDynamicIp('${ip}')" style="background:none; border:none; color:var(--text-secondary); cursor:pointer; font-size: 12px; margin-left: 8px; padding: 2px; display: flex; align-items: center; justify-content: center; transition: color 0.2s;" onmouseover="this.style.color='var(--error)'" onmouseout="this.style.color='var(--text-secondary)'" title="Remove IP">✕</button>
+                            </div>`;
+                        }).join('');
+                    }
+                }
+                const envNotice = document.getElementById('env-notice');
+                if (envFields.length > 0) {
+                    envNotice.style.display = 'block';
+                    envNotice.querySelector('span').textContent = envFields.join(', ');
+                } else envNotice.style.display = 'none';
+
+                Object.entries(config).forEach(([key, value]) => {
+                    const input = document.querySelector(`[name="${key}"]`);
+                    if (input) {
+                        const isEnv = envFields.includes(key);
+                        const isDefined = definedFields.includes(key);
+                        
+                        if (isEnv) {
+                            if (input.type === 'checkbox') {
+                                input.disabled = true;
+                                input.closest('label')?.classList.add('env-locked-label');
+                            } else {
+                                input.readOnly = true;
+                                input.disabled = input.tagName === 'SELECT';
+                                input.classList.add('env-locked');
+                            }
+                        }
+
+                        if (input.type === 'checkbox') input.checked = value === true || value === 'true';
+                        else if (input.tagName === 'SELECT') input.value = value;
+                        else if (Array.isArray(value)) {
+                            const valStr = value.join(', ');
+                            const defStr = Array.isArray(DEFAULTS[key]) ? DEFAULTS[key].join(', ') : '';
+                            input.value = (valStr !== defStr || isDefined) ? valStr : '';
+                        } else {
+                            const strVal = String(value);
+                            const strDef = String(DEFAULTS[key] ?? '');
+                            input.value = (strVal !== strDef || isDefined) ? value : '';
+                        }
+                    }
+                });
+                if (document.getElementById('current-cache-version')) document.getElementById('current-cache-version').innerText = 'v' + (config.CACHE_VERSION || 0);
+            } catch (e) {}
+        }
+        
+        async function refreshDynamicConfigUI() {
+            try {
+                const res = await fetch('/api/config');
+                const data = await res.json();
+                const config = data.config || data;
+
+                const bannedInput = document.querySelector('[name="BANNED_IPS"]');
+                if (bannedInput && document.activeElement !== bannedInput) {
+                    const valStr = Array.isArray(config.BANNED_IPS) ? config.BANNED_IPS.join(', ') : (config.BANNED_IPS || '');
+                    if (bannedInput.value !== valStr) {
+                        bannedInput.value = valStr;
+                    }
+                }
+
+                const dynList = document.getElementById('dynamic-ips-list');
+                if (dynList) {
+                    const dynIps = data.dynamic_ips || {};
+                    if (Object.keys(dynIps).length === 0) {
+                        dynList.style.display = 'block';
+                        dynList.innerHTML = '<span style="color: var(--text-secondary);">No active dynamic IPs</span>';
+                    } else {
+                        const timeoutMins = config.AUTH_IP_TIMEOUT_MINUTES || 60;
+                        dynList.style.display = 'flex';
+                        dynList.style.flexWrap = 'wrap';
+                        dynList.style.gap = '8px';
+                        
+                        dynList.innerHTML = Object.entries(dynIps).map(([ip, ts]) => {
+                            const minutesLeft = Math.max(0, Math.round((timeoutMins * 60 - (Date.now() / 1000 - ts)) / 60));
+                            return `<div style="display: inline-flex; align-items: center; background: rgba(255,255,255,0.08); border: 1px solid var(--border); border-radius: 16px; padding: 2px 8px 2px 10px; font-size: 13px;">
+                                <span>${ip} <span style="color:var(--text-secondary); font-size:11px; margin-left: 2px;">(~${minutesLeft}m)</span></span>
+                                <button type="button" onclick="pruneDynamicIp('${ip}')" style="background:none; border:none; color:var(--text-secondary); cursor:pointer; font-size: 12px; margin-left: 8px; padding: 2px; display: flex; align-items: center; justify-content: center; transition: color 0.2s;" onmouseover="this.style.color='var(--error)'" onmouseout="this.style.color='var(--text-secondary)'" title="Remove IP">✕</button>
+                            </div>`;
+                        }).join('');
+                    }
+                }
+            } catch (e) { }
+        }
+
+        async function pruneDynamicIp(ip) {
+            try {
+                await fetch(`/api/auth/dynamic_ips/${ip}`, { method: 'DELETE' });
+                fetchConfig();
+            } catch (e) {
+                showToast('Failed to prune IP', 'error');
+            }
+        }
+
+        async function doLogin() {
+            const user = document.getElementById('login-user').value;
+            const pass = document.getElementById('login-pass').value;
+            const res = await fetch('/api/login', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({username: user, password: pass})
+            });
+            if (res.ok) {
+                document.getElementById('login-overlay').style.display = 'none';
+                startDashboard();
+            } else document.getElementById('login-error').style.display = 'block';
+        }
+
+        async function doLogout() {
+            await fetch('/api/logout', { method: 'POST' });
+            window.location.reload();
+        }
+
+        async function clearLogsUI() {
+            try {
+                await fetch('/api/logs/clear', { method: 'POST' });
+                showToast('Log view cleared', 'success');
+                fetchLogs();
+            } catch (e) { showToast('Failed to clear logs', 'error'); }
+        }
+
+        function promptResetStats(btn) {
+            if (btn.dataset.confirming === "true") {
+                btn.dataset.confirming = "false";
+                btn.innerHTML = "Reset Stats";
+                btn.style.backgroundColor = "";
+                btn.style.color = "";
+                fetch('/api/stats/reset', { method: 'POST' }).then(() => fetchStats());
+            } else {
+                btn.dataset.confirming = "true";
+                btn.innerHTML = "Are you sure?";
+                btn.style.backgroundColor = "var(--error)";
+                btn.style.color = "white";
+                setTimeout(() => {
+                    if (btn.dataset.confirming === "true") {
+                        btn.dataset.confirming = "false";
+                        btn.innerHTML = "Reset Stats";
+                        btn.style.backgroundColor = "";
+                        btn.style.color = "";
+                    }
+                }, 3000);
+            }
+        }
+
+        function openQC() {
+            document.getElementById('qc-overlay').style.display = 'flex';
+            setTimeout(() => document.getElementById('qc-code').focus(), 100);
+        }
+
+        function closeQC() {
+            document.getElementById('qc-overlay').style.display = 'none';
+            document.getElementById('qc-code').value = '';
+            document.getElementById('qc-status').textContent = '';
+        }
+
+        async function doQCAuthorize() {
+            const code = document.getElementById('qc-code').value.trim();
+            const statusEl = document.getElementById('qc-status');
+            
+            if (code.length < 5) {
+                statusEl.textContent = 'Please enter a valid code.';
+                statusEl.style.color = 'var(--warning)';
+                return;
+            }
+            
+            statusEl.textContent = 'Authorizing...';
+            statusEl.style.color = 'var(--text-secondary)';
+
+            try {
+                const res = await fetch(`/api/quickconnect/authorize?code=${code}`, { method: 'POST' });
+                const data = await res.json();
+                
+                if (res.ok && data.Success) {
+                    statusEl.textContent = 'Device Authorized Successfully!';
+                    statusEl.style.color = 'var(--success)';
+                    setTimeout(closeQC, 2000);
+                } else {
+                    statusEl.textContent = data.Error || 'Authorization failed.';
+                    statusEl.style.color = 'var(--error)';
+                }
+            } catch (e) {
+                statusEl.textContent = 'Network error.';
+                statusEl.style.color = 'var(--error)';
+            }
+        }
+
+        async function startDashboard() {
+            fetchStatus(); fetchStreams(); fetchLogs(); fetchStats(); fetchConfig();
+            
+            if (!window.pollInterval) {
+                let isPolling = false;
+                window.pollInterval = setInterval(async () => {
+                    if (isPolling) return;
+                    isPolling = true;
+                    try {
+                        if (state.currentPage === 'dashboard') {
+                            await Promise.all([fetchStatus(), fetchStreams(), fetchLogs(), fetchStats()]);
+                        } else if (state.currentPage === 'logs') {
+                            await fetchLogs();
+                        } else if (state.currentPage === 'config') {
+                            await refreshDynamicConfigUI(); 
+                        }
+                    } finally {
+                        isPolling = false;
+                    }
+                }, 5000);
+            }
+        }
+
+        document.getElementById('config-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const formData = new FormData(e.target);
+            const data = {};
+            
+            formData.forEach((value, key) => {
+                if (key === 'TAG_GROUPS' || key === 'LATEST_GROUPS' || key === 'AUTHENTICATED_IPS') {
+                    data[key] = value.split(',').map(s => s.trim()).filter(Boolean);
+                } else if (typeof DEFAULTS[key] === 'number') {
+                    data[key] = value.trim() === '' ? DEFAULTS[key] : parseInt(value);
+                } else data[key] = value.trim() === '' ? DEFAULTS[key] : value;
+            });
+
+            document.querySelectorAll('input[type="checkbox"]').forEach(cb => data[cb.name] = cb.checked);
+
+            try {
+                const res = await fetch('/api/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                if (res.ok) {
+                    const result = await res.json();
+                    showToast(result.needs_restart ? 'Saved. Restart required for some changes.' : 'Configuration saved.', 'success');
+                    fetchConfig();
+                }
+            } catch (e) { showToast('Failed to save', 'error'); }
+        });
+
+        document.getElementById('btn-increment-version').addEventListener('click', async () => {
+            if(!confirm('Invalidate all Etags and URLs? Clients will rebuild caches on next sync.')) return;
+            try {
+                const response = await fetch('/api/cache/increment', { method: 'POST' });
+                const data = await response.json();
+                if (response.ok) { showToast(data.message || 'Cache Version incremented.', 'success'); fetchConfig(); }
+                else showToast('Failed: ' + data.error, 'error');
+            } catch (error) { showToast('Error incrementing cache.', 'error'); }
+        });
+
+        document.getElementById('btn-rotate-key').addEventListener('click', () => {
+            if (confirm('Rotate API Key? This breaks existing client connections.')) {
+                document.getElementById('PROXY_API_KEY').value = crypto.randomUUID();
+                showToast('Key generated. Click Save to apply.', 'info');
+            }
+        });
+
+        document.getElementById('restart-btn').addEventListener('click', async () => {
+            if (confirm('Restart server?')) {
+                await fetch('/api/restart', { method: 'POST' });
+                showToast('Restarting...', 'info');
+                setTimeout(() => location.reload(), 3000);
+            }
+        });
+
+        (async () => {
+            const res = await fetch('/api/auth/check');
+            if (res.status === 401) document.getElementById('login-overlay').style.display = 'flex';
+            else startDashboard();
+        })();
+
+        // Collapsible UI Logic
+        function toggleResources() {
+            const content = document.getElementById('resource-content');
+            const toggle = document.getElementById('resource-toggle');
+            content.classList.toggle('hidden');
+            toggle.classList.toggle('collapsed');
+        }
+
+        // Color coding for stress levels
+        function getStressColor(percent, isProxy = false) {
+            if (percent > 90) return '#ef4444'; // Red danger
+            if (percent > 75) return '#f59e0b'; // Amber warning
+            return isProxy ? 'var(--primary)' : '#10b981'; // Default normal
+        }
+
+        function formatUptime(seconds) {
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            return `${h}h ${m}m`;
+        }
+
+        // Fetch loop
+        async function fetchSysInfo() {
+            // Don't waste network calls if the card is collapsed
+            if (document.getElementById('resource-content').classList.contains('hidden')) return;
+
+            try {
+                const res = await fetch('/api/sysinfo');
+                const data = await res.json();
+
+                // Proxy Data
+                document.getElementById('res-proxy-cpu').textContent = data.proxy.cpu_percent + '%';
+                const pCpuBar = document.getElementById('bar-proxy-cpu');
+                pCpuBar.style.width = Math.min(data.proxy.cpu_percent, 100) + '%';
+                pCpuBar.style.backgroundColor = getStressColor(data.proxy.cpu_percent, true);
+
+                document.getElementById('res-proxy-ram').textContent = data.proxy.ram_used_mb + ' MB';
+                // Estimate proxy visual bar relative to total system RAM (capped at 100)
+                const proxyRamPercent = (data.proxy.ram_used_mb / data.system.ram_total_mb) * 100;
+                document.getElementById('bar-proxy-ram').style.width = Math.min(proxyRamPercent, 100) + '%';
+                
+                document.getElementById('res-proxy-uptime').textContent = formatUptime(data.proxy.uptime_sec);
+
+                // System Data
+                document.getElementById('res-sys-cpu').textContent = data.system.cpu_percent + '%';
+                const sCpuBar = document.getElementById('bar-sys-cpu');
+                sCpuBar.style.width = data.system.cpu_percent + '%';
+                sCpuBar.style.backgroundColor = getStressColor(data.system.cpu_percent);
+
+                document.getElementById('res-sys-ram').textContent = data.system.ram_percent + '%';
+                document.getElementById('text-sys-ram').textContent = `${data.system.ram_used_mb} / ${data.system.ram_total_mb} MB`;
+                const sRamBar = document.getElementById('bar-sys-ram');
+                sRamBar.style.width = data.system.ram_percent + '%';
+                sRamBar.style.backgroundColor = getStressColor(data.system.ram_percent);
+
+                document.getElementById('res-sys-disk').textContent = data.system.disk_percent + '%';
+                document.getElementById('bar-sys-disk').style.width = data.system.disk_percent + '%';
+
+            } catch (e) {
+                console.warn('Failed to fetch system info');
+            }
+        }
+
+        // Add to your existing window.onload or initialize sequence:
+        setInterval(fetchSysInfo, 3000); // Update every 3 seconds
+        fetchSysInfo(); // Run immediately on load
+    </script>

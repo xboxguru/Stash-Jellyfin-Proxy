@@ -1,0 +1,105 @@
+            <div id="page-dashboard" class="page">
+                <h2 class="page-title">Dashboard</h2>
+                <div class="status-grid">
+                    <div class="status-card">
+                        <div class="status-label">Proxy Status</div>
+                        <div id="proxy-status" class="status-value">Checking...</div>
+                        <div id="proxy-uptime" class="status-hint"></div>
+                    </div>
+                    <div class="status-card">
+                        <div class="status-label">Stash Connection</div>
+                        <div id="stash-status" class="status-value">Checking...</div>
+                    </div>
+                    <div class="status-card">
+                        <div class="status-label">Stash Version</div>
+                        <div id="stash-version" class="status-value">-</div>
+                    </div>
+                    <div class="status-card">
+                        <div class="status-label">Active Streams</div>
+                        <div id="stream-count" class="status-value">0</div>
+                    </div>
+                </div>
+                <div class="card full-width">
+                    <div class="card-header" style="cursor: pointer;" onclick="toggleResources()">
+                        <div class="card-title">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line><line x1="20" y1="9" x2="23" y2="9"></line><line x1="20" y1="14" x2="23" y2="14"></line><line x1="1" y1="9" x2="4" y2="9"></line><line x1="1" y1="14" x2="4" y2="14"></line></svg>
+                            System Resources
+                        </div>
+                        <div class="header-actions" id="resource-toggle">
+                            <svg class="collapse-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                        </div>
+                    </div>
+                    <div class="card-content collapsible-content" id="resource-content">
+                        <div class="resource-grid">
+                            <div class="res-card">
+                                <div class="res-header"><span>Proxy CPU</span><span class="res-val" id="res-proxy-cpu">0%</span></div>
+                                <div class="res-bar-bg"><div class="res-bar-fill res-proxy-color" id="bar-proxy-cpu" style="width: 0%"></div></div>
+                                <div class="res-header" style="margin-top: 10px;"><span>System CPU</span><span class="res-val" id="res-sys-cpu">0%</span></div>
+                                <div class="res-bar-bg"><div class="res-bar-fill res-sys-color" id="bar-sys-cpu" style="width: 0%"></div></div>
+                            </div>
+                            <div class="res-card">
+                                <div class="res-header"><span>Proxy RAM</span><span class="res-val" id="res-proxy-ram">0 MB</span></div>
+                                <div class="res-bar-bg"><div class="res-bar-fill res-proxy-color" id="bar-proxy-ram" style="width: 0%"></div></div>
+                                <div class="res-header" style="margin-top: 10px;"><span>System RAM</span><span class="res-val" id="res-sys-ram">0%</span></div>
+                                <div class="res-bar-bg"><div class="res-bar-fill res-sys-color" id="bar-sys-ram" style="width: 0%"></div></div>
+                                <div style="font-size: 11px; color: var(--text-secondary); text-align: right; margin-top: 4px;" id="text-sys-ram">0 / 0 MB</div>
+                            </div>
+                            <div class="res-card">
+                                <div class="res-header"><span>Storage (/)</span><span class="res-val" id="res-sys-disk">0%</span></div>
+                                <div class="res-bar-bg"><div class="res-bar-fill res-disk-color" id="bar-sys-disk" style="width: 0%"></div></div>
+                                <div class="res-header" style="margin-top: 15px;"><span>Proxy Uptime</span><span class="res-val" id="res-proxy-uptime">0h 0m</span></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="card">
+                    <h3 class="card-title">Active Streams</h3>
+                    <div id="streams-list" class="streams-list">
+                        <div class="empty-state">No active streams</div>
+                    </div>
+                </div>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px;">
+                    <div class="card">
+                        <h3 class="card-title">Stash Library</h3>
+                        <div class="stats-grid" id="stash-library-stats">
+                            <div class="stat-item"><span class="stat-value" id="stat-scenes">-</span><span class="stat-label">Scenes</span></div>
+                            <div class="stat-item"><span class="stat-value" id="stat-performers">-</span><span class="stat-label">Performers</span></div>
+                            <div class="stat-item"><span class="stat-value" id="stat-studios">-</span><span class="stat-label">Studios</span></div>
+                            <div class="stat-item"><span class="stat-value" id="stat-tags">-</span><span class="stat-label">Tags</span></div>
+                            <div class="stat-item"><span class="stat-value" id="stat-groups">-</span><span class="stat-label">Groups</span></div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <h3 class="card-title" style="display: flex; justify-content: space-between; align-items: center;">
+                            Proxy Usage
+                            <button type="button" id="reset-stats-btn" class="btn" style="padding: 0.25rem 0.5rem; font-size: 0.75rem; transition: all 0.3s;" onclick="promptResetStats(this)">Reset Stats</button>
+                        </h3>
+                        <div class="stats-grid" id="proxy-usage-stats">
+                            <div class="stat-item"><span class="stat-value" id="stat-streams-today">-</span><span class="stat-label">Streams Today</span></div>
+                            <div class="stat-item"><span class="stat-value" id="stat-total-streams">-</span><span class="stat-label">Total Streams</span></div>
+                            <div class="stat-item"><span class="stat-value" id="stat-unique-ips">-</span><span class="stat-label">Clients Today</span></div>
+                            <div class="stat-item"><span class="stat-value" id="stat-auth-success">-</span><span class="stat-label">Auth Success</span></div>
+                            <div class="stat-item"><span class="stat-value" id="stat-auth-failed">-</span><span class="stat-label">Auth Failed</span></div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h3 class="card-title" style="display: flex; justify-content: space-between; align-items: center;">
+                        Top Played
+                        
+                    </h3>
+                    <div id="top-played-tabs" class="tabs" style="display:none; margin-bottom: 12px;">
+                        <button class="tab-btn active" data-limit="10">Top 10</button>
+                        <button class="tab-btn" data-limit="50" style="display:none;">Top 50</button>
+                        <button class="tab-btn" data-limit="100" style="display:none;">Top 100</button>
+                    </div>
+                    <div id="top-played-list" class="top-played-list">
+                        <div class="empty-state">No play data yet</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <h3 class="card-title">Recent Logs</h3>
+                    <div id="dashboard-logs" class="log-viewer"></div>
+                </div>
+            </div>

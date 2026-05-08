@@ -1,0 +1,343 @@
+<div id="page-config" class="page hidden">
+    <h2 class="page-title">Configuration</h2>
+
+    <div class="tabs" style="margin-bottom: 20px; border-bottom: 1px solid var(--border); padding-bottom: 0;">
+        <button type="button" class="tab-btn config-tab-btn active" data-tab="server" style="padding: 10px 20px; font-weight: 500;">Server</button>
+        <button type="button" class="tab-btn config-tab-btn" data-tab="stash" style="padding: 10px 20px; font-weight: 500;">Stash</button>
+        <button type="button" class="tab-btn config-tab-btn" data-tab="library" style="padding: 10px 20px; font-weight: 500;">Library</button>
+        <button type="button" class="tab-btn config-tab-btn" data-tab="security" style="padding: 10px 20px; font-weight: 500;">Security</button>
+        <button type="button" class="tab-btn config-tab-btn" data-tab="logging" style="padding: 10px 20px; font-weight: 500;">Logging</button>
+    </div>
+
+    <form id="config-form" autocomplete="off">
+        
+        <div id="config-server" class="config-section">
+            <div class="card">
+                <h3 class="card-title">Network Bindings</h3>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Bind Address <span class="badge-warning">Restart</span></label>
+                        <input type="text" class="form-input" name="PROXY_BIND" placeholder="0.0.0.0">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Host IP (Docker Discovery)</label>
+                        <input type="text" class="form-input" name="HOST_IP" placeholder="Leave blank to auto-detect">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">API Port <span class="badge-warning">Restart</span></label>
+                        <input type="number" class="form-input" name="PROXY_PORT" placeholder="8096">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">UI Port <span class="badge-warning">Restart</span></label>
+                        <input type="number" class="form-input" name="UI_PORT" placeholder="8097">
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3 class="card-title">Proxy Identity</h3>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Server Name</label>
+                        <input type="text" class="form-input" name="SERVER_NAME" placeholder="Stash Media Server">
+                        <div class="form-hint">Display name shown in clients</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Server ID <span class="badge-warning">Changing breaks client pairings</span></label>
+                        <input type="text" class="form-input" name="SERVER_ID">
+                    </div>
+                </div>
+                <div class="form-group" style="margin-bottom: 0;">
+                    <label class="form-label">Proxy API Key (For ErsatzTV / Clients)</label>
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <input type="text" class="form-input" id="PROXY_API_KEY" name="PROXY_API_KEY" placeholder="Auto-generated if blank">
+                        <button type="button" id="btn-rotate-key" class="btn btn-secondary" style="padding: 10px 12px; font-size: 12px; white-space: nowrap;">
+                            <svg style="width: 14px; height: 14px; display: inline-block; vertical-align: text-bottom; margin-right: 4px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                            Rotate Key
+                        </button>
+                    </div>
+                    <div class="form-hint">Use this key as your Token/Password in ErsatzTV.</div>
+                </div>
+            </div>
+        </div>
+
+        <div id="config-stash" class="config-section hidden">
+            <div class="card">
+                <h3 class="card-title">Connection Details</h3>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Stash URL</label>
+                        <input type="text" class="form-input" name="STASH_URL" placeholder="http://localhost:9999">
+                        <div class="form-hint">Full URL including port</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Stash API Key</label>
+                        <input type="password" class="form-input" name="STASH_API_KEY" placeholder="Enter API key" autocomplete="off" data-1p-ignore data-lpignore="true">
+                        <div class="form-hint">Found in Stash: Settings → Security</div>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">GraphQL Path</label>
+                    <input type="text" class="form-input" name="STASH_GRAPHQL_PATH" placeholder="/graphql">
+                </div>
+                <div class="form-group" style="margin-bottom: 0;">
+                    <label class="form-label" style="display: flex; align-items: center; gap: 0.5rem;">
+                        <input type="checkbox" name="STASH_VERIFY_TLS" checked style="width: auto;">
+                        Verify TLS Certificate (Disable for self-signed certs)
+                    </label>
+                </div>
+            </div>
+            <div class="card">
+                <h3 class="card-title">Advanced connection</h3>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Timeout (sec)</label>
+                        <input type="number" class="form-input" name="STASH_TIMEOUT" placeholder="30">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Retries</label>
+                        <input type="number" class="form-input" name="STASH_RETRIES" placeholder="3">
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="config-library" class="config-section hidden">
+            <div class="card">
+                <h3 class="card-title">Content & Organization <span style="color:var(--success); font-size:10px; margin-left:8px; text-transform:none;">(Live Update)</span></h3>
+                <div class="form-row three-col">
+                    <div class="form-group">
+                        <label class="form-label">Sync Level</label>
+                        <select class="form-input" name="SYNC_LEVEL">
+                            <option value="Everything">Everything (Default)</option>
+                            <option value="Organized">Organized Only</option>
+                            <option value="Tagged">Tagged Only</option>
+                        </select>
+                        <div class="form-hint">Controls imported scenes</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Tag Groups</label>
+                        <input type="text" class="form-input" name="TAG_GROUPS" placeholder="e.g. Favorites, VR, 4K">
+                        <div class="form-hint">Stash tags to create as library folders</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Latest Groups</label>
+                        <input type="text" class="form-input" name="LATEST_GROUPS" placeholder="Scenes">
+                        <div class="form-hint">Libraries for the home screen</div>
+                    </div>
+                </div>
+                <div class="form-group" style="margin-top: 16px; margin-bottom: 0;">
+                    <label class="form-label">Recent Days Tag</label>
+                    <input type="number" class="form-input" name="RECENT_DAYS" placeholder="14" style="max-width: 200px;">
+                    <div class="form-hint">Days to apply 'Recently Added'. 0 disables.</div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3 class="card-title">Client Behavior</h3>
+                <div class="form-row three-col">
+                    <div class="form-group">
+                        <label class="form-label">Heart Button Action</label>
+                        <select class="form-input" name="FAVORITE_ACTION">
+                            <option value="o_counter">O-Counter Only</option>
+                            <option value="rating">5-Star Rating Only</option>
+                            <option value="both">Both (O-Counter + Rating)</option>
+                        </select>
+                        <div class="form-hint">What Stash does when favorited</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Client Deletion</label>
+                        <select class="form-input" name="ALLOW_CLIENT_DELETION">
+                            <option value="Disabled">Disabled (Hidden in UI)</option>
+                            <option value="Remove">Remove (Delete from Stash DB only)</option>
+                            <option value="Delete">Delete (Nuke from Stash & Disk)</option>
+                        </select>
+                        <div class="form-hint">Allow clients to delete scenes</div>
+                    </div>
+                </div>
+                <div class="form-row three-col">
+                    <div class="form-group">
+                        <label class="form-label">Default Page Size</label>
+                        <input type="number" class="form-input" name="DEFAULT_PAGE_SIZE" placeholder="50">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Max Page Size</label>
+                        <input type="number" class="form-input" name="MAX_PAGE_SIZE" placeholder="200">
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3 class="card-title">Features & Caching</h3>
+                <div class="checkbox-grid">
+                    <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                        <input type="checkbox" name="ENABLE_FILTERS" checked> Show Saved Filters Folder
+                    </label>
+                    <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                        <input type="checkbox" name="ENABLE_TAG_FILTERS"> Show Tags Folder
+                    </label>
+                    <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                        <input type="checkbox" name="ENABLE_ALL_TAGS"> Enable 'All Tags' Subfolder
+                    </label>
+                </div>
+                
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Top Played Memory (Days)</label>
+                        <input type="number" class="form-input" name="TOP_PLAYED_RETENTION_DAYS" placeholder="0">
+                        <div class="form-hint">How long to track dashboard history. 0 = Forever.</div>
+                    </div>
+                </div>
+
+                <div class="form-group" style="margin-top: 16px; margin-bottom: 0;">
+                    <label class="form-label">Global Cache Busting</label>
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <span id="current-cache-version" style="font-weight: bold; font-size: 1.2em; color: var(--accent);">v0</span>
+                        <button type="button" id="btn-increment-version" class="btn btn-secondary" style="padding: 6px 12px; font-size: 12px;">
+                            Force Global Refresh
+                        </button>
+                    </div>
+                    <div class="form-hint">Increments Etag and Image versions to force Tunarr and ErsatzTV to re-download metadata and thumbnails.</div>
+                </div>
+            </div>
+        </div>
+
+        <div id="config-security" class="config-section hidden">
+            <div class="card">
+                <h3 class="card-title">Dashboard Auth</h3>
+                <div class="form-row three-col">
+                    <div class="form-group">
+                        <label class="form-label">Proxy Username</label>
+                        <input type="text" class="form-input" name="SJS_USER" placeholder="e.g. admin" autocomplete="off" data-1p-ignore>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Proxy Password</label>
+                        <input type="password" class="form-input" name="SJS_PASSWORD" placeholder="Enter password" autocomplete="new-password" data-1p-ignore>
+                    </div>
+                    <div class="form-group" style="display: flex; align-items: flex-end; padding-bottom: 8px;">
+                        <label class="form-label" style="display: flex; align-items: center; gap: 0.5rem; margin:0;">
+                            <input type="checkbox" name="REQUIRE_AUTH_FOR_CONFIG" style="width: auto;">
+                            Require Password for UI
+                        </label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3 class="card-title">Client IP Whitelisting</h3>
+                <div class="form-row three-col">
+                    <div class="form-group">
+                        <label class="form-label">Auth IP Timeout (Mins)</label>
+                        <input type="number" class="form-input" name="AUTH_IP_TIMEOUT_MINUTES" placeholder="60">
+                        <div class="form-hint">Time before dynamic IPs expire (0 = Never)</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Static Whitelisted IPs</label>
+                        <input type="text" class="form-input" name="AUTHENTICATED_IPS" placeholder="192.168.1.50">
+                        <div class="form-hint">Permanently trusted IPs (Comma-separated)</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Active Dynamic IPs</label>
+                        <div id="dynamic-ips-list" style="background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 6px; padding: 10px; font-size: 13px; max-height: 100px; overflow-y: auto;">
+                            <span style="color: var(--text-secondary);">Loading...</span>
+                        </div>
+                        <div class="form-hint">Auto-whitelisted via API tokens.</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3 class="card-title">Security & Bans</h3>
+                <div class="form-row three-col">
+                    <div class="form-group">
+                        <label class="form-label">Ban Threshold</label>
+                        <input type="number" class="form-input" name="BAN_THRESHOLD" placeholder="10">
+                        <div class="form-hint">Failed attempts before ban</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Ban Window (mins)</label>
+                        <input type="number" class="form-input" name="BAN_WINDOW_MINUTES" placeholder="15">
+                        <div class="form-hint">Time window for failures</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Manually Banned IPs</label>
+                        <input type="text" class="form-input" name="BANNED_IPS" placeholder="192.168.1.100, 10.0.0.5">
+                        <div class="form-hint">Comma-separated IPs</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="config-logging" class="config-section hidden">
+            <div class="card">
+                <h3 class="card-title">Log Output <span class="badge-warning">Restart Required</span></h3>
+                <div class="form-row three-col">
+                    <div class="form-group">
+                        <label class="form-label">Log Level</label>
+                        <select class="form-input" name="LOG_LEVEL">
+                            <option value="TRACE" {% if config.LOG_LEVEL == 'TRACE' %}selected{% endif %}>TRACE (All Data)</option>
+                            <option value="DEBUG" {% if config.LOG_LEVEL == 'DEBUG' %}selected{% endif %}>DEBUG</option>
+                            <option value="NOTICE" {% if config.LOG_LEVEL == 'NOTICE' %}selected{% endif %}>NOTICE (Logic Flow)</option>
+                            <option value="INFO" {% if config.LOG_LEVEL == 'INFO' %}selected{% endif %}>INFO</option>
+                            <option value="WARNING" {% if config.LOG_LEVEL == 'WARNING' %}selected{% endif %}>WARNING</option>
+                            <option value="ERROR" {% if config.LOG_LEVEL == 'ERROR' %}selected{% endif %}>ERROR</option>
+                        </select>
+                        <div class="form-hint">Controls the verbosity of console and file logs.</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Log Directory</label>
+                        <input type="text" class="form-input" name="LOG_DIR" placeholder="/config">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Log File</label>
+                        <input type="text" class="form-input" name="LOG_FILE" placeholder="stash_jellyfin_proxy.log">
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h3 class="card-title">Rotation</h3>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Max File Size (MB)</label>
+                        <input type="number" class="form-input" name="LOG_MAX_SIZE_MB" placeholder="10">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Backup Count</label>
+                        <input type="number" class="form-input" name="LOG_BACKUP_COUNT" placeholder="3">
+                        <div class="form-hint">Old log files to keep</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="env-notice" class="env-notice" style="margin-bottom: 16px;">
+            <strong>Environment Override:</strong> The following fields are set via environment variables and cannot be changed here: <span></span>
+        </div>
+        
+        <div style="display: flex; gap: 1rem; align-items: center; border-top: 1px solid var(--border); padding-top: 20px;">
+            <button type="submit" class="btn btn-primary" style="font-weight: bold; font-size: 16px;">Save Configuration</button>
+            <button type="button" id="restart-btn" class="btn" style="background: var(--error);">Restart Server</button>
+        </div>
+
+    </form>
+</div>
+
+<script>
+    // Tab switching logic for the Settings Form
+    document.querySelectorAll('.config-tab-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            // Remove active state from all config tabs
+            document.querySelectorAll('.config-tab-btn').forEach(b => b.classList.remove('active'));
+            // Hide all config sections
+            document.querySelectorAll('.config-section').forEach(sec => sec.classList.add('hidden'));
+            
+            // Activate clicked tab
+            e.target.classList.add('active');
+            // Show corresponding section
+            document.getElementById('config-' + e.target.dataset.tab).classList.remove('hidden');
+        });
+    });
+</script>

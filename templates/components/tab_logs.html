@@ -1,0 +1,21 @@
+            <div id="page-logs" class="page hidden">
+                <h2 class="page-title">Logs</h2>
+                <div class="card">
+                    <div class="log-controls">
+                        <select id="log-level-filter" class="log-filter">
+                            <option value="">All Levels</option>
+                            <option value="TRACE">TRACE</option>
+                            <option value="DEBUG">DEBUG</option>
+                            <option value="NOTICE">NOTICE</option>
+                            <option value="INFO">INFO</option>
+                            <option value="WARNING">WARNING</option>
+                            <option value="ERROR">ERROR</option>
+                        </select>
+                        <input type="text" id="log-search" class="form-input" placeholder="Search logs..." style="width: 300px;">
+                        <span id="log-count" class="log-count">0 entries</span>
+                        <button id="download-logs" class="btn btn-secondary">Download</button>
+                        <button type="button" class="btn" style="background-color: var(--warning); margin-left: 10px;" onclick="clearLogsUI()">Clear Log View</button>
+                    </div>
+                    <div id="full-logs" class="log-viewer" style="max-height: 600px;"></div>
+                </div>
+            </div>

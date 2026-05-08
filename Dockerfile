@@ -19,23 +19,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     bash curl gosu tzdata && \
     rm -rf /var/lib/apt/lists/*
 
-# Install modular dependencies
-RUN pip install --no-cache-dir \
-    hypercorn starlette requests httpx
-
 RUN mkdir -p /app /config && chmod 755 /app /config
 
-# --- THE FIX: Copy from the correct Docker-specific path! ---
-COPY --from=jellyfin-base /jellyfin/jellyfin-web /app/jellyfin-web
-# ------------------------------------------------------------
+COPY requirements.txt /app/
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Copy the rest of our Python proxy code
+COPY --from=jellyfin-base /jellyfin/jellyfin-web /app/jellyfin-web
+
 COPY api/ /app/api/
 COPY core/ /app/core/
 COPY templates/ /app/templates/
 COPY *.py /app/
 COPY docker-entrypoint.sh /docker-entrypoint.sh
-COPY requirements.txt /app/
 
 RUN chmod +x /docker-entrypoint.sh
 

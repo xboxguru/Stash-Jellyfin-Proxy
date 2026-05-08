@@ -1,224 +1,295 @@
 import logging
+import asyncio
+import time
 import httpx
+import json
 from typing import Dict, Any, Optional
 import config
+from aiocache import cached, caches
 
 logger = logging.getLogger(__name__)
 
-# The universal GraphQL fields we request for scenes. 
-SCENE_FIELDS = """
+caches.set_config({
+    'default': {
+        'cache': "aiocache.SimpleMemoryCache",
+        'ttl': 3600,
+        'max_entries': 1000
+    }
+})
+
+def cache_log(func, *args, **kwargs):
+    """Logs a debug message when a cache hit is about to occur."""
+    # The cache checks for the key before executing the function. 
+    # If the function is skipped, aiocache has the data.
+    # Add key_builder=cache_log to decorator to receive cache logging 
+    key = f"{func.__name__}:{args}:{kwargs}"
+    logger.trace(f"CACHE CHECK: Testing key '{key}'")
+    return key
+
+# Lightweight fields for fast library browsing (Grid View)
+BASE_SCENE_FIELDS = """
     id title code date details o_counter play_count rating100 created_at organized resume_time
-    files { path duration video_codec audio_codec frame_rate bit_rate width height format size } 
+    files { path duration video_codec audio_codec frame_rate bit_rate width height format size basename } 
     studio { id name image_path } 
     tags { name } 
     performers { name id image_path } 
     captions { language_code caption_type }
 """
 
-def get_stash_headers() -> Dict[str, str]:
-    """Build the headers required to talk to Stash."""
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-    if getattr(config, "STASH_API_KEY", ""):
-        headers["ApiKey"] = config.STASH_API_KEY
-    return headers
+# Heavy fields including Markers for individual scene details and playback
+DETAILED_SCENE_FIELDS = BASE_SCENE_FIELDS + """
+    scene_markers { id seconds title primary_tag { name } }
+"""
 
-async def test_stash_connection() -> bool:
-    """Check if Stash is online and reachable using Async httpx."""
-    url = f"{config.get_stash_base()}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
-    query = {"query": "{ version { version } }"}
-    async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
-        try:
-            response = await client.post(url, headers=get_stash_headers(), json=query, timeout=10.0)
-            response.raise_for_status()
-            data = response.json()
-            if "data" in data and "version" in data["data"]:
-                logger.info(f"Successfully connected to Stash (Version: {data['data']['version']['version']})")
-                return True
-            logger.error("Connected to Stash, but received unexpected GraphQL response.")
-            return False
-        except Exception as e:
-            logger.error(f"Failed to connect to Stash at {url}: {e}")
-            return False
+class _StashConnectionManager:
+    """Manages a persistent HTTP connection pool for Stash GraphQL queries."""
+    
+    def __init__(self):
+        self._client = None
 
-async def call_graphql(query: str, variables: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
-    """Execute an Async GraphQL query against Stash with retry logic."""
-    url = f"{config.get_stash_base()}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
-    payload = {"query": query}
-    if variables:
-        payload["variables"] = variables
+    @property
+    def client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                verify=getattr(config, "STASH_VERIFY_TLS", False),
+                timeout=getattr(config, "STASH_TIMEOUT", 30),
+                limits=httpx.Limits(max_keepalive_connections=50, max_connections=100)
+            )
+        return self._client
 
-    async with httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False)) as client:
+    def get_headers(self) -> Dict[str, str]:
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if getattr(config, "STASH_API_KEY", ""): 
+            headers["ApiKey"] = config.STASH_API_KEY
+        return headers
+
+    async def execute(self, query: str, variables: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        url = f"{config.get_stash_base()}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
+        payload = {"query": query}
+        if variables: 
+            payload["variables"] = variables
+
+        query_preview = query.replace('\n', ' ')[:80]
+        
         for attempt in range(1, getattr(config, "STASH_RETRIES", 3) + 1):
+            start_time = time.time()
             try:
-                response = await client.post(
-                    url, 
-                    headers=get_stash_headers(), 
-                    json=payload, 
-                    timeout=getattr(config, "STASH_TIMEOUT", 30)
-                )
-                response.raise_for_status()
+                response = await self.client.post(url, headers=self.get_headers(), json=payload)
+                elapsed = time.time() - start_time
+                
+                # Detailed Error Logging for Stash 500/504s
+                if response.status_code != 200:
+                    logger.warning(f"GraphQL HTTP {response.status_code} on attempt {attempt}. Response: {response.text[:200]}")
+                    response.raise_for_status()
+
                 result = response.json()
-                if "errors" in result:
-                    logger.error(f"GraphQL Error: {result['errors']}")
+                
+                if "errors" in result: 
+                    logger.error(f"GraphQL Data Error [{elapsed:.2f}s]: {result['errors']}")
                     return None
+                    
+                logger.debug(f"GraphQL Request successful in {elapsed:.2f}s | Query: {query_preview}...")
                 return result.get("data")
+                
             except Exception as e:
-                logger.warning(f"Stash API request failed (Attempt {attempt}/{getattr(config, 'STASH_RETRIES', 3)}): {e}")
-                if attempt == getattr(config, "STASH_RETRIES", 3):
-                    logger.error("Max retries reached. Stash is unreachable.")
+                elapsed = time.time() - start_time
+                logger.warning(f"GraphQL request failed in {elapsed:.2f}s (Attempt {attempt}/{getattr(config, 'STASH_RETRIES', 3)}): {e}")
+                if attempt == getattr(config, "STASH_RETRIES", 3): 
+                    logger.error("Max retries reached for GraphQL request.")
                     return None
-                import asyncio
                 await asyncio.sleep(1.0)
 
+# Singleton instance
+_manager = _StashConnectionManager()
+
+async def test_stash_connection() -> bool:
+    url = f"{config.get_stash_base()}{getattr(config, 'STASH_GRAPHQL_PATH', '/graphql')}"
+    try:
+        response = await _manager.client.post(url, headers=_manager.get_headers(), json={"query": "{ version { version } }"})
+        response.raise_for_status()
+        data = response.json()
+        return bool("data" in data and "version" in data["data"])
+    except Exception as e: 
+        logger.debug(f"Stash connection test failed: {e}")
+        return False
+
+async def call_graphql(query: str, variables: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    return await _manager.execute(query, variables)
+
 async def get_scene(scene_id: str) -> Optional[Dict[str, Any]]:
-    """Fetch a single scene by ID asynchronously."""
-    query = f"""
-    query FindScene($id: ID!) {{
-        findScene(id: $id) {{
-            {SCENE_FIELDS}
-        }}
-    }}
-    """
-    data = await call_graphql(query, {"id": scene_id})
-    if data and data.get("findScene"):
-        return data["findScene"]
-        
-    return None
+    """Uses DETAILED fields (includes Markers) because we are only asking for 1 scene."""
+    data = await call_graphql(f"query FindScene($id: ID!) {{ findScene(id: $id) {{ {DETAILED_SCENE_FIELDS} }} }}", {"id": scene_id})
+    return data["findScene"] if data and data.get("findScene") else None
 
 async def fetch_scenes(filter_args: Dict[str, Any], page: int = 1, per_page: int = 50, scene_filter: Dict[str, Any] = None, ignore_sync_level: bool = False) -> Dict[str, Any]:
-    """Fetch scenes asynchronously based on SYNC_LEVEL."""
+    """Uses BASE fields (NO Markers) to prevent Stash from choking on 50-100 items at once."""
     sf = scene_filter or {}
+    if "title" in filter_args: sf["title"] = filter_args.pop("title")
     
-    if "title" in filter_args:
-        sf["title"] = filter_args.pop("title")
-        
+    # Optional: Keep your ignore_sync_level logic if you had it implemented previously
     if not ignore_sync_level:
         sync_mode = getattr(config, "SYNC_LEVEL", "Everything")
-        if sync_mode == "Organized":
-            sf["organized"] = True 
-        elif sync_mode == "Tagged":
-            sf["tags"] = {"modifier": "NOT_NULL"}
-
-    query = f"""
-    query FindScenes($filter: FindFilterType, $scene_filter: SceneFilterType) {{
-        findScenes(filter: $filter, scene_filter: $scene_filter) {{
-            count
-            scenes {{
-                {SCENE_FIELDS}
-            }}
-        }}
-    }}
-    """
+        if sync_mode == "Organized": sf["organized"] = True
+        elif sync_mode == "Tagged": sf["tags"] = {"modifier": "NOT_NULL"}
     
-    filter_args["page"] = page
-    filter_args["per_page"] = per_page
+    query = f"query FindScenes($filter: FindFilterType, $scene_filter: SceneFilterType) {{ findScenes(filter: $filter, scene_filter: $scene_filter) {{ count scenes {{ {BASE_SCENE_FIELDS} }} }} }}"
+    filter_args.update({"page": page, "per_page": per_page})
     
-    variables = {
-        "filter": filter_args,
-        "scene_filter": sf
-    }
-    
-    data = await call_graphql(query, variables)
+    data = await call_graphql(query, {"filter": filter_args, "scene_filter": sf})
     return data.get("findScenes") if data else {"count": 0, "scenes": []}
 
+@cached(ttl=60)
 async def get_stash_stats() -> dict:
-    """Fetches total library counts from Stash asynchronously."""
+    data = await call_graphql("query Stats { stats { scene_count performer_count studio_count tag_count group_count } }")
+    return data["stats"] if data and "stats" in data else {}
+
+@cached(ttl=300)
+async def get_all_studios():
+    data = await call_graphql("query AllStudios { allStudios { id name image_path } }")
+    return data.get("allStudios", []) if data else []
+
+async def update_resume_time(scene_id: str, time_seconds: float):
+    await call_graphql("mutation SceneSaveActivity($id: ID!, $resume_time: Float) { sceneSaveActivity(id: $id, resume_time: $resume_time) }", {"id": scene_id, "resume_time": time_seconds})
+
+async def increment_play_count(scene_id: str):
+    await call_graphql("mutation($id: ID!) { sceneIncrementPlayCount(id: $id) }", {"id": scene_id})
+
+async def increment_o_counter(scene_id: str):
+    await call_graphql("mutation SceneAddO($id: ID!, $times: [Timestamp!]) { sceneAddO(id: $id, times: $times) { count } }", {"id": scene_id})
+
+async def update_rating(scene_id: str, rating100: int):
+    await call_graphql("mutation SceneUpdate($input: SceneUpdateInput!) { sceneUpdate(input: $input) { id } }", {"input": {"id": scene_id, "rating100": rating100}})
+
+async def destroy_scene(scene_id: str, delete_file: bool = False) -> bool:
+    result = await call_graphql("mutation sceneDestroy($input: SceneDestroyInput!) { sceneDestroy(input: $input) }", {"input": {"id": scene_id, "delete_file": delete_file, "delete_generated": True}})
+    return result is not None and result.get("sceneDestroy") is True
+
+@cached(ttl=300)
+async def get_all_tags() -> list:
+    data = await call_graphql("""query { findTags(filter: {per_page: -1, sort: "name", direction: ASC}, tag_filter: {scene_count: {value: 0, modifier: GREATER_THAN}}) { tags { id name } } }""")
+    return data.get("findTags", {}).get("tags", []) if data else []
+
+@cached(ttl=300)
+async def get_saved_filters() -> list:
+    data = await call_graphql("""query { findSavedFilters(mode: SCENES) { id name find_filter { q sort direction } object_filter } }""")
+    if data and data.get("findSavedFilters"): return data["findSavedFilters"]
+    data_legacy = await call_graphql("""query { findSavedFilters(mode: SCENES) { id name filter find_filter { q sort direction } } }""")
+    return data_legacy.get("findSavedFilters", []) if data_legacy else []
+
+@cached(ttl=300)
+async def get_performer(performer_id: str):
+    data = await call_graphql("""query FindPerformer($id: ID!) { findPerformer(id: $id) { id name image_path alias_list gender birthdate country ethnicity hair_color eye_color height_cm weight measurements piercings tattoos details fake_tits career_length penis_length circumcised } }""", {"id": performer_id})
+    return data.get("findPerformer") if data else None
+
+async def clear_all_caches():
+    """Flush the in-memory aiocache so fresh data is fetched from Stash on the next request."""
+    cache = caches.get("default")
+    await cache.clear()
+
+@cached(ttl=300)
+async def get_scene_sprite(scene_id: str) -> str:
+    data = await call_graphql("""query($id: ID!) { findScene(id: $id) { paths { sprite } } }""", {"id": scene_id})
+    return data.get("findScene", {}).get("paths", {}).get("sprite") if data else None
+
+async def ensure_tags_exist(tag_names: list) -> list:
+    """Responsibility: Match Jellyfin string tags to Stash Tag IDs, creating missing ones dynamically."""
+    if not tag_names: return []
+    
+    existing_tags = await get_all_tags()
+    tag_map = {t["name"].lower(): str(t["id"]) for t in existing_tags}
+    
+    final_ids = []
+    for name in tag_names:
+        clean_name = str(name).strip()
+        if not clean_name: continue
+        
+        lower_name = clean_name.lower()
+        if lower_name in tag_map:
+            final_ids.append(tag_map[lower_name])
+        else:
+            logger.info(f"Creating new Stash tag: '{clean_name}'")
+            res = await call_graphql(
+                "mutation($name: String!) { tagCreate(input: {name: $name}) { id } }", 
+                {"name": clean_name}
+            )
+            if res and res.get("tagCreate"):
+                final_ids.append(str(res["tagCreate"]["id"]))
+                
+    return list(set(final_ids))
+
+async def update_scene(update_input: dict) -> bool:
+    """Responsibility: Submit the SceneUpdateInput payload to Stash."""
     query = """
-    query Stats {
-        stats {
-            scene_count
-            performer_count
-            studio_count
-            tag_count
-            group_count
-        }
+    mutation SceneUpdate($input: SceneUpdateInput!) {
+        sceneUpdate(input: $input) { id }
     }
     """
-    data = await call_graphql(query)
-    if data and "stats" in data:
-        return data["stats"]
-    return {}
+    result = await call_graphql(query, {"input": update_input})
+    return result is not None and result.get("sceneUpdate") is not None
 
-async def get_all_studios():
-    """Fetches all studios from Stash asynchronously."""
+async def fetch_tags(page: int = 1, per_page: int = 50) -> dict:
+    """Responsibility: Fetch paginated tags directly from Stash to avoid memory bloat."""
     query = """
-    query AllStudios {
-      allStudios {
-        id
-        name
-        image_path
+    query($page: Int, $per_page: Int) { 
+        findTags(
+            filter: {page: $page, per_page: $per_page, sort: "name", direction: ASC}, 
+            tag_filter: {scene_count: {value: 0, modifier: GREATER_THAN}}
+        ) { 
+            count
+            tags { id name } 
+        } 
+    }
+    """
+    data = await call_graphql(query, {"page": page, "per_page": per_page})
+    return data.get("findTags") if data else {"count": 0, "tags": []}
+
+@cached(ttl=300)
+async def fetch_lightweight_index(filter_json: str, scene_filter_json: str) -> list:
+    """Fetches and caches a lightweight index of scenes to power lightning-fast alphabetical scrolling."""
+    filter_args = json.loads(filter_json) if filter_json else {}
+    scene_filter = json.loads(scene_filter_json) if scene_filter_json else {}
+    
+    # Force per_page to -1 to get the full index for caching
+    filter_args["per_page"] = -1
+    
+    query = """
+    query FindScenes($filter: FindFilterType, $scene_filter: SceneFilterType) { 
+        findScenes(filter: $filter, scene_filter: $scene_filter) { 
+            scenes { id title code files { basename } } 
+        } 
+    }
+    """
+    data = await call_graphql(query, {"filter": filter_args, "scene_filter": scene_filter})
+    return data.get("findScenes", {}).get("scenes", []) if data else []
+
+@cached(ttl=60)
+async def fetch_recent_watch_history(limit: int = 50) -> list:
+    """Fetches the most recently played scenes directly from Stash to power Next Up."""
+    query = """
+    query RecentWatchHistory($per_page: Int) {
+      findScenes(
+        filter: { sort: "updated_at", direction: DESC, per_page: $per_page },
+        scene_filter: { play_count: { value: 0, modifier: GREATER_THAN } }
+      ) {
+        scenes { id title play_count resume_time performers { id name } studio { id name } }
       }
     }
     """
-    data = await call_graphql(query)
-    return data.get("allStudios", []) if data else []
+    data = await call_graphql(query, {"per_page": limit})
+    return data.get("findScenes", {}).get("scenes", []) if data else []
 
-# =====================================================================
-# MUTATIONS (User Data & Deletion)
-# =====================================================================
-
-async def update_resume_time(scene_id: str, time_seconds: float):
-    """Saves the user's playback progress for a scene."""
-    query = "mutation SceneSaveActivity($id: ID!, $resume_time: Float) { sceneSaveActivity(id: $id, resume_time: $resume_time) }"
-    await call_graphql(query, {"id": scene_id, "resume_time": time_seconds})
-    logger.info(f"✅ Two-Way Sync: Saved resume time ({time_seconds}s) for Scene {scene_id}")
-
-async def increment_play_count(scene_id: str):
-    """Increments the official Stash play count for a scene."""
-    query = "mutation($id: ID!) { sceneIncrementPlayCount(id: $id) }"
-    await call_graphql(query, {"id": scene_id})
-    logger.info(f"✅ Two-Way Sync: Logged official Play event for Scene {scene_id}")
-
-async def increment_o_counter(scene_id: str):
-    """Increments the Stash O-Counter for a scene."""
-    query = "mutation SceneAddO($id: ID!, $times: [Timestamp!]) { sceneAddO(id: $id, times: $times) { count } }"
-    await call_graphql(query, {"id": scene_id})
-    logger.info(f"✅ Two-Way Sync: Added 'O' event for Scene {scene_id}")
-
-async def update_rating(scene_id: str, rating100: int):
-    """Updates the 1-100 star rating for a scene."""
-    query = "mutation SceneUpdate($input: SceneUpdateInput!) { sceneUpdate(input: $input) { id } }"
-    await call_graphql(query, {"input": {"id": scene_id, "rating100": rating100}})
-    logger.info(f"✅ Two-Way Sync: Updated Rating for Scene {scene_id} to {rating100}")
-
-async def destroy_scene(scene_id: str, delete_file: bool = False) -> bool:
-    """Removes a scene from the database, and optionally deletes the physical file."""
-    query = "mutation sceneDestroy($input: SceneDestroyInput!) { sceneDestroy(input: $input) }"
-    variables = {"input": {"id": scene_id, "delete_file": delete_file, "delete_generated": True}}
-    result = await call_graphql(query, variables)
-    return result is not None and result.get("sceneDestroy") is True
-
-# =====================================================================
-# SPECIFIC QUERIES (Metadata & Assets)
-# =====================================================================
-
-async def get_all_tags() -> list:
-    """Fetches all Stash tags."""
-    query = """query { findTags(filter: {per_page: -1, sort: "name", direction: ASC}) { tags { id name } } }"""
-    data = await call_graphql(query)
-    return data.get("findTags", {}).get("tags", []) if data else []
-
-async def get_saved_filters() -> list:
-    """Fetches all saved filters, attempting modern schema first, then legacy."""
-    query_modern = """query { findSavedFilters(mode: SCENES) { id name find_filter { q sort direction } object_filter } }"""
-    data = await call_graphql(query_modern)
-    if data and data.get("findSavedFilters"): return data["findSavedFilters"]
-    
-    query_legacy = """query { findSavedFilters(mode: SCENES) { id name filter find_filter { q sort direction } } }"""
-    data_legacy = await call_graphql(query_legacy)
-    return data_legacy.get("findSavedFilters", []) if data_legacy else []
-
-async def get_performer(performer_id: str) -> dict:
-    """Fetches a specific performer by ID."""
-    query = """query FindPerformer($id: ID!) { findPerformer(id: $id) { id name image_path } }"""
-    data = await call_graphql(query, {"id": performer_id})
-    return data.get("findPerformer", {}) if data else {}
-
-async def get_scene_sprite(scene_id: str) -> str:
-    """Fetches the specific Sprite/Trickplay URL for a scene."""
-    query = """query($id: ID!) { findScene(id: $id) { paths { sprite } } }"""
-    data = await call_graphql(query, {"id": scene_id})
-    return data.get("findScene", {}).get("paths", {}).get("sprite") if data else None
+@cached(ttl=60)
+async def fetch_top_played_scenes(limit: int = 100) -> list:
+    """Fetches the most played scenes by total play_count to power the UI Dashboard."""
+    query = """
+    query TopPlayedScenes($per_page: Int) {
+      findScenes(
+        filter: { sort: "play_count", direction: DESC, per_page: $per_page },
+        scene_filter: { play_count: { value: 0, modifier: GREATER_THAN } }
+      ) {
+        scenes { id title play_count performers { name } }
+      }
+    }
+    """
+    data = await call_graphql(query, {"per_page": limit})
+    return data.get("findScenes", {}).get("scenes", []) if data else []
