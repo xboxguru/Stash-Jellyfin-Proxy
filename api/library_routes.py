@@ -700,86 +700,51 @@ async def endpoint_shows_episodes(request: Request):
     return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": total, "StartIndex": start_index})
 
 async def _build_next_up_pool(target_limit: int = 25) -> list:
-    """Harvests affinities from watch history and builds a randomized pool of unwatched scenes."""
-    recent_scene_ids = sorted(
-        state.stats.get("top_played", {}).keys(),
-        key=lambda k: state.stats["top_played"][k].get("last_played", 0),
-        reverse=True
-    )
+    """Harvests affinities from native Stash watch history and builds a randomized pool of unwatched scenes."""
     
-    candidates = {} 
-    history_index = 0
-    batch_size = 5
-    
-    logger.notice(f"Building Next Up pool. Target: {target_limit}. Recent history size: {len(recent_scene_ids)}")
-    
-    # Recursive fallback loop
-    while len(candidates) < target_limit and history_index < len(recent_scene_ids):
-        batch_ids = recent_scene_ids[history_index:history_index + batch_size]
-        history_index += batch_size
-        
-        raw_ids = [sid.replace("scene-", "") if sid.startswith("scene-") else sid for sid in batch_ids]
-        logger.notice(f"DEBUG ID CHECK: Original batch was {batch_ids} | Cleaned raw_ids are {raw_ids}")
+    # 1. Fetch recent watch history directly from Stash's native database
+    recent_scenes = await stash_client.fetch_recent_watch_history(limit=50)
+    logger.notice(f"Building Next Up pool. Target: {target_limit}. Found {len(recent_scenes)} recent watches.")
 
-        # 1. Fetch full details for the recent scenes to extract their affinities
-        tasks = [stash_client.get_scene(sid) for sid in raw_ids]
-        recent_scenes = await asyncio.gather(*tasks)
-        
-        performer_ids = set()
-        studio_ids = set()
-        
-        for scene in recent_scenes:
-            if not scene: continue
-            for p in scene.get("performers", []):
-                performer_ids.add(p["id"])
-            if scene.get("studio"):
-                studio_ids.add(scene["studio"]["id"])
+    candidates = {}
+    fetch_tasks = []
+
+    # 2. Extract affinity IDs (Performers and Studios) from recently watched scenes
+    for scene in recent_scenes:
+        for p in scene.get("performers", []):
+            if p.get("id"):
+                fetch_tasks.append(_fetch_affinity_scenes("performers", p["id"], 5))
                 
-        logger.trace(f"Next Up Batch - Extracting affinities from {len(batch_ids)} recent scenes. Found {len(performer_ids)} performers and {len(studio_ids)} studios.")
+        if scene.get("studio") and scene.get("studio").get("id"):
+            fetch_tasks.append(_fetch_affinity_scenes("studios", scene["studio"]["id"], 5))
 
-        # 2. Fire concurrent Stash queries for EACH performer and studio
-        fetch_tasks = []
-        for p_id in performer_ids:
-            fetch_tasks.append(_fetch_affinity_scenes("performers", p_id, 5))
-        for s_id in studio_ids:
-            fetch_tasks.append(_fetch_affinity_scenes("studios", s_id, 5))
-            
-        if not fetch_tasks:
-            continue
-            
-        # Wait for all the individual affinity queries to complete
+    # 3. Fire all GraphQL requests concurrently
+    if fetch_tasks:
         results = await asyncio.gather(*fetch_tasks)
-        
-        # 3. Deduplicate and add to candidate pool
         for scene_list in results:
             for s in scene_list:
-                if s["id"] not in candidates and (s.get("play_count") or 0) == 0:
-                    candidates[s["id"]] = s
-    # If we exhausted our watch history and still don't have enough candidates, 
-    # backfill with the newest unwatched scenes from the general library.
+                s_id = s.get("id")
+                if s_id and s_id not in candidates:
+                    candidates[s_id] = s
+
+    # 4. Backfill logic (if affinity pool is short)
     if len(candidates) < target_limit:
         shortfall = target_limit - len(candidates)
         logger.notice(f"Affinity pool short by {shortfall} scenes. Backfilling with global unwatched scenes.")
-        
         try:
             backfill_data = await stash_client.fetch_scenes(
                 filter_args={"sort": "date", "direction": "DESC"},
-                page=1, per_page=shortfall + 10, # Add a buffer for deduplication
-                scene_filter={
-                    "play_count": {"value": 0, "modifier": "EQUALS"}
-                }
+                page=1, per_page=shortfall + 10,
+                scene_filter={"play_count": {"value": 0, "modifier": "EQUALS"}}
             )
-            
-            backfill_scenes = backfill_data.get("scenes", []) if backfill_data else []
-            for s in backfill_scenes:
-                if len(candidates) >= target_limit:
-                    break
+            for s in backfill_data.get("scenes", []):
+                if len(candidates) >= target_limit: break
                 if s["id"] not in candidates:
                     candidates[s["id"]] = s
         except Exception as e:
             logger.error(f"Failed to fetch backfill scenes for Next Up: {e}")
 
-    # 5. Shuffle and slice the magic 25
+    # 5. Shuffle and slice the target limit
     pool = list(candidates.values())
     random.shuffle(pool)
     final_pool = pool[:target_limit]

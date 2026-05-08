@@ -324,6 +324,7 @@ async def run_server():
                     shutdown_trigger_event.set()
                     break
                 await userdata_routes.prune_and_salvage_zombie_streams()
+                state.clean_expired_quick_connects()
             except Exception as e:
                 logger.error(f"Watch-for-restart encountered an error: {e}")
             await asyncio.sleep(60)

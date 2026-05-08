@@ -138,6 +138,7 @@ async def fetch_scenes(filter_args: Dict[str, Any], page: int = 1, per_page: int
     data = await call_graphql(query, {"filter": filter_args, "scene_filter": sf})
     return data.get("findScenes") if data else {"count": 0, "scenes": []}
 
+@cached(ttl=60)
 async def get_stash_stats() -> dict:
     data = await call_graphql("query Stats { stats { scene_count performer_count studio_count tag_count group_count } }")
     return data["stats"] if data and "stats" in data else {}
@@ -259,4 +260,36 @@ async def fetch_lightweight_index(filter_json: str, scene_filter_json: str) -> l
     }
     """
     data = await call_graphql(query, {"filter": filter_args, "scene_filter": scene_filter})
+    return data.get("findScenes", {}).get("scenes", []) if data else []
+
+@cached(ttl=60)
+async def fetch_recent_watch_history(limit: int = 50) -> list:
+    """Fetches the most recently played scenes directly from Stash to power Next Up."""
+    query = """
+    query RecentWatchHistory($per_page: Int) {
+      findScenes(
+        filter: { sort: "updated_at", direction: DESC, per_page: $per_page },
+        scene_filter: { play_count: { value: 0, modifier: GREATER_THAN } }
+      ) {
+        scenes { id title play_count resume_time performers { id name } studio { id name } }
+      }
+    }
+    """
+    data = await call_graphql(query, {"per_page": limit})
+    return data.get("findScenes", {}).get("scenes", []) if data else []
+
+@cached(ttl=60)
+async def fetch_top_played_scenes(limit: int = 100) -> list:
+    """Fetches the most played scenes by total play_count to power the UI Dashboard."""
+    query = """
+    query TopPlayedScenes($per_page: Int) {
+      findScenes(
+        filter: { sort: "play_count", direction: DESC, per_page: $per_page },
+        scene_filter: { play_count: { value: 0, modifier: GREATER_THAN } }
+      ) {
+        scenes { id title play_count performers { name } }
+      }
+    }
+    """
+    data = await call_graphql(query, {"per_page": limit})
     return data.get("findScenes", {}).get("scenes", []) if data else []

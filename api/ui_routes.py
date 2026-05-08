@@ -149,11 +149,17 @@ async def api_get_stats(request: Request):
         state.stats["unique_ips_today"] = set()
         state.day_tracker = current_day
 
-    top_played_list = sorted(
-        [{"id": k, **v} for k, v in state.stats.get("top_played", {}).items()], 
-        key=lambda x: x.get("count", 0), 
-        reverse=True
-    )[:100]
+    top_stash_scenes = await stash_client.fetch_top_played_scenes(limit=100)
+    top_played_list = []
+    for s in top_stash_scenes:
+        # Safely extract performers into a comma-separated string
+        performers = ", ".join([p["name"] for p in s.get("performers", [])]) if s.get("performers") else "Unknown"
+        top_played_list.append({
+            "id": s["id"],
+            "title": s.get("title") or f"Scene {s['id']}",
+            "performer": performers,
+            "count": s.get("play_count", 1)
+        })
 
     return JSONResponse({
         "stash": {

@@ -69,18 +69,15 @@ stats = {
     "unique_ips_today": set(),
     "auth_success": 0,
     "auth_failed": 0,
-    "top_played": {}, 
 }
 
 def load_stats():
     data = _load_json(STATS_FILE, {})
-    if "top_played" in data: stats["top_played"] = data["top_played"]
     if "total_streams" in data: stats["total_streams"] = data["total_streams"]
     logger.debug("Server stats loaded.")
 
 def save_stats():
     _save_json(STATS_FILE, {
-        "top_played": stats["top_played"],
         "total_streams": stats["total_streams"]
     })
 

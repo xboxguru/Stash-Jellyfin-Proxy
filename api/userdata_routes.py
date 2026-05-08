@@ -31,14 +31,6 @@ def _register_new_stream(session_id: str, item_id: str, title: str, performer: s
     
     state.stats["streams_today"] += 1
     state.stats["total_streams"] += 1
-    scene_id = item_id if item_id else "unknown"
-    
-    if scene_id not in state.stats["top_played"]: 
-        state.stats["top_played"][scene_id] = {"title": title, "performer": performer, "count": 0}
-    
-    state.stats["top_played"][scene_id]["count"] += 1
-    state.stats["top_played"][scene_id]["last_played"] = time.time()
-    
     if hasattr(state, "save_stats"): 
         state.save_stats()
 
