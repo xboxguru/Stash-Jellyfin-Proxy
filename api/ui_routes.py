@@ -2,8 +2,10 @@ import os
 import logging
 import datetime, time
 import secrets
+import psutil
 from starlette.responses import JSONResponse, HTMLResponse, PlainTextResponse
 from starlette.requests import Request
+from starlette.templating import Jinja2Templates
 import config
 import state  # Required for IP and Session management
 from core import stash_client
@@ -11,26 +13,23 @@ from core import stash_client
 logger = logging.getLogger(__name__)
 RESTART_REQUESTED = False
 
+templates = Jinja2Templates(directory=os.path.join(config.SCRIPT_DIR, "templates"))
+
 async def serve_index(request: Request):
-    """Serves the main HTML page and replaces template variables."""
-    # Prevent the Proxy Dashboard from loading on the Jellyfin API port
+    """Serves the modular HTML dashboard using Jinja2."""
     proxy_port = getattr(config, "PROXY_PORT", 8096)
     if request.url.port == proxy_port and proxy_port != getattr(config, "UI_PORT", 8097):
         return PlainTextResponse("Stash-Jellyfin Proxy API is running. (No Web Client available)", status_code=200)
 
-    template_path = os.path.join(config.SCRIPT_DIR, "templates", "index.html")
-    try:
-        with open(template_path, "r", encoding="utf-8") as f:
-            html_content = f.read()
-            
-        server_name = getattr(config, "SERVER_NAME", "Stash Media Server")
-        html_content = html_content.replace("{{SERVER_NAME}}", server_name)
-        html_content = html_content.replace("{{VERSION}}", getattr(config, "APP_VERSION", "v2.1-dev"))
-        
-        return HTMLResponse(html_content)
-    except Exception as e:
-        logger.error(f"Failed to load index.html: {e}")
-        return HTMLResponse(f"<h1>Error loading UI</h1><p>{e}</p>", status_code=500)
+    # Pass variables into the Jinja2 context dictionary
+    context = {
+        "request": request, # Jinja2 always requires the request object
+        "SERVER_NAME": getattr(config, "SERVER_NAME", "Stash Media Server"),
+        "VERSION": getattr(config, "APP_VERSION", "v2.1-dev"),
+        "config": config
+    }
+    
+    return templates.TemplateResponse("index.html", context)
 
 async def api_get_config(request: Request):
     """Exposes all configuration and state data to the Web UI dynamically."""
@@ -238,3 +237,34 @@ async def api_remove_top_played_item(request: Request):
         del state.stats["top_played"][item_id]
         if hasattr(state, "save_stats"): state.save_stats()
     return JSONResponse({"success": True})
+
+async def api_get_sysinfo(request: Request):
+    """Fetches real-time hardware resource usage for the dashboard."""
+    process = psutil.Process(os.getpid())
+    
+    # System Metrics (interval=0 is non-blocking)
+    sys_cpu = psutil.cpu_percent(interval=0.0)
+    sys_mem = psutil.virtual_memory()
+    disk = psutil.disk_usage('/')
+    
+    # Proxy Specific Metrics
+    # Divide by cpu_count so a maxed single core shows as exactly what it takes from the total system
+    proxy_cpu = process.cpu_percent(interval=0.0) / psutil.cpu_count() 
+    proxy_mem_mb = process.memory_info().rss / (1024 * 1024)
+    
+    uptime_sec = time.time() - process.create_time()
+    
+    return JSONResponse({
+        "system": {
+            "cpu_percent": round(sys_cpu, 1),
+            "ram_percent": round(sys_mem.percent, 1),
+            "ram_used_mb": round(sys_mem.used / (1024*1024), 1),
+            "ram_total_mb": round(sys_mem.total / (1024*1024), 1),
+            "disk_percent": round(disk.percent, 1)
+        },
+        "proxy": {
+            "cpu_percent": round(proxy_cpu, 1),
+            "ram_used_mb": round(proxy_mem_mb, 1),
+            "uptime_sec": int(uptime_sec)
+        }
+    })

@@ -120,6 +120,7 @@ routes = [
     Route("/api/stats/top_played", ui_routes.api_clear_top_played, methods=["DELETE"]),
     Route("/api/stats/top_played/{item_id}", ui_routes.api_remove_top_played_item, methods=["DELETE"]),
     Route('/api/quickconnect/authorize', auth_routes.endpoint_quickconnect_authorize, methods=['POST']),
+    Route("/api/sysinfo", ui_routes.api_get_sysinfo, methods=["GET"]),
     
     Route("/system/info/public", auth_routes.endpoint_system_info_public, methods=["GET"]),
     Route("/public/system/info", auth_routes.endpoint_system_info_public, methods=["GET"]),
@@ -283,6 +284,33 @@ async def background_pruner():
         except Exception as e:
             logger.error(f"Background pruner encountered an error: {e}")
 
+async def continuous_preheater():
+    import json
+    from core import stash_client
+    logger.info("Starting continuous cache pre-heater for primary libraries (5-minute interval).")
+    
+    # We must formulate the EXACT dictionaries that library_routes generates to match the cache keys
+    filter_str = json.dumps({"direction": "ASC", "sort": "title"}, sort_keys=True)
+    scene_filter_all = json.dumps({}, sort_keys=True)
+    scene_filter_org = json.dumps({"organized": True}, sort_keys=True)
+    scene_filter_tag = json.dumps({"tags": {"modifier": "NOT_NULL"}}, sort_keys=True)
+    
+    while True:
+        try:
+            # Gather fires all 3 requests at the exact same time
+            await asyncio.gather(
+                stash_client.fetch_lightweight_index(filter_str, scene_filter_all),
+                stash_client.fetch_lightweight_index(filter_str, scene_filter_org),
+                stash_client.fetch_lightweight_index(filter_str, scene_filter_tag)
+            )
+            logger.debug("Primary libraries pre-heated successfully.")
+        except Exception as e:
+            logger.warning(f"Cache pre-heater encountered an issue: {e}")
+            
+        # Sleep for exactly 300 seconds (the aiocache TTL). 
+        # When it wakes up, the cache will have just expired, guaranteeing a fresh pull!
+        await asyncio.sleep(300)
+
 async def run_server():
     hypercorn_config = Config()
     hypercorn_config.bind = [f"{config.PROXY_BIND}:{config.PROXY_PORT}"]
@@ -331,11 +359,13 @@ async def run_server():
 
     watch_task = asyncio.create_task(watch_for_restart())
     prune_task = asyncio.create_task(background_pruner())
+    preheat_task = asyncio.create_task(continuous_preheater())
     
     await serve(asgi_app, hypercorn_config, shutdown_trigger=shutdown_trigger_event.wait)
     
     watch_task.cancel()
     prune_task.cancel()
+    preheat_task.cancel()
     if discovery_transport: discovery_transport.close()
 
 def main():
