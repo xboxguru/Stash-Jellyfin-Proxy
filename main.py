@@ -270,7 +270,7 @@ async def background_pruner():
                 expired_ips = [ip for ip, ts in state.authenticated_ips.items() if now - ts > (timeout * 60)]
                 if expired_ips:
                     for ip in expired_ips: del state.authenticated_ips[ip]
-                    logger.debug(f"Pruned {len(expired_ips)} expired IP authentications.")
+                    logger.trace(f"Pruned {len(expired_ips)} expired IP authentications.")
                     if hasattr(state, "save_auth_ips"): state.save_auth_ips(state.authenticated_ips)
 
             retention = getattr(config, "TOP_PLAYED_RETENTION_DAYS", 0)
@@ -278,7 +278,7 @@ async def background_pruner():
                 expired_scenes = [sid for sid, data in state.stats["top_played"].items() if now - data.get("last_played", now) > (retention * 86400)]
                 if expired_scenes:
                     for sid in expired_scenes: del state.stats["top_played"][sid]
-                    logger.debug(f"Pruned {len(expired_scenes)} expired top played records.")
+                    logger.trace(f"Pruned {len(expired_scenes)} expired top played records.")
                     if hasattr(state, "save_stats"): state.save_stats()
                     
         except Exception as e:
@@ -287,7 +287,7 @@ async def background_pruner():
 async def continuous_preheater():
     import json
     from core import stash_client
-    logger.info("Starting continuous cache pre-heater for primary libraries (5-minute interval).")
+    logger.notice("Starting continuous cache pre-heater for primary libraries (5-minute interval).")
     
     # We must formulate the EXACT dictionaries that library_routes generates to match the cache keys
     filter_str = json.dumps({"direction": "ASC", "sort": "title"}, sort_keys=True)
@@ -303,7 +303,7 @@ async def continuous_preheater():
                 stash_client.fetch_lightweight_index(filter_str, scene_filter_org),
                 stash_client.fetch_lightweight_index(filter_str, scene_filter_tag)
             )
-            logger.debug("Primary libraries pre-heated successfully.")
+            logger.trace("Primary libraries pre-heated successfully.")
         except Exception as e:
             logger.warning(f"Cache pre-heater encountered an issue: {e}")
             
@@ -319,17 +319,17 @@ async def run_server():
     if hasattr(config, "UI_PORT") and config.UI_PORT != config.PROXY_PORT:
         hypercorn_config.bind.append(f"{config.PROXY_BIND}:{config.UI_PORT}")
     
-    logger.info("=" * 50)
-    logger.info(f"Stash-Jellyfin Proxy v2")
-    logger.info(f"Proxy API: {config.PROXY_BIND}:{config.PROXY_PORT}")
-    if config.PROXY_API_KEY: logger.info(f"Proxy API Key Loaded")
-    logger.info("=" * 50)
+    logger.notice("=" * 50)
+    logger.notice(f"Stash-Jellyfin Proxy v2")
+    logger.notice(f"Proxy API: {config.PROXY_BIND}:{config.PROXY_PORT}")
+    if config.PROXY_API_KEY: logger.notice(f"Proxy API Key Loaded")
+    logger.notice("=" * 50)
 
     stash_online = await stash_client.test_stash_connection()
     if not stash_online:
         logger.warning("Stash is unreachable! Proxy will start, but clients will fail to load data.")
     else:
-        logger.info("Connected to Stash successfully.")
+        logger.notice("Connected to Stash successfully.")
     
     loop = asyncio.get_running_loop()
     try:

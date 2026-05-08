@@ -23,7 +23,7 @@ def cache_log(func, *args, **kwargs):
     # If the function is skipped, aiocache has the data.
     # Add key_builder=cache_log to decorator to receive cache logging 
     key = f"{func.__name__}:{args}:{kwargs}"
-    logger.debug(f"CACHE CHECK: Testing key '{key}'")
+    logger.trace(f"CACHE CHECK: Testing key '{key}'")
     return key
 
 # Lightweight fields for fast library browsing (Grid View)

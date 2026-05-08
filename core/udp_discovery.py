@@ -14,7 +14,7 @@ class JellyfinDiscoveryProtocol(asyncio.DatagramProtocol):
 
     def connection_made(self, transport):
         self.transport = transport
-        logger.info("UDP Auto-Discovery Service listening on port 7359")
+        logger.notice("UDP Auto-Discovery Service listening on port 7359")
 
     def datagram_received(self, data, addr):
         message = data.decode('utf-8', errors='ignore').strip()
@@ -24,7 +24,7 @@ class JellyfinDiscoveryProtocol(asyncio.DatagramProtocol):
             raw_config_ip = getattr(config, 'HOST_IP', None)
             bind_ip = raw_config_ip if raw_config_ip else self.local_ip
             
-            logger.debug(f"UDP Discovery Eval -> Config HOST_IP: '{raw_config_ip}', Auto-detected local_ip: '{self.local_ip}', Final bind_ip: '{bind_ip}'")
+            logger.trace(f"UDP Discovery Eval -> Config HOST_IP: '{raw_config_ip}', Auto-detected local_ip: '{self.local_ip}', Final bind_ip: '{bind_ip}'")
             
             response = {
                 "Address": f"http://{bind_ip}:{getattr(config, 'PROXY_PORT', 8096)}",
@@ -33,5 +33,5 @@ class JellyfinDiscoveryProtocol(asyncio.DatagramProtocol):
                 "Name": getattr(config, "SERVER_NAME", "Stash Proxy"),
                 "Version": "10.11.6" 
             }
-            logger.debug(f"Answering discovery ping from {addr[0]} with response IP {bind_ip}")
+            logger.trace(f"Answering discovery ping from {addr[0]} with response IP {bind_ip}")
             self.transport.sendto(json.dumps(response).encode('utf-8'), addr)

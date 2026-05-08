@@ -622,7 +622,7 @@ async def endpoint_similar_items(request: Request):
     except ValueError:
         limit = 12
         
-    logger.notice(f"Router -> Similar Items Requested for {item_id} (Limit: {limit})")
+    logger.debug(f"Router -> Similar Items Requested for {item_id} (Limit: {limit})")
     
     decoded_id = decode_id(item_id)
     
@@ -642,7 +642,7 @@ async def endpoint_similar_items(request: Request):
         except Exception as e:
             logger.error(f"Failed to map Similar scene {scene.get('id')}: {e}")
     
-    logger.notice(f"Similar pool generated {len(jellyfin_items)} scenes for {decoded_id}.")
+    logger.debug(f"Similar pool generated {len(jellyfin_items)} scenes for {decoded_id}.")
 
     return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": len(jellyfin_items), "StartIndex": 0})
 
@@ -660,7 +660,7 @@ async def endpoint_shows_episodes(request: Request):
     except (ValueError, TypeError):
         limit = getattr(config, "DEFAULT_PAGE_SIZE", 50)
 
-    logger.notice(f"Router -> Shows/Episodes: series_id={series_id} decoded={decoded} start={start_index} limit={limit}")
+    logger.debug(f"Router -> Shows/Episodes: series_id={series_id} decoded={decoded} start={start_index} limit={limit}")
 
     if not decoded.startswith("person-"):
         return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": start_index})
@@ -696,7 +696,7 @@ async def endpoint_shows_episodes(request: Request):
         except Exception as e:
             logger.error(f"Failed to map episode scene {scene.get('id')}: {e}")
 
-    logger.notice(f"Shows/Episodes: returning {len(jellyfin_items)}/{total} scenes for performer {performer_id}")
+    logger.debug(f"Shows/Episodes: returning {len(jellyfin_items)}/{total} scenes for performer {performer_id}")
     return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": total, "StartIndex": start_index})
 
 async def _build_next_up_pool(target_limit: int = 25) -> list:
@@ -704,7 +704,7 @@ async def _build_next_up_pool(target_limit: int = 25) -> list:
     
     # 1. Fetch recent watch history directly from Stash's native database
     recent_scenes = await stash_client.fetch_recent_watch_history(limit=50)
-    logger.notice(f"Building Next Up pool. Target: {target_limit}. Found {len(recent_scenes)} recent watches.")
+    logger.debug(f"Building Next Up pool. Target: {target_limit}. Found {len(recent_scenes)} recent watches.")
 
     candidates = {}
     fetch_tasks = []
@@ -730,7 +730,7 @@ async def _build_next_up_pool(target_limit: int = 25) -> list:
     # 4. Backfill logic (if affinity pool is short)
     if len(candidates) < target_limit:
         shortfall = target_limit - len(candidates)
-        logger.notice(f"Affinity pool short by {shortfall} scenes. Backfilling with global unwatched scenes.")
+        logger.debug(f"Affinity pool short by {shortfall} scenes. Backfilling with global unwatched scenes.")
         try:
             backfill_data = await stash_client.fetch_scenes(
                 filter_args={"sort": "date", "direction": "DESC"},
@@ -749,7 +749,7 @@ async def _build_next_up_pool(target_limit: int = 25) -> list:
     random.shuffle(pool)
     final_pool = pool[:target_limit]
     
-    logger.notice(f"Next Up pool generation complete. Selected {len(final_pool)} scenes from {len(candidates)} candidates.")
+    logger.debug(f"Next Up pool generation complete. Selected {len(final_pool)} scenes from {len(candidates)} candidates.")
     return final_pool
 
 async def endpoint_next_up(request: Request):
@@ -758,7 +758,7 @@ async def endpoint_next_up(request: Request):
     except ValueError:
         limit = 24
         
-    logger.notice(f"Router -> Next Up Discovery Requested (Limit: {limit})")
+    logger.debug(f"Router -> Next Up Discovery Requested (Limit: {limit})")
     
     scenes = await _build_next_up_pool(target_limit=limit)
     

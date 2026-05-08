@@ -104,7 +104,17 @@ class AuthenticationMiddleware:
         
         # --- EXTREME CATCH-ALL LOGGING ---
         full_url_for_log = f"{original_path}?{query_string}" if query_string else original_path
-        logger.debug(f"[[ INBOUND ]] {method} {full_url_for_log} | IP: {client_ip}")
+        
+        # Check if it is a spammy dashboard polling route
+        spammy_routes = ["/api/status", "/api/streams", "/api/logs", "/api/stats", "/api/config", "/api/sysinfo"]
+        is_spammy = any(original_path.startswith(route) for route in spammy_routes)
+
+        if is_spammy:
+            logger.trace(f"[[ INBOUND ]] {method} {full_url_for_log} | IP: {client_ip}")
+            logger.trace(f"Request: {method} {original_path} (Routed as: {path_lower}) from {client_ip}")
+        else:
+            logger.debug(f"[[ INBOUND ]] {method} {full_url_for_log} | IP: {client_ip}")
+            logger.debug(f"Request: {method} {original_path} (Routed as: {path_lower}) from {client_ip}")
         # ---------------------------------
 
         path_lower = original_path.lower()
@@ -140,7 +150,7 @@ class AuthenticationMiddleware:
                     logger.warning(f"Unauthorized Web UI access attempt from {client_ip}")
                     return await self._send_unauthorized(send)
 
-            response = await self._process_request(scope, receive, send, start_time)
+            response = await self._process_request(scope, receive, send, start_time, is_spammy)
             return response
 
         token = self._extract_jellyfin_token(scope)
@@ -162,13 +172,15 @@ class AuthenticationMiddleware:
         logger.warning(f"Unauthorized API request to {original_path} from {client_ip}")
         await self._send_unauthorized(send)
         
-    async def _process_request(self, scope, receive, send, start_time):
+    async def _process_request(self, scope, receive, send, start_time, is_spammy=False):
         try:
             response = await self.app(scope, receive, send)
             elapsed = time.time() - start_time
-            # Optional: Keep the debug log if you want to see how long it took, 
-            # but the INBOUND error log above is the real star of the show.
-            logger.debug(f"Completed {scope['method']} {scope['path']} in {elapsed:.3f}s")
+            
+            if is_spammy:
+                logger.trace(f"Completed {scope['method']} {scope['path']} in {elapsed:.3f}s")
+            else:
+                logger.debug(f"Completed {scope['method']} {scope['path']} in {elapsed:.3f}s")
             return response
         except Exception as e:
             logger.error(f"Server Error during {scope['method']} {scope['path']}: {e}", exc_info=True)
