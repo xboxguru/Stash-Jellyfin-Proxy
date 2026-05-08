@@ -243,12 +243,46 @@ async def _handle_library_browse(request: Request, query: JellyfinItemQuery):
     if virtual_folder_response: 
         return virtual_folder_response
     
-    if query.item_types and not any(t in query.item_types for t in ["movie", "folder"]): 
+    is_performer_parent = bool(query.decoded_parent_id and query.decoded_parent_id.startswith("person-"))
+
+    # Performer-as-Series workaround: when Wholphin treats a performer as a Series and requests Seasons,
+    # return a single fake "All Scenes" Season so the user can drill in and see the scenes.
+    if is_performer_parent and query.item_types and "season" in query.item_types:
+        performer_id = query.decoded_parent_id.replace("person-", "")
+        perf = await stash_client.get_performer(performer_id)
+        if perf:
+            scene_data = await stash_client.fetch_scenes(
+                {"sort": "created_at", "direction": "DESC"}, page=1, per_page=1,
+                scene_filter={"performers": {"value": [performer_id], "modifier": "INCLUDES"}}
+            )
+            scene_count = scene_data.get("count", 0) if scene_data else 0
+            return JSONResponse({
+                "Items": [{
+                    "Name": "All Scenes",
+                    "Id": query.parent_id,
+                    "SeriesId": query.parent_id,
+                    "SeriesName": perf.get("name", "Unknown"),
+                    "Type": "Season",
+                    "IsFolder": True,
+                    "IndexNumber": 1,
+                    "ChildCount": scene_count,
+                    "ServerId": getattr(config, "SERVER_ID", "stash-proxy"),
+                }],
+                "TotalRecordCount": 1,
+                "StartIndex": 0
+            })
         return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": query.start_index})
-        
+
+    serve_as_episodes = is_performer_parent and bool(query.item_types and "episode" in query.item_types)
+
+    if query.item_types and not any(t in query.item_types for t in ["movie", "folder"]):
+        if not serve_as_episodes:
+            return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": query.start_index})
+
     exclude_types = _get_query_param(request, "ExcludeItemTypes", "").lower()
-    if exclude_types and "movie" in exclude_types: 
-        return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": query.start_index})
+    if exclude_types and "movie" in exclude_types:
+        if not serve_as_episodes:
+            return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": query.start_index})
 
     builder = StashQueryBuilder(request, asdict(query))
     filter_args, scene_filter, _, updated_limit = await builder.build()
@@ -342,7 +376,13 @@ async def _handle_library_browse(request: Request, query: JellyfinItemQuery):
             safe_root = encode_id("root", "scenes")
             for scene in filtered_scenes:
                 if "IsResumable" in filter_list and (not scene.get("resume_time") or scene.get("resume_time") <= 0): continue
-                try: jellyfin_items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=query.parent_id or safe_root))
+                try:
+                    item = jellyfin_mapper.format_jellyfin_item(scene, parent_id=query.parent_id or safe_root)
+                    if serve_as_episodes:
+                        item["Type"] = "Episode"
+                        item["SeriesId"] = query.parent_id
+                        item["SeasonId"] = query.parent_id
+                    jellyfin_items.append(item)
                 except Exception: pass
                 
             return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": total_count, "StartIndex": query.start_index})
@@ -361,11 +401,16 @@ async def _handle_library_browse(request: Request, query: JellyfinItemQuery):
     safe_root = encode_id("root", "scenes")
     
     for scene in stash_data.get("scenes", []):
-        if "IsResumable" in filter_list and (not scene.get("resume_time") or scene.get("resume_time") <= 0): 
+        if "IsResumable" in filter_list and (not scene.get("resume_time") or scene.get("resume_time") <= 0):
             continue
-        try: 
-            jellyfin_items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=query.parent_id or safe_root))
-        except Exception as e: 
+        try:
+            item = jellyfin_mapper.format_jellyfin_item(scene, parent_id=query.parent_id or safe_root)
+            if serve_as_episodes:
+                item["Type"] = "Episode"
+                item["SeriesId"] = query.parent_id
+                item["SeasonId"] = query.parent_id
+            jellyfin_items.append(item)
+        except Exception as e:
             logger.error(f"Failed to map scene {scene.get('id')}: {e}")
 
     total_count = len(jellyfin_items) if query.search_term or "IsResumable" in filter_list else stash_data.get("count", 0)
@@ -575,7 +620,7 @@ async def endpoint_similar_items(request: Request):
     
     # In our ecosystem, "Similar" only applies to scenes, not folders or individual performers
     if not decoded_id.startswith("scene-"):
-        return JSONResponse({"Items": [], "TotalRecordCount": 0})
+        return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": 0})
         
     scenes = await _build_similar_pool(decoded_id, target_limit=limit)
     
@@ -592,6 +637,59 @@ async def endpoint_similar_items(request: Request):
     logger.notice(f"Similar pool generated {len(jellyfin_items)} scenes for {decoded_id}.")
 
     return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": len(jellyfin_items), "StartIndex": 0})
+
+async def endpoint_shows_episodes(request: Request):
+    """Route: Handles TvShowsApi.getEpisodes for performer-as-Series. Returns performer scenes as Episode items."""
+    series_id = request.path_params.get("series_id", "")
+    decoded = decode_id(series_id)
+
+    try:
+        start_index = int(_get_query_param(request, "startIndex") or _get_query_param(request, "StartIndex") or 0)
+    except (ValueError, TypeError):
+        start_index = 0
+    try:
+        limit = int(_get_query_param(request, "limit") or _get_query_param(request, "Limit") or getattr(config, "DEFAULT_PAGE_SIZE", 50))
+    except (ValueError, TypeError):
+        limit = getattr(config, "DEFAULT_PAGE_SIZE", 50)
+
+    logger.notice(f"Router -> Shows/Episodes: series_id={series_id} decoded={decoded} start={start_index} limit={limit}")
+
+    if not decoded.startswith("person-"):
+        return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": start_index})
+
+    performer_id = decoded.replace("person-", "")
+    page = (start_index // limit) + 1 if limit > 0 else 1
+
+    scene_filter = {"performers": {"value": [performer_id], "modifier": "INCLUDES"}}
+    sync_mode = getattr(config, "SYNC_LEVEL", "Everything")
+    if sync_mode == "Organized":
+        scene_filter["organized"] = True
+    elif sync_mode == "Tagged":
+        scene_filter["tags"] = {"modifier": "NOT_NULL"}
+
+    scene_data = await stash_client.fetch_scenes(
+        {"sort": "created_at", "direction": "DESC"}, page=page, per_page=limit, scene_filter=scene_filter
+    )
+
+    if not scene_data:
+        return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": start_index})
+
+    total = scene_data.get("count", 0)
+    scenes = scene_data.get("scenes") or []
+
+    jellyfin_items = []
+    for scene in scenes:
+        try:
+            item = jellyfin_mapper.format_jellyfin_item(scene, parent_id=series_id)
+            item["Type"] = "Episode"
+            item["SeriesId"] = series_id
+            item["SeasonId"] = series_id
+            jellyfin_items.append(item)
+        except Exception as e:
+            logger.error(f"Failed to map episode scene {scene.get('id')}: {e}")
+
+    logger.notice(f"Shows/Episodes: returning {len(jellyfin_items)}/{total} scenes for performer {performer_id}")
+    return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": total, "StartIndex": start_index})
 
 async def _build_next_up_pool(target_limit: int = 25) -> list:
     """Harvests affinities from watch history and builds a randomized pool of unwatched scenes."""

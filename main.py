@@ -149,6 +149,7 @@ routes = [
     Route("/items/filters", library_routes.endpoint_filters, methods=["GET"]),
     Route("/items/filters2", library_routes.endpoint_filters, methods=["GET"]),
     Route("/mediasegments/{item_id}", library_routes.endpoint_empty_list, methods=["GET"]),
+    Route("/shows/{series_id}/episodes", library_routes.endpoint_shows_episodes, methods=["GET"]),
     Route("/shows/nextup", library_routes.endpoint_next_up, methods=["GET"]),
     Route("/genres", metadata_routes.endpoint_tags, methods=["GET"]),
     Route("/users/{user_id}/genres", metadata_routes.endpoint_tags, methods=["GET"]),
