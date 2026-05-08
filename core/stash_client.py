@@ -2,6 +2,7 @@ import logging
 import asyncio
 import time
 import httpx
+import json
 from typing import Dict, Any, Optional
 import config
 from aiocache import cached, caches
@@ -224,3 +225,38 @@ async def update_scene(update_input: dict) -> bool:
     """
     result = await call_graphql(query, {"input": update_input})
     return result is not None and result.get("sceneUpdate") is not None
+
+async def fetch_tags(page: int = 1, per_page: int = 50) -> dict:
+    """Responsibility: Fetch paginated tags directly from Stash to avoid memory bloat."""
+    query = """
+    query($page: Int, $per_page: Int) { 
+        findTags(
+            filter: {page: $page, per_page: $per_page, sort: "name", direction: ASC}, 
+            tag_filter: {scene_count: {value: 0, modifier: GREATER_THAN}}
+        ) { 
+            count
+            tags { id name } 
+        } 
+    }
+    """
+    data = await call_graphql(query, {"page": page, "per_page": per_page})
+    return data.get("findTags") if data else {"count": 0, "tags": []}
+
+@cached(ttl=300)
+async def fetch_lightweight_index(filter_json: str, scene_filter_json: str) -> list:
+    """Fetches and caches a lightweight index of scenes to power lightning-fast alphabetical scrolling."""
+    filter_args = json.loads(filter_json) if filter_json else {}
+    scene_filter = json.loads(scene_filter_json) if scene_filter_json else {}
+    
+    # Force per_page to -1 to get the full index for caching
+    filter_args["per_page"] = -1
+    
+    query = """
+    query FindScenes($filter: FindFilterType, $scene_filter: SceneFilterType) { 
+        findScenes(filter: $filter, scene_filter: $scene_filter) { 
+            scenes { id title code files { basename } } 
+        } 
+    }
+    """
+    data = await call_graphql(query, {"filter": filter_args, "scene_filter": scene_filter})
+    return data.get("findScenes", {}).get("scenes", []) if data else []

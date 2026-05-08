@@ -10,7 +10,7 @@ from starlette.requests import Request
 import config
 import state
 from core import stash_client, jellyfin_mapper
-from core.jellyfin_mapper import encode_id, decode_id, build_folder
+from core.jellyfin_mapper import encode_id, decode_id, build_folder, generate_sort_name
 from core.query_builder import StashQueryBuilder
 
 logger = logging.getLogger(__name__)
@@ -229,8 +229,22 @@ async def _handle_virtual_folder_contents(decoded_parent_id, start_index, origin
             jellyfin_items.append(build_folder("All Tags", encode_id("root", "alltags"), server_id, cache_version))
             
     elif decoded_parent_id == "root-alltags":
-        tags = await stash_client.get_all_tags()
-        jellyfin_items = [build_folder(t.get("name"), encode_id("tag", str(t.get("id"))), server_id, cache_version) for t in tags]
+        # Native Pagination Fix: Push the start_index math to Stash
+        page = (start_index // original_limit) + 1 if original_limit > 0 else 1
+        limit = original_limit if original_limit > 0 else -1
+        
+        tags_data = await stash_client.fetch_tags(page=page, per_page=limit)
+        jellyfin_items = [
+            build_folder(t.get("name"), encode_id("tag", str(t.get("id"))), server_id, cache_version) 
+            for t in tags_data.get("tags", [])
+        ]
+        
+        # We can return immediately, bypassing the old Python slicing logic
+        return JSONResponse({
+            "Items": jellyfin_items, 
+            "TotalRecordCount": tags_data.get("count", 0), 
+            "StartIndex": start_index
+        })
             
     total_record_count = len(jellyfin_items)
     if original_limit > 0: 
@@ -290,109 +304,103 @@ async def _handle_library_browse(request: Request, query: JellyfinItemQuery):
     filter_list = [f.strip() for f in query.filters_string.split(",")] if query.filters_string else []
 
     if query.name_less_than or query.name_starts_with or query.name_starts_with_or_greater:
-        filter_args["per_page"] = -1 # We need all records to filter locally
+        # Use our RAM Cache instead of fetching heavy items!
+        filter_str = json.dumps(filter_args, sort_keys=True)
+        scene_filter_str = json.dumps(scene_filter, sort_keys=True)
+        all_lightweight_scenes = await stash_client.fetch_lightweight_index(filter_str, scene_filter_str)
         
-        # Fast Path: Client just wants the index count for the alphabet scrollbar (Limit = 0)
+        matching_ids = []
+        for s in all_lightweight_scenes:
+            raw_title = s.get("title") or s.get("code")
+            if not raw_title and s.get("files") and len(s.get("files")) > 0:
+                raw_title = s.get("files")[0].get("basename")
+                
+            sort_title = generate_sort_name(raw_title)
+            
+            if query.name_less_than:
+                if sort_title < query.name_less_than.lower(): 
+                    matching_ids.append(s["id"])
+            elif query.name_starts_with_or_greater:
+                if sort_title >= query.name_starts_with_or_greater.lower(): 
+                    matching_ids.append(s["id"])
+            elif query.name_starts_with:
+                if sort_title.startswith(query.name_starts_with.lower()): 
+                    matching_ids.append(s["id"])
+
+        total_count = len(matching_ids)
+
+        # Fast Path: Client just wants the index count
         if query.original_limit == 0:
-            graphql_query = """query FindScenes($filter: FindFilterType, $scene_filter: SceneFilterType) { findScenes(filter: $filter, scene_filter: $scene_filter) { scenes { title code files { basename } } } }"""
-            data = await stash_client.call_graphql(graphql_query, {"filter": filter_args, "scene_filter": scene_filter})
-            scenes = data.get("findScenes", {}).get("scenes", []) if data else []
-            
-            # --- FIX: Pure mathematical counting (No directional flipping!) ---
-            count = 0
-            for s in scenes:
-                raw_title = s.get("title")
-                if not raw_title: 
-                    raw_title = s.get("code")
-                if not raw_title and s.get("files") and len(s.get("files")) > 0:
-                    raw_title = s.get("files")[0].get("basename")
-                    
-                title = str(raw_title or "").lower().strip()
-                
-                # --- FIX: Define Wholphin's Sorting Tiers ---
-                # If it's empty or starts with a symbol, Wholphin puts it at the absolute bottom
-                is_bottom_symbol = not title or not title[0].isalnum()
-                
-                if query.name_less_than:
-                    # Symbols are at the bottom, so they are NEVER less than a letter
-                    if not is_bottom_symbol and title < query.name_less_than.lower(): 
-                        count += 1
-                        
-                elif query.name_starts_with_or_greater:
-                    # Symbols are at the bottom, so they are ALWAYS greater than any letter
-                    if is_bottom_symbol or title >= query.name_starts_with_or_greater.lower(): 
-                        count += 1
-                        
-                elif query.name_starts_with:
-                    if not is_bottom_symbol and title.startswith(query.name_starts_with.lower()): 
-                        count += 1
-                # ---------------------------------------------  
-            return JSONResponse({"Items": [], "TotalRecordCount": count, "StartIndex": 0})
+            return JSONResponse({"Items": [], "TotalRecordCount": total_count, "StartIndex": 0})
         
-        # Slow Path: Client actually clicked the letter to render a filtered view of the items
-        else:
-            stash_data = await stash_client.fetch_scenes(filter_args, page=1, per_page=-1, scene_filter=scene_filter)
-            all_scenes = stash_data.get("scenes", []) if stash_data else []
+        # Slow Path: Client clicked a letter. Fetch full data ONLY for the current page
+        page_ids = matching_ids[query.start_index : query.start_index + query.original_limit] if query.original_limit > 0 else matching_ids
+        
+        filtered_scenes = []
+        if page_ids:
+            # Fire concurrent requests for the exact IDs
+            tasks = [stash_client.get_scene(sid) for sid in page_ids]
+            unordered_scenes = await asyncio.gather(*tasks)
             
-            filtered_scenes = []
-            for s in all_scenes:
-                # --- FIX: Mirror the Fast Path fallback and stripping logic ---
-                raw_title = s.get("title")
-                if not raw_title: 
-                    raw_title = s.get("code")
-                if not raw_title and s.get("files") and len(s.get("files")) > 0:
-                    raw_title = s.get("files")[0].get("basename")
-                    
-                title = str(raw_title or "").lower().strip()
-                
-                sort_title = title
-                for article in ["the ", "a ", "an "]:
-                    if sort_title.startswith(article):
-                        sort_title = sort_title[len(article):]
-                        break
-                        
-                is_bottom_symbol = not sort_title or not sort_title[0].isalnum()
-                
-                if query.name_less_than:
-                    if not is_bottom_symbol and sort_title < query.name_less_than.lower(): 
-                        filtered_scenes.append(s)
-                        
-                elif query.name_starts_with_or_greater:
-                    if is_bottom_symbol or sort_title >= query.name_starts_with_or_greater.lower(): 
-                        filtered_scenes.append(s)
-                        
-                elif query.name_starts_with:
-                    if not is_bottom_symbol and sort_title.startswith(query.name_starts_with.lower()): 
-                        filtered_scenes.append(s)
-                # --------------------------------------------------------------
+            # Map and preserve our strict Python sorting order
+            scene_map = {str(scene["id"]): scene for scene in unordered_scenes if scene}
+            filtered_scenes = [scene_map[str(sid)] for sid in page_ids if str(sid) in scene_map]
             
-            total_count = len(filtered_scenes)
+        jellyfin_items = []
+        safe_root = encode_id("root", "scenes")
+        for scene in filtered_scenes:
+            if "IsResumable" in filter_list and (not scene.get("resume_time") or scene.get("resume_time") <= 0): continue
+            try:
+                item = jellyfin_mapper.format_jellyfin_item(scene, parent_id=query.parent_id or safe_root)
+                if serve_as_episodes:
+                    item["Type"] = "Episode"
+                    item["SeriesId"] = query.parent_id
+                    item["SeasonId"] = query.parent_id
+                jellyfin_items.append(item)
+            except Exception: pass
             
-            # Now paginate the filtered results to respect the client's Limit
-            if query.original_limit > 0:
-                filtered_scenes = filtered_scenes[query.start_index : query.start_index + query.original_limit]
-                
-            jellyfin_items = []
-            safe_root = encode_id("root", "scenes")
-            for scene in filtered_scenes:
-                if "IsResumable" in filter_list and (not scene.get("resume_time") or scene.get("resume_time") <= 0): continue
-                try:
-                    item = jellyfin_mapper.format_jellyfin_item(scene, parent_id=query.parent_id or safe_root)
-                    if serve_as_episodes:
-                        item["Type"] = "Episode"
-                        item["SeriesId"] = query.parent_id
-                        item["SeasonId"] = query.parent_id
-                    jellyfin_items.append(item)
-                except Exception: pass
-                
-            return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": total_count, "StartIndex": query.start_index})
+        return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": total_count, "StartIndex": query.start_index})
 
     if query.original_limit == 0 and not query.search_term and "IsResumable" not in filter_list:
         stash_data = await stash_client.fetch_scenes(filter_args, page=1, per_page=1, scene_filter=scene_filter)
         return JSONResponse({"Items": [], "TotalRecordCount": stash_data.get("count", 0) if stash_data else 0, "StartIndex": query.start_index})
 
-    page = (query.start_index // updated_limit) + 1 if updated_limit > 0 else 1
-    stash_data = await stash_client.fetch_scenes(filter_args, page=page, per_page=updated_limit, scene_filter=scene_filter)
+    is_alpha_sort = filter_args.get("sort") in ["title", "name"]
+    
+    if is_alpha_sort:
+        # Use our cache to get the full index so Python can sort it perfectly
+        filter_str = json.dumps(filter_args, sort_keys=True)
+        scene_filter_str = json.dumps(scene_filter, sort_keys=True)
+        all_lightweight_scenes = await stash_client.fetch_lightweight_index(filter_str, scene_filter_str)
+        
+        # Sort the entire library using our master sanitizer
+        def get_sort_key(s):
+            raw_title = s.get("title") or s.get("code")
+            if not raw_title and s.get("files") and len(s.get("files")) > 0:
+                raw_title = s.get("files")[0].get("basename")
+            return generate_sort_name(raw_title)
+            
+        all_lightweight_scenes.sort(key=get_sort_key, reverse=(filter_args.get("direction") == "DESC"))
+        
+        total_count = len(all_lightweight_scenes)
+        page_scenes = all_lightweight_scenes[query.start_index : query.start_index + updated_limit] if updated_limit > 0 else all_lightweight_scenes
+        page_ids = [s["id"] for s in page_scenes]
+        
+        # Fetch full data ONLY for the current page
+        stash_data = {"count": total_count, "scenes": []}
+        if page_ids:
+            # Fire concurrent requests for the exact IDs
+            tasks = [stash_client.get_scene(sid) for sid in page_ids]
+            unordered_scenes = await asyncio.gather(*tasks)
+            
+            # Map and preserve our strict Python sorting order
+            scene_map = {str(scene["id"]): scene for scene in unordered_scenes if scene}
+            stash_data["scenes"] = [scene_map[str(sid)] for sid in page_ids if str(sid) in scene_map]
+            
+    else:
+        # Standard database pagination for Date, Rating, Random, etc.
+        page = (query.start_index // updated_limit) + 1 if updated_limit > 0 else 1
+        stash_data = await stash_client.fetch_scenes(filter_args, page=page, per_page=updated_limit, scene_filter=scene_filter)
     
     if not stash_data: 
         return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": query.start_index})

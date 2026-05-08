@@ -2,6 +2,8 @@ import os
 import datetime
 import hashlib
 import logging
+import re
+import unicodedata
 from typing import Dict, Any
 import config
 
@@ -59,6 +61,33 @@ def decode_id(encoded_id: str) -> str:
             return decoded_str
     except Exception: pass
     return encoded_id
+
+def generate_sort_name(title: str) -> str:
+    """Sanitizes titles for strict Android TV / Wholphin alphabet grouping."""
+    if not title:
+        return ""
+
+    # 1. Transliterate foreign characters (e.g., 'Amélie' -> 'amelie')
+    sort_name = unicodedata.normalize('NFKD', str(title)).encode('ASCII', 'ignore').decode('utf-8')
+    sort_name = sort_name.lower().strip()
+
+    # 2. Strip leading punctuation and symbols
+    # Removes `-`, `*`, `[`, `.`, spaces, etc. from the absolute beginning
+    # so "- [ ] The Matrix" becomes "the matrix"
+    stripped_prefix = re.sub(r'^[^a-z0-9]+', '', sort_name)
+    if stripped_prefix: # Only apply if it didn't strip the entire title (e.g., title is literally "---")
+        sort_name = stripped_prefix
+
+    # 3. Strip leading articles (The, A, An)
+    for article in ["the ", "a ", "an "]:
+        if sort_name.startswith(article):
+            sort_name = sort_name[len(article):].strip()
+            break
+
+    # 4. Pad numbers with zeros for natural sorting ("scene 2" -> "scene 000002")
+    sort_name = re.sub(r'\d+', lambda x: x.group(0).zfill(6), sort_name)
+
+    return sort_name
 
 def hyphens(h: str) -> str:
     if len(h) != 32: return h
@@ -172,7 +201,7 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
 
     item = {
         "Name": title, 
-        "SortName": title, 
+        "SortName": generate_sort_name(title), 
         "Id": item_id, 
         "Etag": primary_tag,
         "OfficialRating": "XXX",
