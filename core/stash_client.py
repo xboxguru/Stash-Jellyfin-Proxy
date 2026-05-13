@@ -29,11 +29,12 @@ def cache_log(func, *args, **kwargs):
 # Lightweight fields for fast library browsing (Grid View)
 BASE_SCENE_FIELDS = """
     id title code date details o_counter play_count rating100 created_at organized resume_time
-    files { path duration video_codec audio_codec frame_rate bit_rate width height format size basename } 
-    studio { id name image_path } 
-    tags { name } 
-    performers { name id image_path } 
+    files { path duration video_codec audio_codec frame_rate bit_rate width height format size basename }
+    studio { id name image_path }
+    tags { name }
+    performers { name id image_path }
     captions { language_code caption_type }
+    paths { caption }
 """
 
 # Heavy fields including Markers for individual scene details and playback

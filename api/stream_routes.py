@@ -97,6 +97,46 @@ async def _stream_passthrough(url: str, request: Request, is_download: bool = Fa
         logger.error(f"Stream passthrough failed: {e}")
         return Response(status_code=500)
 
+async def endpoint_subtitle(request: Request):
+    item_id = decode_id(request.path_params.get("item_id", ""))
+    if not item_id.startswith("scene-"):
+        return Response(status_code=404)
+
+    raw_id = item_id.replace("scene-", "")
+    stream_index = int(request.path_params.get("stream_index", 2))
+
+    scene = await stash_client.get_scene(raw_id)
+    if not scene:
+        return Response(status_code=404)
+
+    captions = scene.get("captions") or []
+    caption_base = (scene.get("paths") or {}).get("caption")
+    cap_index = stream_index - 2  # video=0, audio=1, subtitles start at 2
+
+    if not caption_base or cap_index < 0 or cap_index >= len(captions):
+        return Response(status_code=404)
+
+    cap = captions[cap_index]
+    lang = cap.get("language_code") or "und"
+    cap_type = (cap.get("caption_type") or "srt").lower()
+
+    url = f"{caption_base}?lang={lang}&type={cap_type}"
+    apikey = getattr(config, "STASH_API_KEY", "")
+    if apikey:
+        url += f"&apikey={apikey}"
+
+    try:
+        r = await stream_client.get(url)
+        if r.status_code == 200:
+            logger.debug(f"Subtitle proxied: scene={raw_id} lang={lang} type={cap_type}")
+            return Response(content=r.content, media_type="text/plain; charset=utf-8",
+                            headers={"Cache-Control": "public, max-age=3600"})
+        logger.warning(f"Stash returned {r.status_code} for subtitle {url}")
+    except Exception as e:
+        logger.error(f"Subtitle proxy failed: {e}")
+
+    return Response(status_code=404)
+
 async def endpoint_stream(request: Request):
     item_id = decode_id(request.path_params.get("item_id", ""))
     raw_id = item_id.replace("scene-", "")

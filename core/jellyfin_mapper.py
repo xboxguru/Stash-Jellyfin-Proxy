@@ -104,23 +104,57 @@ def _build_trickplay_dict(item_id: str, runtime_ticks: int, files: list) -> dict
     interval_ms = int((runtime_ticks / 10000) / thumbnail_count)
     return {item_id: {str(actual_width): {"Width": actual_width, "Height": actual_height, "TileWidth": 9, "TileHeight": 9, "ThumbnailCount": thumbnail_count, "Interval": interval_ms, "Bandwidth": 0}}}
 
-def _build_media_sources(item_id: str, path: str, files: list, runtime_ticks: int, title: str) -> list:
+_LANG_NAMES = {
+    "eng": "English", "spa": "Spanish", "fra": "French", "deu": "German",
+    "ita": "Italian", "por": "Portuguese", "jpn": "Japanese", "zho": "Chinese",
+    "kor": "Korean", "rus": "Russian", "ara": "Arabic", "und": "Unknown",
+}
+
+def _build_subtitle_streams(item_id: str, captions: list) -> list:
+    streams = []
+    for i, cap in enumerate(captions):
+        lang = cap.get("language_code") or "und"
+        fmt = (cap.get("caption_type") or "srt").lower()
+        codec = "subrip" if fmt == "srt" else fmt
+        index = 2 + i
+        lang_name = _LANG_NAMES.get(lang.lower(), lang.upper())
+        streams.append({
+            "Codec": codec,
+            "Type": "Subtitle",
+            "Language": lang,
+            "Title": lang_name,
+            "DisplayTitle": lang_name,
+            "Index": index,
+            "IsDefault": False,
+            "IsForced": False,
+            "IsExternal": True,
+            "IsTextSubtitleStream": True,
+            "SupportsExternalStream": True,
+            "IsInterlaced": False,
+            "IsHearingImpaired": False,
+            "DeliveryMethod": "External",
+            "DeliveryUrl": f"/videos/{item_id}/subtitles/{index}/stream.{fmt}"
+        })
+    return streams
+
+def _build_media_sources(item_id: str, path: str, files: list, runtime_ticks: int, title: str, captions: list = None) -> list:
     if not path or not files: return []
     file_data = files[0]
     v_codec = str(file_data.get("video_codec") or "h264").lower()
     a_codec = str(file_data.get("audio_codec") or "aac").lower()
     container = str(file_data.get("format") or "mp4").lower()
-    
+
     needs_transcode = v_codec not in ["h264", "h265", "hevc", "avc", "vp8", "vp9", "av1"] or container not in ["mp4", "m4v", "mov", "webm"]
     base_stream_flags = {"IsInterlaced": False, "IsDefault": True, "IsForced": False, "IsHearingImpaired": False, "IsExternal": False, "IsTextSubtitleStream": False, "SupportsExternalStream": False}
-    
+
     video_stream = {**base_stream_flags, "Codec": v_codec, "Type": "Video", "Width": file_data.get("width") or 0, "Height": file_data.get("height") or 0, "Index": 0, "BitRate": file_data.get("bit_rate") or 0, "IsAVC": v_codec in ["h264", "avc"]}
     audio_stream = {**base_stream_flags, "Codec": a_codec, "Type": "Audio", "Index": 1, "Channels": 2}
+    subtitle_streams = _build_subtitle_streams(item_id, captions or [])
 
     media_source = {
         "Id": item_id, "Path": path, "Protocol": "File", "Type": "Default", "Container": container,
         "RunTimeTicks": runtime_ticks, "IsRemote": False, "SupportsTranscoding": True, "VideoType": "VideoFile",
-        "MediaStreams": [video_stream, audio_stream], "MediaAttachments": [], "Formats": [], "RequiredHttpHeaders": {},
+        "MediaStreams": [video_stream, audio_stream] + subtitle_streams, "MediaAttachments": [], "Formats": [], "RequiredHttpHeaders": {},
         "Name": title, "Size": int(file_data.get("size") or 0), "ReadAtNativeFramerate": False, "SupportsProbing": True,
         "IgnoreDts": False, "IgnoreIndex": False, "GenPtsInput": False, "IsInfiniteStream": False, "RequiresOpening": False, "RequiresClosing": False, "RequiresLooping": False, "HasSegments": False
     }
@@ -219,7 +253,7 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
         "ImageBlurHashes": {"Primary": {primary_tag: fake_blurhash}, "Thumb": {primary_tag: fake_blurhash}, "Backdrop": {backdrop_tag: fake_blurhash}},
         "RunTimeTicks": runtime_ticks, "Width": (files[0].get("width") or 0) if files else 0, "Height": (files[0].get("height") or 0) if files else 0,
         "Trickplay": _build_trickplay_dict(item_id, runtime_ticks, files),
-        "MediaSources": _build_media_sources(item_id, path, files, runtime_ticks, title),
+        "MediaSources": _build_media_sources(item_id, path, files, runtime_ticks, title, scene.get("captions")),
         "People": _build_people(scene.get("performers") or [], cache_version, fake_blurhash),
         "Studios": _build_studios(scene.get("studio"), cache_version, fake_blurhash),
         "UserData": {
