@@ -148,6 +148,27 @@ async def get_all_studios():
     data = await call_graphql("query { findStudios(filter: { per_page: -1 }) { studios { id name image_path } } }")
     return data.get("findStudios", {}).get("studios", []) if data else []
 
+async def fetch_studios_in_filter(scene_filter: dict) -> list:
+    """Returns alphabetically-sorted unique studios from scenes matching scene_filter."""
+    query = """
+    query($scene_filter: SceneFilterType) {
+        findScenes(filter: { per_page: -1 }, scene_filter: $scene_filter) {
+            scenes { studio { id name image_path } }
+        }
+    }
+    """
+    data = await call_graphql(query, {"scene_filter": scene_filter})
+    if not data:
+        return []
+    seen: set = set()
+    studios = []
+    for scene in data.get("findScenes", {}).get("scenes", []):
+        s = scene.get("studio")
+        if s and s.get("id") and s["id"] not in seen:
+            seen.add(s["id"])
+            studios.append(s)
+    return sorted(studios, key=lambda s: (s.get("name") or "").lower())
+
 async def update_resume_time(scene_id: str, time_seconds: float):
     await call_graphql("mutation SceneSaveActivity($id: ID!, $resume_time: Float) { sceneSaveActivity(id: $id, resume_time: $resume_time) }", {"id": scene_id, "resume_time": time_seconds})
 

@@ -6,6 +6,7 @@ from starlette.requests import Request
 import config
 from core import stash_client, jellyfin_mapper
 from core.jellyfin_mapper import encode_id, decode_id, build_folder, generate_image_tag
+from core.query_builder import StashQueryBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -243,13 +244,32 @@ async def endpoint_years(request: Request):
     return JSONResponse({"Items": years, "TotalRecordCount": len(years), "StartIndex": 0})
 
 async def endpoint_studios(request: Request):
-    logger.debug("Metadata Request -> Studios List")
-    studios = await stash_client.get_all_studios()
+    def _qp(key, default=""):
+        return next((v for k, v in request.query_params.items() if k.lower() == key.lower()), default)
+
+    parent_id = _qp("parentid")
+    decoded_parent = decode_id(parent_id) if parent_id else None
+    search_term = _qp("searchterm", "").lower()
     cache_version = getattr(config, "CACHE_VERSION", 0)
     server_id = getattr(config, "SERVER_ID", "stash-proxy")
-    
+
+    logger.debug(f"Metadata Request -> Studios List (library: {decoded_parent or 'all'})")
+
+    # Build the scene filter the same way the library browse does
+    builder = StashQueryBuilder(request, {"decoded_parent_id": decoded_parent})
+    _, scene_filter, _, _ = await builder.build()
+
+    # If the filter is empty (Everything library or no parent), use the fast cached path
+    if not scene_filter:
+        studios = await stash_client.get_all_studios()
+    else:
+        studios = await stash_client.fetch_studios_in_filter(scene_filter)
+
+    if search_term:
+        studios = [s for s in studios if search_term in (s.get("name") or "").lower()]
+
     jelly_studios = [{
-        "Name": s.get("name"), "Id": encode_id("studio", str(s.get('id'))), "Type": "Studio", "ServerId": server_id, "IsFolder": False, 
+        "Name": s.get("name"), "Id": encode_id("studio", str(s.get('id'))), "Type": "Studio", "ServerId": server_id, "IsFolder": False,
         "ImageTags": {"Primary": generate_image_tag("studio", str(s.get('id')), cache_version)}, "HasPrimaryImage": bool(s.get("image_path"))
     } for s in studios]
     return JSONResponse({"Items": jelly_studios, "TotalRecordCount": len(jelly_studios), "StartIndex": 0})
