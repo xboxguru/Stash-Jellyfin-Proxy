@@ -74,18 +74,18 @@ async def endpoint_item_details(request: Request):
             if studio.get("details"): overview_parts.append(f"\n{studio['details']}")
 
             return JSONResponse({
-                "Name": studio_name, 
-                "SortName": studio_name, 
-                "Id": safe_id, 
-                "ServerId": server_id, 
-                "Type": "Studio", 
-                "IsFolder": False,
+                "Name": studio_name,
+                "SortName": studio_name,
+                "Id": safe_id,
+                "ServerId": server_id,
+                "Type": "BoxSet",
+                "IsFolder": True,
                 "Overview": "\n".join(overview_parts),
                 "ImageTags": {"Primary": s_tag} if studio.get("image_path") else {},
                 "HasPrimaryImage": bool(studio.get("image_path"))
             })
-            
-        return JSONResponse({"Name": "Studio", "SortName": "Studio", "Id": safe_id, "ServerId": server_id, "Type": "Studio", "IsFolder": False})
+
+        return JSONResponse({"Name": "Studio", "SortName": "Studio", "Id": safe_id, "ServerId": server_id, "Type": "BoxSet", "IsFolder": True})
 
     if decoded_id.startswith("person-"):
         raw_id = decoded_id.replace("person-", "")

@@ -72,7 +72,7 @@ async def endpoint_item_image(request: Request):
             raw_id = item_id.replace(prefix, "")
             stash_base = config.get_stash_base()
             apikey = getattr(config, "STASH_API_KEY", "")
-            
+
             stash_img_url = f"{stash_base}/{stash_route}/{raw_id}/{stash_suffix}"
             if apikey: stash_img_url += f"?apikey={apikey}"
             return await _proxy_image(stash_img_url)
@@ -89,35 +89,34 @@ async def _proxy_image(url: str):
     try:
         req = image_client.build_request("GET", url)
         r = await image_client.send(req, stream=True)
-        
+
         if r.status_code == 200:
             content_type = r.headers.get("content-type", "image/jpeg")
-            
-            # FIX: Android WebViews often abort image streams if Content-Length is missing
             headers = {"Cache-Control": "public, max-age=31536000"}
-            if "content-length" in r.headers:
+            # Only forward Content-Length when the upstream did NOT use content-encoding.
+            # If Stash gzip-compressed the response, httpx decompresses it during streaming,
+            # making the actual byte count larger than the compressed Content-Length — causing
+            # h11's "Too much data for declared Content-Length" crash.
+            if "content-length" in r.headers and "content-encoding" not in r.headers:
                 headers["Content-Length"] = r.headers["content-length"]
-            
+
             async def stream_generator():
                 async for chunk in r.aiter_bytes(chunk_size=8192):
                     yield chunk
-                    
-            async def cleanup():
-                await r.aclose()
 
             return StreamingResponse(
-                stream_generator(), 
-                media_type=content_type, 
-                headers=headers, 
-                background=BackgroundTask(cleanup)
+                stream_generator(),
+                media_type=content_type,
+                headers=headers,
+                background=BackgroundTask(r.aclose)
             )
-        else:
-            await r.aclose()
-            logger.debug(f"Upstream returned {r.status_code} for image {url}")
-            
+
+        await r.aclose()
+        logger.debug(f"Upstream returned {r.status_code} for image {url}")
+
     except Exception as e:
         logger.error(f"Failed to proxy image from Stash: {e}")
-        
+
     return Response(status_code=404)
 
 async def endpoint_trickplay_image(request: Request):

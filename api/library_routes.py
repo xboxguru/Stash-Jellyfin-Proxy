@@ -10,7 +10,7 @@ from starlette.requests import Request
 import config
 import state
 from core import stash_client, jellyfin_mapper
-from core.jellyfin_mapper import encode_id, decode_id, build_folder, generate_sort_name
+from core.jellyfin_mapper import encode_id, decode_id, build_folder, generate_sort_name, generate_image_tag
 from core.query_builder import StashQueryBuilder
 
 logger = logging.getLogger(__name__)
@@ -253,6 +253,7 @@ async def _handle_virtual_folder_contents(decoded_parent_id, start_index, origin
     return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": total_record_count, "StartIndex": start_index})
 
 async def _handle_library_browse(request: Request, query: JellyfinItemQuery):
+    logger.debug(f"BROWSE: parent={query.decoded_parent_id!r} types={query.item_types!r} media={query.media_types!r} search={query.search_term!r} full_qs={str(request.url.query)!r}")
     virtual_folder_response = await _handle_virtual_folder_contents(query.decoded_parent_id, query.start_index, query.original_limit)
     if virtual_folder_response: 
         return virtual_folder_response
@@ -289,8 +290,62 @@ async def _handle_library_browse(request: Request, query: JellyfinItemQuery):
 
     serve_as_episodes = is_performer_parent and bool(query.item_types and "episode" in query.item_types)
 
+    # Wholphin sends GET /items?IncludeItemTypes=BoxSet for its Collections tab.
+    # We route that here instead of hitting the early-return guard below.
+    if query.item_types and any(t in query.item_types for t in ["studio", "boxset"]):
+        server_id = getattr(config, "SERVER_ID", "stash-proxy")
+        cache_version = getattr(config, "CACHE_VERSION", 0)
+        builder = StashQueryBuilder(request, asdict(query))
+        _, scene_filter, _, _ = await builder.build()
+        if not scene_filter:
+            studios = await stash_client.get_all_studios()
+        else:
+            studios = await stash_client.fetch_studios_in_filter(scene_filter)
+
+        # Always sort alphabetically — get_all_studios() doesn't guarantee order
+        studios = sorted(studios, key=lambda s: generate_sort_name(s.get("name") or ""))
+
+        # Search term filter
+        search_term = (query.search_term or "").lower()
+        if search_term:
+            studios = [s for s in studios if search_term in (s.get("name") or "").lower()]
+
+        # Alphabet bar filtering (mirrors the scene alphabet logic)
+        if query.name_starts_with or query.name_less_than or query.name_starts_with_or_greater:
+            filtered = []
+            for s in studios:
+                sort_name = generate_sort_name(s.get("name") or "")
+                if query.name_less_than:
+                    if sort_name < query.name_less_than.lower():
+                        filtered.append(s)
+                elif query.name_starts_with_or_greater:
+                    if sort_name >= query.name_starts_with_or_greater.lower():
+                        filtered.append(s)
+                elif query.name_starts_with:
+                    if sort_name.startswith(query.name_starts_with.lower()):
+                        filtered.append(s)
+            studios = filtered
+
+        total = len(studios)
+
+        # Count-only request (alphabet bar probing total before rendering)
+        if query.original_limit == 0:
+            return JSONResponse({"Items": [], "TotalRecordCount": total, "StartIndex": 0})
+
+        # Paginate
+        page_studios = studios[query.start_index : query.start_index + query.original_limit] if query.original_limit > 0 else studios
+
+        jelly_studios = [{
+            "Name": s.get("name"), "Id": encode_id("studio", str(s.get("id"))),
+            "Type": "BoxSet", "ServerId": server_id, "IsFolder": True,
+            "ImageTags": {"Primary": generate_image_tag("studio", str(s.get("id")), cache_version)},
+            "HasPrimaryImage": bool(s.get("image_path"))
+        } for s in page_studios]
+        return JSONResponse({"Items": jelly_studios, "TotalRecordCount": total, "StartIndex": query.start_index})
+
     if query.item_types and not any(t in query.item_types for t in ["movie", "folder"]):
         if not serve_as_episodes:
+            logger.debug(f"BROWSE EARLY-RETURN: unhandled IncludeItemTypes={query.item_types!r} — returning empty")
             return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": query.start_index})
 
     exclude_types = _get_query_param(request, "ExcludeItemTypes", "").lower()
