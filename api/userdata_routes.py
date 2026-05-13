@@ -146,10 +146,9 @@ async def _toggle_play_state(request: Request, is_played: bool):
                 play_count = current_play_count + 1
                 bg_tasks.add_task(stash_client.increment_play_count, raw_id)
             else:
-                play_count = max(0, current_play_count - 1)
-                if current_play_count > 0:
-                    bg_tasks.add_task(stash_client.decrement_play_count, raw_id)
-                bg_tasks.add_task(stash_client.update_resume_time, raw_id, 0.0)
+                play_count = 0
+                bg_tasks.add_task(stash_client.reset_play_count, raw_id)
+                bg_tasks.add_task(stash_client.reset_activity, raw_id)
 
     return JSONResponse({
         "IsFavorite": is_favorite,

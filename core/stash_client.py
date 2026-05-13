@@ -152,10 +152,16 @@ async def update_resume_time(scene_id: str, time_seconds: float):
     await call_graphql("mutation SceneSaveActivity($id: ID!, $resume_time: Float) { sceneSaveActivity(id: $id, resume_time: $resume_time) }", {"id": scene_id, "resume_time": time_seconds})
 
 async def increment_play_count(scene_id: str):
-    await call_graphql("mutation($id: ID!) { sceneIncrementPlayCount(id: $id) }", {"id": scene_id})
+    await call_graphql("mutation($id: ID!) { sceneAddPlay(id: $id) { count } }", {"id": scene_id})
 
-async def decrement_play_count(scene_id: str):
-    await call_graphql("mutation($id: ID!) { sceneDecrementPlayCount(id: $id) }", {"id": scene_id})
+async def reset_play_count(scene_id: str):
+    await call_graphql("mutation($id: ID!) { sceneResetPlayCount(id: $id) }", {"id": scene_id})
+
+async def reset_activity(scene_id: str):
+    await call_graphql(
+        "mutation($id: ID!) { sceneResetActivity(id: $id, reset_resume: true, reset_duration: true) }",
+        {"id": scene_id}
+    )
 
 async def increment_o_counter(scene_id: str):
     await call_graphql("mutation SceneAddO($id: ID!, $times: [Timestamp!]) { sceneAddO(id: $id, times: $times) { count } }", {"id": scene_id})
