@@ -2,7 +2,7 @@ import logging
 import time
 from starlette.responses import JSONResponse
 from starlette.requests import Request
-from starlette.background import BackgroundTask, BackgroundTasks
+from starlette.background import BackgroundTasks
 import config
 from core import stash_client
 from core.jellyfin_mapper import decode_id
@@ -132,7 +132,7 @@ async def _toggle_play_state(request: Request, is_played: bool):
     raw_item_id = request.path_params.get("item_id", "")
     item_id = decode_id(raw_item_id)
     play_count = 1 if is_played else 0
-    task = None
+    bg_tasks = BackgroundTasks()
     is_favorite = False
 
     if item_id.startswith("scene-"):
@@ -140,11 +140,16 @@ async def _toggle_play_state(request: Request, is_played: bool):
         scene = await stash_client.get_scene(raw_id)
         if scene:
             current_play_count = scene.get("play_count") or 0
-            play_count = current_play_count + 1 if is_played else current_play_count
             fav_action = getattr(config, "FAVORITE_ACTION", "o_counter").lower()
             is_favorite = (scene.get("rating100") or 0) > 0 if fav_action == "rating" else (scene.get("o_counter") or 0) > 0
-        if is_played:
-            task = BackgroundTask(stash_client.increment_play_count, raw_id)
+            if is_played:
+                play_count = current_play_count + 1
+                bg_tasks.add_task(stash_client.increment_play_count, raw_id)
+            else:
+                play_count = max(0, current_play_count - 1)
+                if current_play_count > 0:
+                    bg_tasks.add_task(stash_client.decrement_play_count, raw_id)
+                bg_tasks.add_task(stash_client.update_resume_time, raw_id, 0.0)
 
     return JSONResponse({
         "IsFavorite": is_favorite,
@@ -153,7 +158,7 @@ async def _toggle_play_state(request: Request, is_played: bool):
         "PlaybackPositionTicks": 0,
         "Key": raw_item_id if is_played else item_id,
         "ItemId": raw_item_id
-    }, background=task)
+    }, background=bg_tasks)
 
 async def _toggle_favorite_state(request: Request, is_favorite: bool):
     raw_item_id = request.path_params.get("item_id", "")

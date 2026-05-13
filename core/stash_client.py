@@ -154,6 +154,9 @@ async def update_resume_time(scene_id: str, time_seconds: float):
 async def increment_play_count(scene_id: str):
     await call_graphql("mutation($id: ID!) { sceneIncrementPlayCount(id: $id) }", {"id": scene_id})
 
+async def decrement_play_count(scene_id: str):
+    await call_graphql("mutation($id: ID!) { sceneDecrementPlayCount(id: $id) }", {"id": scene_id})
+
 async def increment_o_counter(scene_id: str):
     await call_graphql("mutation SceneAddO($id: ID!, $times: [Timestamp!]) { sceneAddO(id: $id, times: $times) { count } }", {"id": scene_id})
 
