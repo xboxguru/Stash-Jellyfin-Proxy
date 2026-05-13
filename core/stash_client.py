@@ -145,8 +145,8 @@ async def get_stash_stats() -> dict:
 
 @cached(ttl=300)
 async def get_all_studios():
-    data = await call_graphql("query AllStudios { allStudios { id name image_path } }")
-    return data.get("allStudios", []) if data else []
+    data = await call_graphql("query { findStudios(filter: { per_page: -1 }) { studios { id name image_path } } }")
+    return data.get("findStudios", {}).get("studios", []) if data else []
 
 async def update_resume_time(scene_id: str, time_seconds: float):
     await call_graphql("mutation SceneSaveActivity($id: ID!, $resume_time: Float) { sceneSaveActivity(id: $id, resume_time: $resume_time) }", {"id": scene_id, "resume_time": time_seconds})
@@ -164,7 +164,7 @@ async def reset_activity(scene_id: str):
     )
 
 async def increment_o_counter(scene_id: str):
-    await call_graphql("mutation SceneAddO($id: ID!, $times: [Timestamp!]) { sceneAddO(id: $id, times: $times) { count } }", {"id": scene_id})
+    await call_graphql("mutation SceneAddO($id: ID!) { sceneAddO(id: $id) { count } }", {"id": scene_id})
 
 async def update_rating(scene_id: str, rating100: int):
     await call_graphql("mutation SceneUpdate($input: SceneUpdateInput!) { sceneUpdate(input: $input) { id } }", {"input": {"id": scene_id, "rating100": rating100}})
