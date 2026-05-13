@@ -3,6 +3,7 @@ import logging
 import datetime, time
 import secrets
 import psutil
+import ipaddress
 from starlette.responses import JSONResponse, HTMLResponse, PlainTextResponse
 from starlette.requests import Request
 from starlette.templating import Jinja2Templates
@@ -14,6 +15,48 @@ logger = logging.getLogger(__name__)
 RESTART_REQUESTED = False
 
 templates = Jinja2Templates(directory=os.path.join(config.SCRIPT_DIR, "templates"))
+SENSITIVE_CONFIG_KEYS = {"STASH_API_KEY", "PROXY_API_KEY", "SJS_PASSWORD"}
+REDACTED_SENTINEL = "***redacted***"
+
+def _ip_matches(client_ip: str, entries: list) -> bool:
+    try:
+        addr = ipaddress.ip_address(client_ip)
+        for entry in entries:
+            try:
+                if addr in ipaddress.ip_network(str(entry), strict=False):
+                    return True
+            except ValueError:
+                continue
+    except ValueError:
+        pass
+    return False
+
+def _get_client_ip(request: Request) -> str:
+    direct_ip = request.client.host if request.client else "127.0.0.1"
+    if not bool(getattr(config, "TRUST_PROXY_HEADERS", False)):
+        return direct_ip
+    trusted_proxy_ips = set(getattr(config, "TRUSTED_PROXY_IPS", []) or [])
+    if trusted_proxy_ips and direct_ip not in trusted_proxy_ips:
+        return direct_ip
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return direct_ip
+
+def _check_login_rate_limit(client_ip: str) -> bool:
+    if not hasattr(state, "login_attempts") or not isinstance(getattr(state, "login_attempts", None), dict):
+        state.login_attempts = {}
+    now = time.time()
+    window_seconds = max(1, int(getattr(config, "AUTH_RATE_LIMIT_WINDOW_MINUTES", 15))) * 60
+    max_attempts = max(1, int(getattr(config, "AUTH_RATE_LIMIT_MAX_ATTEMPTS", 10)))
+    attempts = [ts for ts in state.login_attempts.get(client_ip, []) if now - ts <= window_seconds]
+    state.login_attempts[client_ip] = attempts
+    return len(attempts) < max_attempts
+
+def _record_login_failure(client_ip: str):
+    if not hasattr(state, "login_attempts") or not isinstance(getattr(state, "login_attempts", None), dict):
+        state.login_attempts = {}
+    state.login_attempts.setdefault(client_ip, []).append(time.time())
 
 async def serve_index(request: Request):
     """Serves the modular HTML dashboard using Jinja2."""
@@ -38,6 +81,8 @@ async def api_get_config(request: Request):
     for k, v in config_data.items():
         if isinstance(v, set):
             config_data[k] = list(v)
+        if k in SENSITIVE_CONFIG_KEYS and config_data.get(k):
+            config_data[k] = REDACTED_SENTINEL
             
     # Safely fetch the dynamic auto-whitelist
     raw_dynamic = getattr(state, "authenticated_ips", {})
@@ -76,8 +121,26 @@ async def api_post_config(request: Request):
         needs_restart = any(str(data.get(k)) != str(getattr(config, k, "")) for k in restart_triggers if k in data)
         
         # 2. Apply settings to memory and specific persistent files
+        allowed_config_keys = set(getattr(config, "_supported_keys", []))
         for key, value in data.items():
-                setattr(config, key, value)
+            if key in allowed_config_keys:
+                # Keep existing secrets when UI submits redacted placeholders.
+                if key in SENSITIVE_CONFIG_KEYS and str(value).strip() == REDACTED_SENTINEL:
+                    continue
+                # UI sends typed JSON (arrays as lists, numbers as ints, bools as bools).
+                # Only stringify for _coerce_config_value when the value needs normalization
+                # (e.g. LOG_LEVEL uppercase, path normalization, set conversion, list->set).
+                if isinstance(value, list):
+                    # BANNED_IPS expects a set; all other list keys expect a list — handle both
+                    coerced = set(value) if key == "BANNED_IPS" else value
+                elif isinstance(value, (bool, int, float)):
+                    coerced = value
+                else:
+                    coerced_str = config._coerce_config_value(key, str(value))
+                    coerced = coerced_str if coerced_str is not None else value
+                setattr(config, key, coerced)
+            else:
+                logger.warning(f"Rejected unsupported config update key: {key}")
             
         # 3. Save standard config to .conf
         config.save_config()
@@ -190,17 +253,46 @@ async def api_reset_stats(request: Request):
 async def api_auth_check(request: Request):
     if not getattr(config, "REQUIRE_AUTH_FOR_CONFIG", False):
         return JSONResponse({"authenticated": True})
-    return JSONResponse({"authenticated": True})
+    token = request.cookies.get("ui_session")
+    is_authenticated = bool(token and token in state.ui_sessions)
+    return JSONResponse({"authenticated": is_authenticated}, status_code=200 if is_authenticated else 401)
 
 async def api_login(request: Request):
     try: data = await request.json()
     except: data = {}
-    if data.get("username") == config.SJS_USER and data.get("password") == config.SJS_PASSWORD:
+    client_ip = _get_client_ip(request)
+    allowed_ui_ips = getattr(config, "UI_ALLOWED_IPS", [])
+    if allowed_ui_ips and not _ip_matches(client_ip, allowed_ui_ips):
+        logger.warning(f"Blocked login attempt from non-allowlisted IP {client_ip}")
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+    if not _check_login_rate_limit(client_ip):
+        logger.warning(f"Rate-limited login attempts from {client_ip}")
+        return JSONResponse({"error": "Too many attempts, try again later."}, status_code=429)
+    provided_user = str(data.get("username", data.get("Username", ""))).strip()
+    provided_pass = str(data.get("password", data.get("Password", data.get("Pw", ""))))
+    expected_user = str(getattr(config, "SJS_USER", "")).strip()
+    expected_pass = str(getattr(config, "SJS_PASSWORD", ""))
+
+    if bool(getattr(config, "REQUIRE_AUTH_FOR_CONFIG", False)) and (not expected_user or not expected_pass):
+        logger.error("UI login rejected: REQUIRE_AUTH_FOR_CONFIG is enabled but SJS_USER/SJS_PASSWORD are not configured.")
+        return JSONResponse({"error": "UI auth is enabled but credentials are not configured."}, status_code=503)
+
+    if provided_user.lower() == expected_user.lower() and provided_pass == expected_pass:
         token = secrets.token_hex(32)
         state.ui_sessions.add(token)
+        if hasattr(state, "login_attempts") and client_ip in state.login_attempts:
+            state.login_attempts.pop(client_ip, None)
         response = JSONResponse({"status": "success"})
-        response.set_cookie(key="ui_session", value=token, httponly=True, max_age=86400, samesite="lax")
+        response.set_cookie(
+            key="ui_session",
+            value=token,
+            httponly=True,
+            max_age=86400,
+            samesite="lax",
+            secure=bool(getattr(config, "TRUST_PROXY_HEADERS", False))
+        )
         return response
+    _record_login_failure(client_ip)
     return JSONResponse({"error": "Invalid credentials"}, status_code=401)
 
 async def api_logout(request: Request):

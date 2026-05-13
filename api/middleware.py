@@ -3,6 +3,7 @@ import urllib.parse
 import logging
 import time
 import ipaddress
+from urllib.parse import urlparse
 import config
 import state
 
@@ -13,9 +14,21 @@ PUBLIC_ENDPOINTS = {
     "/web/index.html", "/health", "/users/authenticatebyname", "/system/ping",
     "/users/public", "/quickconnect/initiate", "/quickconnect/enabled",
     "/quickconnect/connect", "/quickconnect/authorize", "/users/authenticatewithquickconnect", "/favicon.ico", "/branding/configuration", 
-    "/clientlog/document"
+    "/clientlog/document",
+    "/api/auth/check",
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/login",
+    "/api/logout"
 }
 PUBLIC_PREFIXES = ["/web/", "/assets/", "/api/"]
+PUBLIC_API_ENDPOINTS = {
+    "/api/auth/check",
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/login",
+    "/api/logout",
+}
 
 def _ip_matches(client_ip: str, entries: list) -> bool:
     """Check if client_ip matches any entry in the list — exact IPs or CIDR ranges (e.g. 192.168.1.0/24)."""
@@ -34,17 +47,46 @@ def _ip_matches(client_ip: str, entries: list) -> bool:
 
 def get_client_ip(scope) -> str:
     """Extract client IP safely, accounting for reverse proxies."""
+    client = scope.get("client")
+    direct_client_ip = client[0] if client else "127.0.0.1"
+    trust_proxy_headers = bool(getattr(config, "TRUST_PROXY_HEADERS", False))
+    trusted_proxy_ips = set(getattr(config, "TRUSTED_PROXY_IPS", []) or [])
+    if not trust_proxy_headers:
+        return direct_client_ip
+    if trusted_proxy_ips and direct_client_ip not in trusted_proxy_ips:
+        return direct_client_ip
     for name, value in scope.get("headers", []):
         if name.decode("latin1").lower() == "x-forwarded-for":
             return value.decode("latin1").split(",")[0].strip()
-    client = scope.get("client")
-    return client[0] if client else "127.0.0.1"
+    return direct_client_ip
 
 class AuthenticationMiddleware:
     """ASGI middleware that validates PROXY_API_KEY on protected endpoints."""
 
     def __init__(self, app):
         self.app = app
+
+    def _get_host_from_headers(self, scope) -> str:
+        for key, value in scope.get("headers", []):
+            if key.decode("latin1").lower() == "host":
+                return value.decode("latin1").strip().lower()
+        return ""
+
+    def _is_same_origin(self, scope) -> bool:
+        host_header = self._get_host_from_headers(scope)
+        if not host_header:
+            return False
+        for key, value in scope.get("headers", []):
+            key_lower = key.decode("latin1").lower()
+            if key_lower not in {"origin", "referer"}:
+                continue
+            parsed = urlparse(value.decode("utf-8", errors="ignore"))
+            origin_netloc = (parsed.netloc or "").lower()
+            if parsed.scheme in {"http", "https"} and origin_netloc == host_header:
+                return True
+            return False
+        # If browser strips these headers, fail closed for mutation endpoints.
+        return False
 
     def _extract_jellyfin_token(self, scope) -> str | None:
         query_bytes = scope.get("query_string", b"")
@@ -112,7 +154,7 @@ class AuthenticationMiddleware:
         if is_spammy:
             logger.trace(f"[[ INBOUND ]] {method} {full_url_for_log} | IP: {client_ip}")
         else:
-            logger.debug(f"[[ INBOUND ]] {method} {full_url_for_log} | IP: {client_ip}")
+            logger.trace(f"[[ INBOUND ]] {method} {full_url_for_log} | IP: {client_ip}")
         # ---------------------------------
 
         path_lower = original_path.lower()
@@ -133,26 +175,43 @@ class AuthenticationMiddleware:
         elif path_lower == "/jellyfin": scope["path"] = "/"
         path_lower = scope["path"]
         
-        if is_spammy:
-            logger.trace(f"Request: {method} {original_path} (Routed as: {path_lower}) from {client_ip}")
-        else:
-            logger.debug(f"Request: {method} {original_path} (Routed as: {path_lower}) from {client_ip}")
-
-        logger.debug(f"Request: {method} {original_path} (Routed as: {path_lower}) from {client_ip}")
+        logger.trace(f"Request: {method} {original_path} (Routed as: {path_lower}) from {client_ip}")
 
         is_public = path_lower in PUBLIC_ENDPOINTS or any(path_lower.startswith(p) for p in PUBLIC_PREFIXES)
-        
-        if not is_public and self._is_image_or_video_authorized(path_lower, client_ip, scope):
-            is_public = True
+        public_api_endpoints = set(PUBLIC_API_ENDPOINTS)
+        if bool(getattr(config, "UI_PUBLIC_STATUS_ENDPOINT", False)):
+            public_api_endpoints.add("/api/status")
+        is_ui_api = path_lower.startswith("/api/")
 
-        if is_public:
-            is_ui_api = path_lower.startswith("/api/")
-            if is_ui_api and path_lower not in {"/api/login", "/api/logout"} and getattr(config, "REQUIRE_AUTH_FOR_CONFIG", False):
+        allowed_ui_ips = getattr(config, "UI_ALLOWED_IPS", [])
+        if allowed_ui_ips and (is_ui_api or path_lower.startswith("/web/")):
+            if not _ip_matches(client_ip, allowed_ui_ips):
+                logger.warning(f"Blocked UI request from non-allowlisted IP {client_ip} to {path_lower}")
+                return await self._send_forbidden(send)
+
+        if is_ui_api:
+            if method in {"POST", "PUT", "PATCH", "DELETE"} and bool(getattr(config, "UI_CSRF_PROTECTION", True)):
+                if not self._is_same_origin(scope):
+                    logger.warning(f"Blocked potential CSRF request to {path_lower} from {client_ip}")
+                    return await self._send_forbidden(send)
+
+            if path_lower not in public_api_endpoints and getattr(config, "REQUIRE_AUTH_FOR_CONFIG", False):
                 token = next((v.decode().split("ui_session=")[1].split(";")[0] for k, v in scope.get("headers", []) if k.decode().lower() == "cookie" and "ui_session=" in v.decode()), None)
                 if not token or token not in getattr(state, "ui_sessions", set()):
-                    logger.warning(f"Unauthorized Web UI access attempt from {client_ip}")
+                    if is_spammy:
+                        logger.debug(f"Unauthorized Web UI polling request from {client_ip} to {path_lower}")
+                    else:
+                        logger.warning(f"Unauthorized Web UI access attempt from {client_ip} to {path_lower}")
                     return await self._send_unauthorized(send)
 
+            response = await self._process_request(scope, receive, send, start_time, is_spammy)
+            return response
+
+        if is_public:
+            response = await self._process_request(scope, receive, send, start_time, is_spammy)
+            return response
+
+        if not is_public and self._is_image_or_video_authorized(path_lower, client_ip, scope):
             response = await self._process_request(scope, receive, send, start_time, is_spammy)
             return response
 
@@ -194,6 +253,15 @@ class AuthenticationMiddleware:
         await send({
             "type": "http.response.start", 
             "status": 401, 
+            "headers": [[b"content-type", b"application/json"], [b"content-length", str(len(response_body)).encode()]]
+        })
+        await send({"type": "http.response.body", "body": response_body})
+
+    async def _send_forbidden(self, send):
+        response_body = b'{"error": "Forbidden"}'
+        await send({
+            "type": "http.response.start",
+            "status": 403,
             "headers": [[b"content-type", b"application/json"], [b"content-length", str(len(response_body)).encode()]]
         })
         await send({"type": "http.response.body", "body": response_body})

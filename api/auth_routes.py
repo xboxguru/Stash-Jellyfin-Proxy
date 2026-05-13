@@ -8,6 +8,7 @@ from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.requests import Request
 import config
 import state
+from api.ui_routes import _check_login_rate_limit, _record_login_failure
 
 logger = logging.getLogger(__name__)
 
@@ -187,18 +188,24 @@ async def endpoint_users(request: Request):
 async def endpoint_authenticate_by_name(request: Request):
     try: data = await request.json()
     except Exception: data = {}
-        
+
+    client_ip = request.client.host if request.client else "127.0.0.1"
+
+    if not _check_login_rate_limit(client_ip):
+        logger.warning(f"Rate limit exceeded for login attempts from {client_ip}")
+        return JSONResponse({"error": "Too many login attempts"}, status_code=429)
+
     username = data.get("Username", data.get("username", ""))
     password = data.get("Pw", data.get("pw", data.get("Password", "")))
-    
+
     expected_user = str(getattr(config, "SJS_USER", "")).strip()
     expected_pass = str(getattr(config, "SJS_PASSWORD", "")).strip()
-    client_ip = request.client.host if request.client else "127.0.0.1"
-    
+
     if expected_user and (username.lower() != expected_user.lower() or password != expected_pass):
+        _record_login_failure(client_ip)
         logger.warning(f"Failed authentication attempt for user '{username}' from IP {client_ip}")
         return JSONResponse({"error": "Invalid username or password"}, status_code=401)
-            
+
     logger.info(f"User '{username}' successfully authenticated from {client_ip}")
     return JSONResponse(_build_auth_payload(request, _get_full_user(), data))
 
@@ -234,6 +241,10 @@ async def endpoint_client_log(request: Request):
         # 1. Grab the raw log text sent by the app
         body = await request.body()
         client_ip = request.client.host if request.client else "unknown"
+        max_bytes = int(getattr(config, "CLIENT_LOG_MAX_BYTES", 1048576))
+        if len(body) > max_bytes:
+            logger.warning(f"Rejected oversized client log upload from {client_ip}: {len(body)} bytes")
+            return JSONResponse({"error": "Log payload too large"}, status_code=413)
         
         # 2. Extract the actual Client Name using our existing helper
         client_info = _parse_client_info(request, {})
@@ -252,7 +263,7 @@ async def endpoint_client_log(request: Request):
         with open(filename, "wb") as f:
             f.write(body)
             
-        logger.info(f"📥 Client crash log successfully caught and saved to {filename}")
+        logger.info(f"Client crash log saved to {filename}")
         
     except Exception as e:
         logger.error(f"Failed to save client log: {e}")
@@ -276,7 +287,7 @@ async def endpoint_quickconnect_initiate(request: Request):
         "authorized": False, 
         "timestamp": timestamp
     }
-    logger.info(f"QuickConnect initiated. Code: {code} | Secret: {secret}")
+    logger.debug("QuickConnect initiated for a client session.")
     
     # Parse the client info to populate the required fields
     client_info = _parse_client_info(request, {})
@@ -321,7 +332,7 @@ async def endpoint_quickconnect_authorize(request: Request):
     for secret, session in state.quick_connect_sessions.items():
         if session["code"] == code:
             session["authorized"] = True
-            logger.info(f"QuickConnect Web UI approved code: {code}")
+            logger.info("QuickConnect Web UI approved a code.")
             return JSONResponse({"Success": True})
             
     return JSONResponse({"Error": "Invalid code"}, status_code=400)
@@ -338,7 +349,7 @@ async def endpoint_authenticate_by_quickconnect(request: Request):
     if not session or not session.get("authorized"):
         return Response(status_code=401)
 
-    logger.info(f"Finalizing QuickConnect login for secret: {secret}")
+    logger.info("Finalizing QuickConnect login.")
     
     user_data = _get_full_user()
     response_payload = _build_auth_payload(request, user_data, data)

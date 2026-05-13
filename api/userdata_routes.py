@@ -12,7 +12,12 @@ logger = logging.getLogger(__name__)
 
 def _get_client_info(request: Request, user_agent_fallback: str) -> tuple[str, str]:
     """Responsibility: Extract IP and guess the client type from headers."""
-    client_ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "Unknown").split(",")[0].strip()
+    direct_ip = request.client.host if request.client else "Unknown"
+    client_ip = direct_ip
+    if bool(getattr(config, "TRUST_PROXY_HEADERS", False)):
+        trusted_proxy_ips = set(getattr(config, "TRUSTED_PROXY_IPS", []) or [])
+        if not trusted_proxy_ips or direct_ip in trusted_proxy_ips:
+            client_ip = request.headers.get("x-forwarded-for", direct_ip).split(",")[0].strip()
     user_agent = request.headers.get("user-agent", user_agent_fallback)
     known_clients = ["Infuse", "Wholphin", "Findroid", "Fladder", "ErsatzTV", "VLC", "Jellyfin"]
     client_type = next((c for c in known_clients if c in user_agent), user_agent.split("/")[0][:20] if user_agent else "Unknown")
@@ -20,7 +25,7 @@ def _get_client_info(request: Request, user_agent_fallback: str) -> tuple[str, s
 
 def _register_new_stream(session_id: str, item_id: str, title: str, performer: str, runtime_ticks: float, playback_ticks: float, user: str, client_ip: str, client_type: str):
     """Responsibility: Mutate state to register a new stream and update global stats."""
-    logger.info(f"▶️ PLAYBACK STARTED: Session {session_id} for Item {item_id} ({title}) from {client_ip} ({client_type})")
+    logger.debug(f"Playback started: session={session_id} item={item_id} ip={client_ip} client={client_type}")
     
     state.active_streams.append({
         "id": session_id, "item_id": item_id, "title": title, "performer": performer,
@@ -99,7 +104,7 @@ async def endpoint_sessions_stopped(request: Request):
         if hasattr(state, "active_streams"):
             stream = next((s for s in state.active_streams if s.get("id") == session_id), None)
             if stream:
-                logger.info(f"⏹️ PLAYBACK STOPPED: Session {session_id}")
+                logger.debug(f"Playback stopped: session={session_id}")
                 state.active_streams = [s for s in state.active_streams if s.get("id") != session_id]
                 item_id = decode_id(data.get("ItemId") or data.get("Item", {}).get("Id") or stream.get("item_id", ""))
                 
@@ -126,20 +131,27 @@ async def endpoint_sessions_stopped(request: Request):
 async def _toggle_play_state(request: Request, is_played: bool):
     raw_item_id = request.path_params.get("item_id", "")
     item_id = decode_id(raw_item_id)
-    play_count = 1
+    play_count = 1 if is_played else 0
     task = None
-    
+    is_favorite = False
+
     if item_id.startswith("scene-"):
         raw_id = item_id.replace("scene-", "")
-        task = BackgroundTask(stash_client.increment_play_count, raw_id) 
         scene = await stash_client.get_scene(raw_id)
-        if scene: play_count = (scene.get("play_count") or 0) + 1
-        
+        if scene:
+            current_play_count = scene.get("play_count") or 0
+            play_count = current_play_count + 1 if is_played else current_play_count
+            fav_action = getattr(config, "FAVORITE_ACTION", "o_counter").lower()
+            is_favorite = (scene.get("rating100") or 0) > 0 if fav_action == "rating" else (scene.get("o_counter") or 0) > 0
+        if is_played:
+            task = BackgroundTask(stash_client.increment_play_count, raw_id)
+
     return JSONResponse({
-        "Played": is_played, 
-        "PlayCount": play_count, 
-        "PlaybackPositionTicks": 0, 
-        "Key": raw_item_id if is_played else item_id, 
+        "IsFavorite": is_favorite,
+        "Played": is_played,
+        "PlayCount": play_count,
+        "PlaybackPositionTicks": 0,
+        "Key": raw_item_id if is_played else item_id,
         "ItemId": raw_item_id
     }, background=task)
 
@@ -230,11 +242,11 @@ async def prune_and_salvage_zombie_streams():
                         should_mark_played, resume_seconds = _evaluate_playback_action(last_ticks, runtime_ticks)
                         
                         if should_mark_played:
-                            logger.info(f"🧟 Salvaging watch status for crashed stream {s.get('id')}")
+                            logger.debug(f"Salvaging watch status for crashed stream {s.get('id')}")
                             import asyncio
                             asyncio.create_task(stash_client.increment_play_count(raw_id))
                         elif resume_seconds > 0:
-                            logger.info(f"🧟 Salvaging resume point ({resume_seconds}s) for crashed stream {s.get('id')}")
+                            logger.debug(f"Salvaging resume point ({resume_seconds}s) for crashed stream {s.get('id')}")
                             import asyncio
                             asyncio.create_task(stash_client.update_resume_time(raw_id, resume_seconds))
                 except Exception as e:
@@ -244,4 +256,4 @@ async def prune_and_salvage_zombie_streams():
             
     state.active_streams = surviving_streams
     if len(state.active_streams) < original_count:
-        logger.info(f"🧹 Pruned {original_count - len(state.active_streams)} zombie streams from memory.")
+        logger.debug(f"Pruned {original_count - len(state.active_streams)} zombie streams from memory.")

@@ -268,6 +268,68 @@
                     </div>
                 </div>
             </div>
+
+            <div class="card">
+                <h3 class="card-title">UI/API Hardening</h3>
+                <div class="form-row three-col">
+                    <div class="form-group">
+                        <label class="form-label">UI Allowed IPs</label>
+                        <input type="text" class="form-input" name="UI_ALLOWED_IPS" placeholder="192.168.0.0/24, 127.0.0.1">
+                        <div class="form-hint">Restrict Web UI/API access to these IPs/CIDRs (comma-separated). Leave blank to disable.</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Auth Rate Limit Window (mins)</label>
+                        <input type="number" class="form-input" name="AUTH_RATE_LIMIT_WINDOW_MINUTES" placeholder="15">
+                        <div class="form-hint">Time window for login attempt limiting.</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Max Login Attempts</label>
+                        <input type="number" class="form-input" name="AUTH_RATE_LIMIT_MAX_ATTEMPTS" placeholder="10">
+                        <div class="form-hint">Maximum failed login attempts per IP in the rate limit window.</div>
+                    </div>
+                </div>
+                <div class="form-row three-col">
+                    <div class="form-group" style="display: flex; align-items: flex-end; padding-bottom: 8px;">
+                        <label class="form-label" style="display: flex; align-items: center; gap: 0.5rem; margin:0;">
+                            <input type="checkbox" name="UI_CSRF_PROTECTION" style="width: auto;">
+                            Enforce CSRF Protection
+                        </label>
+                    </div>
+                    <div class="form-group" style="display: flex; align-items: flex-end; padding-bottom: 8px;">
+                        <label class="form-label" style="display: flex; align-items: center; gap: 0.5rem; margin:0;">
+                            <input type="checkbox" name="UI_PUBLIC_STATUS_ENDPOINT" style="width: auto;">
+                            Keep /api/status Public
+                        </label>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Client Log Max Bytes</label>
+                        <input type="number" class="form-input" name="CLIENT_LOG_MAX_BYTES" placeholder="1048576">
+                        <div class="form-hint">Maximum accepted payload size for /clientlog/document uploads.</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3 class="card-title">Proxy & CORS Trust</h3>
+                <div class="form-row three-col">
+                    <div class="form-group" style="display: flex; align-items: flex-end; padding-bottom: 8px;">
+                        <label class="form-label" style="display: flex; align-items: center; gap: 0.5rem; margin:0;">
+                            <input type="checkbox" name="TRUST_PROXY_HEADERS" style="width: auto;">
+                            Trust Proxy Headers (X-Forwarded-For)
+                        </label>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Trusted Proxy IPs</label>
+                        <input type="text" class="form-input" name="TRUSTED_PROXY_IPS" placeholder="10.0.0.10, 10.0.0.11">
+                        <div class="form-hint">Only used when Trust Proxy Headers is enabled.</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">CORS Allowed Origins</label>
+                        <input type="text" class="form-input" name="CORS_ALLOWED_ORIGINS" placeholder="http://localhost:8097">
+                        <div class="form-hint">Comma-separated origins. Leave blank for local defaults.</div>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <div id="config-logging" class="config-section hidden">

@@ -69,6 +69,30 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logger = logging.getLogger("proxy_main")
 
+def log_security_posture():
+    ui_allow_ips = getattr(config, "UI_ALLOWED_IPS", [])
+    cors_origins = getattr(config, "CORS_ALLOWED_ORIGINS", [])
+    trusted_proxies = getattr(config, "TRUSTED_PROXY_IPS", [])
+    logger.notice("-" * 50)
+    logger.notice("Security Posture")
+    logger.notice(f"Require UI Auth: {bool(getattr(config, 'REQUIRE_AUTH_FOR_CONFIG', True))}")
+    logger.notice(f"Public /api/status: {bool(getattr(config, 'UI_PUBLIC_STATUS_ENDPOINT', False))}")
+    logger.notice(f"CSRF Protection: {bool(getattr(config, 'UI_CSRF_PROTECTION', True))}")
+    logger.notice(f"UI IP Allowlist Enabled: {bool(ui_allow_ips)}")
+    if ui_allow_ips:
+        logger.notice(f"UI Allowed IPs: {', '.join(ui_allow_ips)}")
+    logger.notice(
+        f"Auth Rate Limit: {getattr(config, 'AUTH_RATE_LIMIT_MAX_ATTEMPTS', 10)} attempts / "
+        f"{getattr(config, 'AUTH_RATE_LIMIT_WINDOW_MINUTES', 15)} min"
+    )
+    logger.notice(f"Trust Proxy Headers: {bool(getattr(config, 'TRUST_PROXY_HEADERS', False))}")
+    if trusted_proxies:
+        logger.notice(f"Trusted Proxy IPs: {', '.join(trusted_proxies)}")
+    logger.notice(f"CORS Allowlist Configured: {bool(cors_origins)}")
+    if cors_origins:
+        logger.notice(f"CORS Allowed Origins: {', '.join(cors_origins)}")
+    logger.notice("-" * 50)
+
 def _get_local_ip():
     local_ip = getattr(config, "HOST_IP", "").strip()
     if not local_ip:
@@ -114,6 +138,8 @@ routes = [
     Route("/api/auth/check", ui_routes.api_auth_check, methods=["GET"]),
     Route("/api/auth/login", ui_routes.api_login, methods=["POST"]),
     Route("/api/auth/logout", ui_routes.api_logout, methods=["POST"]),
+    Route("/api/login", ui_routes.api_login, methods=["POST"]),
+    Route("/api/logout", ui_routes.api_logout, methods=["POST"]),
     Route("/api/auth/dynamic_ips/{ip}", ui_routes.api_prune_dynamic_ip, methods=["DELETE"]),
     Route("/api/cache/increment", ui_routes.api_increment_cache_version, methods=["POST"]),
     Route("/api/cache/clear", ui_routes.api_clear_cache, methods=["POST"]),
@@ -249,9 +275,14 @@ async def lifespan(app):
 
 app = Starlette(debug=(config.LOG_LEVEL == "DEBUG"), routes=routes, lifespan=lifespan)
 
+cors_origins = getattr(config, "CORS_ALLOWED_ORIGINS", [])
+if not cors_origins:
+    ui_port = getattr(config, "UI_PORT", 8097)
+    cors_origins = [f"http://127.0.0.1:{ui_port}", f"http://localhost:{ui_port}"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -324,6 +355,7 @@ async def run_server():
     logger.notice(f"Proxy API: {config.PROXY_BIND}:{config.PROXY_PORT}")
     if config.PROXY_API_KEY: logger.notice(f"Proxy API Key Loaded")
     logger.notice("=" * 50)
+    log_security_posture()
 
     stash_online = await stash_client.test_stash_connection()
     if not stash_online:

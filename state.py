@@ -8,6 +8,7 @@ logger = logging.getLogger(__name__)
 
 ui_sessions = set()
 quick_connect_sessions = {}
+login_attempts = {}
 
 if os.path.exists("/.dockerenv") and os.path.isdir("/config"):
     AUTH_IPS_FILE = "/config/authenticated_IPs.json"
