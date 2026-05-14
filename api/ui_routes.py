@@ -64,15 +64,13 @@ async def serve_index(request: Request):
     if request.url.port == proxy_port and proxy_port != getattr(config, "UI_PORT", 8097):
         return PlainTextResponse("Stash-Jellyfin Proxy API is running. (No Web Client available)", status_code=200)
 
-    # Pass variables into the Jinja2 context dictionary
     context = {
-        "request": request, # Jinja2 always requires the request object
         "SERVER_NAME": getattr(config, "SERVER_NAME", "Stash Media Server"),
         "VERSION": getattr(config, "APP_VERSION", "v2.1-dev"),
         "config": config
     }
-    
-    return templates.TemplateResponse("index.html", context)
+
+    return templates.TemplateResponse(request, "index.html", context)
 
 async def api_get_config(request: Request):
     """Exposes all configuration and state data to the Web UI dynamically."""
