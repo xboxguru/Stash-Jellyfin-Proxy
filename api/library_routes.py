@@ -826,10 +826,21 @@ async def endpoint_next_up(request: Request):
             
             # MAP OVERRIDE: Force strict clients to render this in the Next Up row
             item["Type"] = "Episode"
-            
+
             # Treat the Studio like a TV Network/Series Name for UI polish
-            series_name = scene.get("studio", {}).get("name") if scene.get("studio") else "Stash Discovery"
+            studio = scene.get("studio") or {}
+            series_name = studio.get("name") or "Stash Discovery"
             item["SeriesName"] = series_name
+            item["SeriesId"] = encode_id("studio", str(studio["id"])) if studio.get("id") else item["Id"]
+
+            # Wholphin renders episode subtitles as "S{ParentIndexNumber}E{IndexNumber} - Name".
+            # Both fields must be present or it falls back to "null". SeasonName is ignored.
+            # Use the release year as the season number (e.g. S2024E0) so there's at
+            # least meaningful context in the subtitle rather than a fake S1E0.
+            date_str = scene.get("date") or ""
+            item["SeasonName"] = date_str[:4] if date_str else ""
+            item["ParentIndexNumber"] = int(date_str[:4]) if date_str and date_str[:4].isdigit() else 1
+            item["IndexNumber"] = 0
             
             jellyfin_items.append(item)
         except Exception as e:

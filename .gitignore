@@ -5,6 +5,7 @@ authenticated_IPs.json
 stats.json
 display_preferences.json
 test.ps1
+.venv*
 
 # Python artifacts
 __pycache__/
