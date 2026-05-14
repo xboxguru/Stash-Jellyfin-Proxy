@@ -23,13 +23,32 @@ async def endpoint_item_image(request: Request):
     raw_item_id = request.path_params.get("item_id", "")
     item_id = decode_id(raw_item_id)
     image_type = request.path_params.get("image_type", "Primary").lower()
-    
+
+    # Live TV channel / program — proxy artwork
+    from api import live_tv_routes
+    ch = await live_tv_routes.get_channel_by_jellyfin_id(raw_item_id)
+    if ch is not None and ch.get("logo"):
+        return await _proxy_image(ch["logo"])
+
+    if ch is None:
+        prog = await live_tv_routes.get_program_by_jellyfin_id(raw_item_id)
+        if prog is not None:
+            # Prefer the program's own icon; fall back to channel logo
+            if prog.get("icon"):
+                return await _proxy_image(prog["icon"])
+            from core.jellyfin_mapper import encode_id
+            ch = await live_tv_routes.get_channel_by_jellyfin_id(
+                encode_id("channel", prog["channel_id"])
+            )
+            if ch is not None and ch.get("logo"):
+                return await _proxy_image(ch["logo"])
+
     # Extract the index if it was passed in the URL path
     image_index = request.path_params.get("image_index")
     # FIX: Safely extract case-insensitive query parameters (?imageIndex=1 or ?Index=1)
     if not image_index:
         image_index = next((v for k, v in request.query_params.items() if k.lower() in ("index", "imageindex")), "0")
-        
+
     logger.debug(f"Image Request -> ID: '{item_id}', Type: '{image_type}', Index: '{image_index}'")
 
     # --- Chapter Image Router (Path B) ---

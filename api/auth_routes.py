@@ -64,7 +64,7 @@ def _get_full_user() -> dict:
             "EnableSharedDeviceControl": True,
             "EnableRemoteAccess": True,
             "EnableLiveTvManagement": False,
-            "EnableLiveTvAccess": False,
+            "EnableLiveTvAccess": getattr(config, "ENABLE_LIVE_TV", False),
             "EnableMediaPlayback": True,
             "EnableAudioPlaybackTranscoding": True,
             "EnableVideoPlaybackTranscoding": True,
@@ -364,9 +364,12 @@ async def endpoint_blackhole(request: Request):
     if "sessions" in path_lower and request.method == "GET": return JSONResponse([])
     if "branding/css" in path_lower: return Response(content="", media_type="text/css")
 
-    array_endpoints = ["/plugins", "/scheduledtasks", "/channels", "/livetv", "/providers"]
+    array_endpoints = ["/plugins", "/scheduledtasks", "/channels", "/providers"]
     if any(x in path_lower for x in array_endpoints): return JSONResponse([])
-        
+
+    if "/livetv" in path_lower:
+        return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": 0})
+
     if "configuration" in path_lower:
         return JSONResponse({"PlayDefaultAudioTrack": True, "SubtitleMode": "Default"})
 

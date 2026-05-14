@@ -26,7 +26,7 @@ import state
 from core import stash_client
 from core.udp_discovery import JellyfinDiscoveryProtocol
 from api.middleware import AuthenticationMiddleware
-from api import ui_routes, auth_routes, library_routes, metadata_routes, stream_routes, userdata_routes, image_routes
+from api import ui_routes, auth_routes, library_routes, metadata_routes, stream_routes, userdata_routes, image_routes, live_tv_routes
 
 if not os.path.exists(config.LOG_DIR):
     try: os.makedirs(config.LOG_DIR, exist_ok=True)
@@ -258,6 +258,20 @@ routes = [
     Route("/items/{item_id}/download", stream_routes.endpoint_stream, methods=["GET"]),
     Route("/users/{user_id}/items/{item_id}/download", stream_routes.endpoint_stream, methods=["GET"]),
 
+    Route("/livetv/info", live_tv_routes.endpoint_live_tv_info, methods=["GET"]),
+    Route("/livetv/guideinfo", live_tv_routes.endpoint_guide_info, methods=["GET"]),
+    Route("/livetv/channels", live_tv_routes.endpoint_channels, methods=["GET"]),
+    Route("/livetv/programs/recommended", live_tv_routes.endpoint_programs, methods=["GET", "POST"]),
+    Route("/livetv/programs/{program_id}", live_tv_routes.endpoint_program_detail, methods=["GET"]),
+    Route("/livetv/programs", live_tv_routes.endpoint_programs, methods=["GET", "POST"]),
+    Route("/livetv/recordings/folders", live_tv_routes.endpoint_recordings_folders, methods=["GET"]),
+    Route("/livetv/recordings", live_tv_routes.endpoint_recordings, methods=["GET"]),
+    Route("/livetv/timers/defaults", live_tv_routes.endpoint_timer_defaults, methods=["GET"]),
+    Route("/livetv/timers", live_tv_routes.endpoint_timers, methods=["GET"]),
+    Route("/livetv/seriestimers", live_tv_routes.endpoint_series_timers, methods=["GET"]),
+    Route("/livetv/channels/{channel_id}/stream.m3u8", live_tv_routes.endpoint_channel_m3u8, methods=["GET"]),
+    Route("/livetv/channels/{channel_id}/stream", live_tv_routes.endpoint_channel_stream, methods=["GET"]),
+
     Route("/clientlog/document", auth_routes.endpoint_client_log, methods=["POST"]),
 
     WebSocketRoute("/socket", dummy_websocket),
@@ -273,6 +287,7 @@ async def lifespan(app):
     await stash_client._manager.client.aclose()
     await stream_routes.stream_client.aclose()
     await image_routes.image_client.aclose()
+    await live_tv_routes._live_client.aclose()
 
 app = Starlette(debug=(config.LOG_LEVEL == "DEBUG"), routes=routes, lifespan=lifespan)
 

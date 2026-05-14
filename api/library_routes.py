@@ -94,8 +94,11 @@ async def _get_libraries():
         for name in tag_names:
             search_name = name.strip().lower()
             match = next((t for t in all_tags if t['name'].strip().lower() == search_name), None)
-            if match: 
+            if match:
                 views.append(build_folder(match['name'], encode_id("tag", str(match['id'])), server_id, cache_version, is_user_view=True))
+
+    if getattr(config, "ENABLE_LIVE_TV", False):
+        views.append(build_folder("Live TV", encode_id("root", "livetv"), server_id, cache_version, collection_type="livetv", is_user_view=True))
 
     return views
 

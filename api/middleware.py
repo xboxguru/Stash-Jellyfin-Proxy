@@ -110,7 +110,12 @@ class AuthenticationMiddleware:
         return None
 
     def _is_image_or_video_authorized(self, path_lower: str, client_ip: str, scope) -> bool:
-        if "/images/" not in path_lower and "/videos/" not in path_lower:
+        is_media = (
+            "/images/" in path_lower
+            or "/videos/" in path_lower
+            or (path_lower.startswith("/livetv/channels/") and ("/stream" in path_lower))
+        )
+        if not is_media:
             return False
             
         static_ips = getattr(config, "AUTHENTICATED_IPS", [])

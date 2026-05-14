@@ -205,6 +205,17 @@ async def endpoint_item_details(request: Request):
 
     logger.debug(f"Metadata Request -> Item Details for Decoded ID: {decoded_id}")
 
+    # Live TV channels and programs are identified by their encoded IDs
+    from api import live_tv_routes
+    ch = await live_tv_routes.get_channel_by_jellyfin_id(item_id)
+    if ch is not None:
+        return JSONResponse(live_tv_routes._channel_to_jellyfin(ch, server_id, item_id))
+    prog = await live_tv_routes.get_program_by_jellyfin_id(item_id)
+    if prog is not None:
+        channels = await live_tv_routes._get_channels()
+        channels_by_tvg_id = {c["tvg_id"]: c for c in channels}
+        return JSONResponse(live_tv_routes._program_to_jellyfin(prog, server_id, channels_by_tvg_id, item_id))
+
     if "root-" in decoded_id or "tag-" in decoded_id or "filter-" in decoded_id:
         return await _handle_nav_folder_details(decoded_id, item_id, server_id, cache_version)
     if decoded_id.startswith("studio-"):

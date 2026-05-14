@@ -12,13 +12,21 @@ logger = logging.getLogger(__name__)
 stream_client = httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", False), timeout=None)
 
 async def endpoint_playback_info(request: Request):
-    item_id = decode_id(request.path_params.get("item_id", ""))
+    raw_item_id = request.path_params.get("item_id", "")
+
+    # Live TV channels have their own playback path
+    from api import live_tv_routes
+    ch = await live_tv_routes.get_channel_by_jellyfin_id(raw_item_id)
+    if ch is not None:
+        return live_tv_routes.channel_playback_info(ch, raw_item_id, request)
+
+    item_id = decode_id(raw_item_id)
     raw_id = item_id.replace("scene-", "")
     scene = await stash_client.get_scene(raw_id)
-    
+
     if not scene:
         return JSONResponse({"error": "Item not found"}, status_code=404)
-        
+
     jellyfin_item = jellyfin_mapper.format_jellyfin_item(scene)
     return JSONResponse({
         "MediaSources": jellyfin_item.get("MediaSources", []),
