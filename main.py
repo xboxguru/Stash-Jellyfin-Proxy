@@ -147,6 +147,7 @@ routes = [
     Route("/api/stats/top_played/{item_id}", ui_routes.api_remove_top_played_item, methods=["DELETE"]),
     Route('/api/quickconnect/authorize', auth_routes.endpoint_quickconnect_authorize, methods=['POST']),
     Route("/api/sysinfo", ui_routes.api_get_sysinfo, methods=["GET"]),
+    Route("/api/livetv/rebuild-schedule", live_tv_routes.endpoint_rebuild_schedule, methods=["POST"]),
     
     Route("/system/info/public", auth_routes.endpoint_system_info_public, methods=["GET"]),
     Route("/public/system/info", auth_routes.endpoint_system_info_public, methods=["GET"]),
@@ -269,6 +270,8 @@ routes = [
     Route("/livetv/timers/defaults", live_tv_routes.endpoint_timer_defaults, methods=["GET"]),
     Route("/livetv/timers", live_tv_routes.endpoint_timers, methods=["GET"]),
     Route("/livetv/seriestimers", live_tv_routes.endpoint_series_timers, methods=["GET"]),
+    Route("/livetv/channels/{channel_id}/stash-stream", live_tv_routes.endpoint_stash_channel_stream, methods=["GET"]),
+    Route("/livetv/channels/{channel_id}/seg/{seg_name}", live_tv_routes.endpoint_stash_channel_segment, methods=["GET"]),
     Route("/livetv/channels/{channel_id}/stream.m3u8", live_tv_routes.endpoint_channel_m3u8, methods=["GET"]),
     Route("/livetv/channels/{channel_id}/stream", live_tv_routes.endpoint_channel_stream, methods=["GET"]),
 
@@ -282,7 +285,11 @@ routes = [
 
 @asynccontextmanager
 async def lifespan(app):
+    if getattr(config, "ENABLE_STASH_CHANNELS", False):
+        live_tv_routes._load_schedule()
+        await live_tv_routes.start_maintenance_task()
     yield
+    await live_tv_routes.stop_maintenance_task()
     logger.info("Shutting down global HTTP connection pools...")
     await stash_client._manager.client.aclose()
     await stream_routes.stream_client.aclose()

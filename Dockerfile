@@ -16,7 +16,7 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    bash curl gosu tzdata && \
+    bash curl gosu tzdata ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /app /config && chmod 755 /app /config

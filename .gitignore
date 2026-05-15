@@ -2,7 +2,7 @@
 stash_jellyfin_proxy.conf
 .env
 authenticated_IPs.json
-stats.json
+*.json
 display_preferences.json
 test.ps1
 .venv*

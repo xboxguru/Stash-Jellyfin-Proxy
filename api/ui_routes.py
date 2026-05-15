@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 RESTART_REQUESTED = False
 
 templates = Jinja2Templates(directory=os.path.join(config.SCRIPT_DIR, "templates"))
-SENSITIVE_CONFIG_KEYS = {"STASH_API_KEY", "PROXY_API_KEY", "SJS_PASSWORD"}
+SENSITIVE_CONFIG_KEYS = {"STASH_API_KEY", "SJS_PASSWORD"}
 REDACTED_SENTINEL = "***redacted***"
 
 def _ip_matches(client_ip: str, entries: list) -> bool:

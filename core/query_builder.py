@@ -6,6 +6,47 @@ import config
 from core import stash_client
 from core.jellyfin_mapper import decode_id
 
+def transform_saved_filter(object_filter: dict) -> dict:
+    """Convert a Stash saved-filter object_filter blob into a SceneFilterType-compatible dict."""
+    if not object_filter or not isinstance(object_filter, dict):
+        return {}
+    result = {}
+    for key, value in object_filter.items():
+        if value is None:
+            continue
+        if key in ('has_markers', 'is_missing'):
+            result[key] = str(value['value']).lower() if isinstance(value, dict) and 'value' in value else str(value).lower()
+            continue
+        if key in ('AND', 'OR', 'NOT'):
+            if isinstance(value, list):
+                result[key] = [transform_saved_filter(v) for v in value if v]
+            elif isinstance(value, dict):
+                result[key] = transform_saved_filter(value)
+            continue
+        if isinstance(value, dict):
+            modifier = value.get('modifier')
+            val = value.get('value')
+            if 'items' in value:
+                ids = [item.get('id') for item in value['items'] if isinstance(item, dict) and item.get('id')]
+                excludes = [e.get('id') if isinstance(e, dict) else e for e in value.get('excluded', [])]
+                result[key] = {'value': ids, 'modifier': modifier, 'depth': value.get('depth', 0), 'excludes': excludes}
+                continue
+            if modifier in ('IS_NULL', 'NOT_NULL'):
+                result[key] = {'value': '', 'modifier': modifier}
+                continue
+            if isinstance(val, dict) and 'value' in val:
+                val = val['value']
+            if modifier and val is not None:
+                transformed = {'modifier': modifier, 'value': val}
+                for k, v in value.items():
+                    if k not in ('modifier', 'value'):
+                        transformed[k] = v
+                result[key] = transformed
+                continue
+        result[key] = value
+    return result
+
+
 class StashQueryBuilder:
     """Translates Jellyfin UI requests into Stash GraphQL filter payloads."""
     
@@ -22,42 +63,7 @@ class StashQueryBuilder:
         return ",".join(values) if values else default
 
     def _transform_saved_filter(self, object_filter):
-        if not object_filter or not isinstance(object_filter, dict): return {}
-        result = {}
-        for key, value in object_filter.items():
-            if value is None: continue
-            
-            if key in ('has_markers', 'is_missing'):
-                if isinstance(value, dict) and 'value' in value:
-                    result[key] = str(value['value']).lower()
-                else:
-                    result[key] = str(value).lower()
-                continue
-            
-            if key in ('AND', 'OR', 'NOT'):
-                if isinstance(value, list): result[key] = [self._transform_saved_filter(v) for v in value if v]
-                elif isinstance(value, dict): result[key] = self._transform_saved_filter(value)
-                continue
-            if isinstance(value, dict):
-                modifier = value.get('modifier')
-                val = value.get('value')
-                if 'items' in value:
-                    ids = [item.get('id') for item in value['items'] if isinstance(item, dict) and item.get('id')]
-                    excludes = [e.get('id') if isinstance(e, dict) else e for e in value.get('excluded', [])]
-                    result[key] = {'value': ids, 'modifier': modifier, 'depth': value.get('depth', 0), 'excludes': excludes}
-                    continue
-                if modifier in ('IS_NULL', 'NOT_NULL'):
-                    result[key] = {'value': '', 'modifier': modifier}
-                    continue
-                if isinstance(val, dict) and 'value' in val: val = val['value']
-                if modifier and val is not None:
-                    transformed = {'modifier': modifier, 'value': val}
-                    for k, v in value.items():
-                        if k not in ('modifier', 'value'): transformed[k] = v
-                    result[key] = transformed
-                    continue
-            result[key] = value
-        return result
+        return transform_saved_filter(object_filter)
 
     async def build(self) -> tuple[dict, dict, bool, int]:
         sync_mode = getattr(config, "SYNC_LEVEL", "Everything")

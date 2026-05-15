@@ -64,7 +64,7 @@ def _get_full_user() -> dict:
             "EnableSharedDeviceControl": True,
             "EnableRemoteAccess": True,
             "EnableLiveTvManagement": False,
-            "EnableLiveTvAccess": getattr(config, "ENABLE_LIVE_TV", False),
+            "EnableLiveTvAccess": getattr(config, "ENABLE_LIVE_TV", False) and (getattr(config, "ENABLE_TUNARR", False) or getattr(config, "ENABLE_STASH_CHANNELS", False)),
             "EnableMediaPlayback": True,
             "EnableAudioPlaybackTranscoding": True,
             "EnableVideoPlaybackTranscoding": True,

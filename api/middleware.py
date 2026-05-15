@@ -113,7 +113,7 @@ class AuthenticationMiddleware:
         is_media = (
             "/images/" in path_lower
             or "/videos/" in path_lower
-            or (path_lower.startswith("/livetv/channels/") and ("/stream" in path_lower))
+            or (path_lower.startswith("/livetv/channels/") and ("stream" in path_lower or "/seg/" in path_lower))
         )
         if not is_media:
             return False

@@ -18,6 +18,8 @@ async def endpoint_playback_info(request: Request):
     from api import live_tv_routes
     ch = await live_tv_routes.get_channel_by_jellyfin_id(raw_item_id)
     if ch is not None:
+        if ch.get("stash_type"):
+            return await live_tv_routes.stash_channel_playback_info(ch, raw_item_id, request)
         return live_tv_routes.channel_playback_info(ch, raw_item_id, request)
 
     item_id = decode_id(raw_item_id)

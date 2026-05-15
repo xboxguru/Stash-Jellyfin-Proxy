@@ -97,7 +97,7 @@ async def _get_libraries():
             if match:
                 views.append(build_folder(match['name'], encode_id("tag", str(match['id'])), server_id, cache_version, is_user_view=True))
 
-    if getattr(config, "ENABLE_LIVE_TV", False):
+    if getattr(config, "ENABLE_LIVE_TV", False) and (getattr(config, "ENABLE_TUNARR", False) or getattr(config, "ENABLE_STASH_CHANNELS", False)):
         views.append(build_folder("Live TV", encode_id("root", "livetv"), server_id, cache_version, collection_type="livetv", is_user_view=True))
 
     return views

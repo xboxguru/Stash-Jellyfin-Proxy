@@ -7,6 +7,7 @@
         <button type="button" class="tab-btn config-tab-btn" data-tab="library" style="padding: 10px 20px; font-weight: 500;">Library</button>
         <button type="button" class="tab-btn config-tab-btn" data-tab="security" style="padding: 10px 20px; font-weight: 500;">Security</button>
         <button type="button" class="tab-btn config-tab-btn" data-tab="logging" style="padding: 10px 20px; font-weight: 500;">Logging</button>
+        <button type="button" class="tab-btn config-tab-btn" data-tab="livetv" style="padding: 10px 20px; font-weight: 500;">Live TV</button>
     </div>
 
     <form id="config-form" autocomplete="off">
@@ -52,7 +53,12 @@
                 <div class="form-group" style="margin-bottom: 0;">
                     <label class="form-label">Proxy API Key (For ErsatzTV / Clients)</label>
                     <div style="display: flex; gap: 10px; align-items: center;">
-                        <input type="text" class="form-input" id="PROXY_API_KEY" name="PROXY_API_KEY" placeholder="Auto-generated if blank">
+                        <div style="position: relative; flex: 1;">
+                            <input type="password" class="form-input" id="PROXY_API_KEY" name="PROXY_API_KEY" placeholder="Auto-generated if blank" autocomplete="off" data-1p-ignore data-lpignore="true" style="padding-right: 40px;">
+                            <button type="button" id="btn-toggle-apikey" title="Show / hide key" onclick="(function(){var i=document.getElementById('PROXY_API_KEY');var b=document.getElementById('btn-toggle-apikey');if(i.type==='password'){i.type='text';b.querySelector('svg').style.opacity='0.4';}else{i.type='password';b.querySelector('svg').style.opacity='1';}})()" style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%); background: none; border: none; cursor: pointer; padding: 0; color: var(--text-secondary);">
+                                <svg style="width: 18px; height: 18px; display: block;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path></svg>
+                            </button>
+                        </div>
                         <button type="button" id="btn-rotate-key" class="btn btn-secondary" style="padding: 10px 12px; font-size: 12px; white-space: nowrap;">
                             <svg style="width: 14px; height: 14px; display: inline-block; vertical-align: text-bottom; margin-right: 4px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
                             Rotate Key
@@ -373,6 +379,111 @@
                     </div>
                 </div>
             </div>
+        </div>
+
+        <div id="config-livetv" class="config-section hidden">
+
+            <div class="card">
+                <h3 class="card-title">Live TV</h3>
+                <div class="toggle-row" style="margin-bottom: 0;">
+                    <label class="toggle-switch">
+                        <input type="checkbox" name="ENABLE_LIVE_TV">
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <div>
+                        <div class="toggle-label">Enable Live TV</div>
+                        <div class="toggle-hint">Master switch — exposes the Live TV library to Jellyfin clients. Enable at least one source below.</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3 class="card-title">Tunarr Integration</h3>
+                <div class="toggle-row" style="margin-bottom: 20px;">
+                    <label class="toggle-switch">
+                        <input type="checkbox" name="ENABLE_TUNARR">
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <div>
+                        <div class="toggle-label">Enable Tunarr Integration</div>
+                        <div class="toggle-hint">Expose Tunarr channels and guide data to Jellyfin clients. Requires M3U and XMLTV URLs below.</div>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">M3U Playlist URL</label>
+                        <input type="text" class="form-input" name="TUNER_M3U_URL" placeholder="http://tunarr:8000/api/channels.m3u">
+                        <div class="form-hint">Tunarr (or any M3U source) channel playlist URL</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">XMLTV Guide URL</label>
+                        <input type="text" class="form-input" name="TUNER_XMLTV_URL" placeholder="http://tunarr:8000/api/xmltv.xml">
+                        <div class="form-hint">XMLTV EPG data URL for programme guide</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3 class="card-title">Dynamic Stash Channels</h3>
+                <div class="toggle-row" style="margin-bottom: 20px;">
+                    <label class="toggle-switch">
+                        <input type="checkbox" name="ENABLE_STASH_CHANNELS">
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <div>
+                        <div class="toggle-label">Enable Dynamic Stash Channels</div>
+                        <div class="toggle-hint">Auto-generate Live TV channels from your Stash library. One channel per tag or saved filter, with a pre-built EPG schedule.</div>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Tag Channels</label>
+                        <input type="text" class="form-input" name="STASH_TV_TAGS" placeholder="e.g. Favorites, VR, 4K">
+                        <div class="form-hint">Comma-separated Stash tag names — one channel each</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Filter Channels</label>
+                        <input type="text" class="form-input" name="STASH_TV_FILTERS" placeholder="e.g. Top Rated, Recent">
+                        <div class="form-hint">Comma-separated saved Stash filter names — one channel each</div>
+                    </div>
+                </div>
+                <div class="form-row" style="margin-top: 12px;">
+                    <div class="form-group">
+                        <label class="form-label">Schedule Days Ahead</label>
+                        <input type="number" class="form-input" name="STASH_SCHEDULE_DAYS" placeholder="7">
+                        <div class="form-hint">How far ahead to build the EPG</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Days to Keep</label>
+                        <input type="number" class="form-input" name="STASH_KEEP_DAYS" placeholder="2">
+                        <div class="form-hint">How many past days to retain in the guide</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Starting Channel Number</label>
+                        <input type="number" class="form-input" name="STASH_CHANNEL_START_NUMBER" placeholder="5001">
+                        <div class="form-hint">First channel number assigned to Stash channels</div>
+                    </div>
+                </div>
+                <div class="toggle-row" style="margin-top: 16px; margin-bottom: 12px;">
+                    <label class="toggle-switch">
+                        <input type="checkbox" name="ENABLE_SHORTS_CHANNEL">
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <div>
+                        <div class="toggle-label">Enable Shorts Channel</div>
+                        <div class="toggle-hint">Dedicated channel for clips under the configured length</div>
+                    </div>
+                </div>
+                <div class="form-group" style="max-width: 220px;">
+                    <label class="form-label">Shorts Max Length (minutes)</label>
+                    <input type="number" class="form-input" name="SHORTS_MAX_MINUTES" placeholder="5">
+                </div>
+                <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);">
+                    <button type="button" id="btn-rebuild-schedule" class="btn" style="background: var(--warning, #b45309); color: #fff;">Regenerate Schedule</button>
+                    <div class="form-hint" style="margin-top: 6px;">Wipes the current EPG schedule and builds a fresh randomized one for all Stash channels. Takes a few seconds.</div>
+                </div>
+            </div>
+
         </div>
 
         <div id="env-notice" class="env-notice" style="margin-bottom: 16px;">
