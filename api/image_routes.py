@@ -27,8 +27,16 @@ async def endpoint_item_image(request: Request):
     # Live TV channel / program — proxy artwork
     from api import live_tv_routes
     ch = await live_tv_routes.get_channel_by_jellyfin_id(raw_item_id)
-    if ch is not None and ch.get("logo"):
-        return await _proxy_image(ch["logo"])
+    if ch is not None:
+        tvg_id = ch.get("tvg_id", "")
+        custom = live_tv_routes._custom_logo_path(tvg_id)
+        if custom:
+            mt = os.path.splitext(custom)[1].lstrip(".")
+            media_type = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+                          "webp": "image/webp", "gif": "image/gif"}.get(mt, "image/jpeg")
+            return FileResponse(custom, media_type=media_type, headers={"Cache-Control": "public, max-age=3600"})
+        if ch.get("logo"):
+            return await _proxy_image(ch["logo"])
 
     if ch is None:
         prog = await live_tv_routes.get_program_by_jellyfin_id(raw_item_id)

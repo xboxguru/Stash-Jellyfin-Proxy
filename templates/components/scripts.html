@@ -81,6 +81,7 @@
 
             if (page === 'config') fetchConfig();
             else if (page === 'logs') fetchLogs();
+            else if (page === 'guide') loadGuide();
         }
 
         async function fetchStatus() {
@@ -583,4 +584,347 @@
         // Add to your existing window.onload or initialize sequence:
         setInterval(fetchSysInfo, 3000); // Update every 3 seconds
         fetchSysInfo(); // Run immediately on load
+
+        // ── TV Guide ──────────────────────────────────────────────────────────
+
+        const GUIDE_PX_PER_MIN = 5;     // 300px per hour
+        const GUIDE_CH_COL_W   = 160;   // channel column width in px
+
+        let _guideDate = null;          // midnight LOCAL time of displayed day (Date object)
+        let _guideData = null;          // last loaded response
+        let _logoModalTvgId = null;
+
+        function _guideDateMidnightLocal(d) {
+            // Return a new Date at 00:00:00 in the browser's local timezone.
+            const r = new Date(d);
+            r.setHours(0, 0, 0, 0);
+            return r;
+        }
+
+        function _guideDateLabel(d) {
+            // Human-readable label using local timezone.
+            return d.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+        }
+
+        function _guideFormatHour(h) {
+            if (h === 0)  return '12 AM';
+            if (h < 12)   return `${h} AM`;
+            if (h === 12) return '12 PM';
+            return `${h - 12} PM`;
+        }
+
+        async function loadGuide() {
+            if (!_guideDate) {
+                _guideDate = _guideDateMidnightLocal(new Date());
+            }
+
+            const todayLocal = _guideDateMidnightLocal(new Date());
+            const isToday    = _guideDate.getTime() === todayLocal.getTime();
+
+            document.getElementById('guide-date-label').textContent =
+                isToday ? `Today — ${_guideDateLabel(_guideDate)}` : _guideDateLabel(_guideDate);
+
+            document.getElementById('guide-loading').classList.remove('hidden');
+            document.getElementById('guide-empty').classList.add('hidden');
+            document.getElementById('guide-wrapper').innerHTML = '';
+
+            // Send local midnight as a Unix timestamp so the backend uses the same
+            // day boundary as the user's clock, not UTC midnight.
+            const dayTs = Math.floor(_guideDate.getTime() / 1000);
+            try {
+                const res = await fetch(`/api/livetv/guide?ts=${dayTs}`);
+                _guideData = await res.json();
+            } catch (e) {
+                document.getElementById('guide-loading').classList.add('hidden');
+                document.getElementById('guide-empty').textContent = 'Failed to load guide data.';
+                document.getElementById('guide-empty').classList.remove('hidden');
+                return;
+            }
+
+            document.getElementById('guide-loading').classList.add('hidden');
+
+            if (!_guideData.channels || _guideData.channels.length === 0) {
+                document.getElementById('guide-empty').classList.remove('hidden');
+                return;
+            }
+
+            renderGuide(isToday);
+        }
+
+        function renderGuide(isToday) {
+            const wrapper   = document.getElementById('guide-wrapper');
+            const channels  = _guideData.channels;
+            const dayStart  = _guideData.day_start;
+            const totalMins = 24 * 60;
+            const totalW    = totalMins * GUIDE_PX_PER_MIN;   // 7200 px
+            const nowSec    = Date.now() / 1000;
+            const ROW_H     = 80;
+            const RULER_H   = 36;
+
+            // ── Left panel: channel column ────────────────────────────────────
+            // Fixed width, overflow:hidden — JS syncs its scrollTop from the right panel.
+            let leftHtml = `<div class="guide-corner" style="height:${RULER_H}px;"></div>`;
+            for (const ch of channels) {
+                const logoHtml = ch.logo_url
+                    ? `<img class="guide-ch-logo" src="${escapeHTML(ch.logo_url)}" alt="" onerror="this.style.display='none'">`
+                    : `<div class="guide-ch-logo-placeholder"></div>`;
+                leftHtml += `<div class="guide-channel-cell" style="height:${ROW_H}px;"
+                    data-tvgid="${escapeHTML(ch.tvg_id)}" data-chname="${escapeHTML(ch.name)}"
+                    onclick="openLogoModal(this)" title="Click to manage logo">
+                    ${logoHtml}
+                    <span class="guide-ch-name">${escapeHTML(ch.name)}</span>
+                    <span class="guide-ch-edit-hint">&#9998; Logo</span>
+                </div>`;
+            }
+
+            // ── Right panel: ruler + program rows ─────────────────────────────
+            // overflow:auto in both directions — this is the real scroll container.
+            let rulerHtml = `<div class="guide-ruler" style="width:${totalW}px;position:relative;">`;
+            for (let h = 0; h < 24; h++) {
+                rulerHtml += `<div class="guide-hour-label" style="left:${h * 60 * GUIDE_PX_PER_MIN}px;">${_guideFormatHour(h)}</div>`;
+            }
+            if (isToday) {
+                const nowLeft = Math.round(Math.min(totalMins, Math.max(0, (nowSec - dayStart) / 60)) * GUIDE_PX_PER_MIN);
+                rulerHtml += `<div class="guide-now-line" style="left:${nowLeft}px;"></div>`;
+            }
+            rulerHtml += `</div>`;
+
+            let rowsHtml = '';
+            for (const ch of channels) {
+                let progsHtml = '';
+                if (isToday) {
+                    const nowLeft = Math.round(Math.min(totalMins, Math.max(0, (nowSec - dayStart) / 60)) * GUIDE_PX_PER_MIN);
+                    progsHtml += `<div class="guide-now-line" style="left:${nowLeft}px;"></div>`;
+                }
+                for (const prog of ch.programs) {
+                    const startMin = (prog.start_ts - dayStart) / 60;
+                    const stopMin  = (prog.stop_ts  - dayStart) / 60;
+                    const s = Math.max(0, startMin);
+                    const e = Math.min(totalMins, stopMin);
+                    if (e <= s) continue;
+                    const left  = Math.round(s * GUIDE_PX_PER_MIN);
+                    const width = Math.max(2, Math.round((e - s) * GUIDE_PX_PER_MIN) - 2);
+                    const isLive = prog.start_ts <= nowSec && prog.stop_ts > nowSec;
+                    // Use data-scene / data-title so the title is never embedded inside
+                    // a JS string literal in the onclick — the browser would decode HTML
+                    // entities (&#39; → ') before the JS engine sees the string, breaking
+                    // any title that contains apostrophes.
+                    const sceneAttrs = prog.scene_id
+                        ? ` data-scene="${prog.scene_id}" data-title="${escapeHTML(prog.title)}" onclick="openSceneModal(this)"`
+                        : '';
+                    progsHtml += `<div class="guide-program${isLive ? ' guide-program-live' : ''}"
+                        style="left:${left}px;width:${width}px;"
+                        title="${escapeHTML(prog.title)}"${sceneAttrs}>
+                        <span class="guide-program-title">${escapeHTML(prog.title)}</span>
+                    </div>`;
+                }
+                rowsHtml += `<div class="guide-programs-row" style="width:${totalW}px;height:${ROW_H}px;">${progsHtml}</div>`;
+            }
+
+            wrapper.innerHTML =
+                `<div class="guide-left" id="guide-left">${leftHtml}</div>` +
+                `<div class="guide-right" id="guide-right">${rulerHtml}${rowsHtml}</div>`;
+
+            // Sync left panel vertical scroll to right panel's vertical scroll.
+            const rightEl = document.getElementById('guide-right');
+            const leftEl  = document.getElementById('guide-left');
+            rightEl.addEventListener('scroll', () => { leftEl.scrollTop = rightEl.scrollTop; });
+
+            // Scroll to current time, roughly centred in a 4-hour viewport.
+            if (isToday) {
+                const nowMin  = Math.max(0, (nowSec - dayStart) / 60);
+                rightEl.scrollLeft = Math.max(0, nowMin * GUIDE_PX_PER_MIN - 600);
+            }
+        }
+
+        function guideShiftDay(delta) {
+            if (!_guideDate) _guideDate = _guideDateMidnightLocal(new Date());
+            // Add/subtract whole days and re-snap to local midnight (handles DST transitions).
+            const next = new Date(_guideDate);
+            next.setDate(next.getDate() + delta);
+            _guideDate = _guideDateMidnightLocal(next);
+            loadGuide();
+        }
+
+        function guideJumpToNow() {
+            _guideDate = _guideDateMidnightLocal(new Date());
+            loadGuide();
+        }
+
+        // ── Logo modal ────────────────────────────────────────────────────────
+
+        function openLogoModal(el) {
+            const tvgId       = el.dataset.tvgid;
+            const channelName = el.dataset.chname;
+            _logoModalTvgId = tvgId;
+            document.getElementById('logo-modal-title').textContent = channelName;
+            document.getElementById('logo-file-input').value = '';
+            document.getElementById('logo-upload-status').textContent = '';
+
+            const preview = document.getElementById('logo-modal-preview');
+            // Find the current logo URL from guide data
+            const ch = (_guideData && _guideData.channels)
+                ? _guideData.channels.find(c => c.tvg_id === tvgId)
+                : null;
+            if (ch && ch.logo_url) {
+                preview.src = ch.logo_url;
+                preview.style.display = 'block';
+            } else {
+                preview.src = '';
+                preview.style.display = 'none';
+            }
+
+            document.getElementById('logo-modal-overlay').style.display = 'flex';
+        }
+
+        function closeLogoModal() {
+            document.getElementById('logo-modal-overlay').style.display = 'none';
+            _logoModalTvgId = null;
+        }
+
+        function previewLogoFile(input) {
+            const preview = document.getElementById('logo-modal-preview');
+            if (input.files && input.files[0]) {
+                const reader = new FileReader();
+                reader.onload = e => { preview.src = e.target.result; preview.style.display = 'block'; };
+                reader.readAsDataURL(input.files[0]);
+            }
+        }
+
+        async function uploadLogo() {
+            const fileInput = document.getElementById('logo-file-input');
+            const status    = document.getElementById('logo-upload-status');
+            if (!_logoModalTvgId || !fileInput.files.length) {
+                status.textContent = 'Please select a file first.';
+                status.style.color = 'var(--warning)';
+                return;
+            }
+            status.textContent = 'Uploading…';
+            status.style.color = 'var(--text-secondary)';
+            const form = new FormData();
+            form.append('file', fileInput.files[0]);
+            try {
+                const res = await fetch(`/api/livetv/channel-logo/${_logoModalTvgId}`, { method: 'POST', body: form });
+                if (res.ok) {
+                    showToast('Logo saved', 'success');
+                    closeLogoModal();
+                    loadGuide();
+                } else {
+                    const data = await res.json().catch(() => ({}));
+                    status.textContent = data.error || 'Upload failed.';
+                    status.style.color = 'var(--error)';
+                }
+            } catch (e) {
+                status.textContent = 'Network error.';
+                status.style.color = 'var(--error)';
+            }
+        }
+
+        async function clearLogo() {
+            if (!_logoModalTvgId) return;
+            if (!confirm('Remove custom logo and revert to default art?')) return;
+            try {
+                const res = await fetch(`/api/livetv/channel-logo/${_logoModalTvgId}`, { method: 'DELETE' });
+                if (res.ok) {
+                    showToast('Custom logo cleared', 'success');
+                    closeLogoModal();
+                    loadGuide();
+                } else {
+                    showToast('Clear failed', 'error');
+                }
+            } catch (e) {
+                showToast('Network error', 'error');
+            }
+        }
+
+        // ── Scene detail modal ────────────────────────────────────────────────
+
+        async function openSceneModal(el) {
+            const sceneId = el.dataset.scene;
+            // dataset.title is the HTML-decoded value — browser converts &#39; → '
+            // before we see it here, so apostrophes are already correct.
+            const title = el.dataset.title || el.getAttribute('title') || '';
+
+            const overlay = document.getElementById('scene-modal-overlay');
+            overlay.style.display = 'flex';
+
+            // Reset to loading state
+            document.getElementById('scene-modal-title-el').textContent = title;
+            document.getElementById('scene-modal-studio').textContent = '';
+            document.getElementById('scene-modal-meta').textContent = 'Loading…';
+            document.getElementById('scene-modal-stats').innerHTML = '';
+            document.getElementById('scene-modal-desc').textContent = '';
+            document.getElementById('scene-modal-performers').innerHTML = '';
+            document.getElementById('scene-modal-tags').innerHTML = '';
+            document.getElementById('scene-modal-performers-section').style.display = 'none';
+            document.getElementById('scene-modal-tags-section').style.display = 'none';
+            document.getElementById('scene-modal-desc-section').style.display = 'none';
+
+            const poster = document.getElementById('scene-modal-poster');
+            poster.style.display = 'block';
+            poster.src = `/api/livetv/scene/${sceneId}/screenshot`;
+
+            try {
+                const res = await fetch(`/api/livetv/scene/${sceneId}`);
+                const scene = await res.json();
+                if (!res.ok) throw new Error(scene.error || res.status);
+
+                document.getElementById('scene-modal-title-el').textContent = scene.title || title;
+                document.getElementById('scene-modal-studio').textContent = scene.studio || '';
+
+                // Meta row: date · runtime · rating · code
+                const metaParts = [];
+                if (scene.date) metaParts.push({ icon: '📅', text: scene.date });
+                if (scene.duration) metaParts.push({ icon: '⏱', text: formatDuration(scene.duration) });
+                if (scene.rating !== null && scene.rating !== undefined && scene.rating > 0) {
+                    metaParts.push({ icon: '⭐', text: `${(scene.rating / 10).toFixed(1)} / 10` });
+                }
+                if (scene.code) metaParts.push({ icon: '#', text: scene.code });
+                document.getElementById('scene-modal-meta').innerHTML = metaParts
+                    .map(p => `<span class="scene-modal-meta-item"><span>${p.icon}</span><span>${escapeHTML(String(p.text))}</span></span>`)
+                    .join('');
+
+                // Stats row
+                const statParts = [];
+                if (scene.play_count > 0) statParts.push(`Plays: <span class="scene-modal-stat-val">${scene.play_count}</span>`);
+                if (scene.o_counter > 0)  statParts.push(`O-Counter: <span class="scene-modal-stat-val">${scene.o_counter}</span>`);
+                if (scene.organized)      statParts.push(`<span class="scene-modal-stat-val" style="color:var(--success)">✓ Organized</span>`);
+                document.getElementById('scene-modal-stats').innerHTML = statParts.join('  ·  ');
+
+                // Description
+                if (scene.details) {
+                    document.getElementById('scene-modal-desc').textContent = scene.details;
+                    document.getElementById('scene-modal-desc-section').style.display = '';
+                }
+
+                // Performers
+                if (scene.performers && scene.performers.length) {
+                    document.getElementById('scene-modal-performers').innerHTML =
+                        scene.performers.map(p => `<span class="scene-pill scene-pill-performer">${escapeHTML(p)}</span>`).join('');
+                    document.getElementById('scene-modal-performers-section').style.display = '';
+                }
+
+                // Tags
+                if (scene.tags && scene.tags.length) {
+                    document.getElementById('scene-modal-tags').innerHTML =
+                        scene.tags.map(t => `<span class="scene-pill">${escapeHTML(t)}</span>`).join('');
+                    document.getElementById('scene-modal-tags-section').style.display = '';
+                }
+
+            } catch (e) {
+                document.getElementById('scene-modal-meta').textContent = 'Failed to load scene details.';
+            }
+        }
+
+        function closeSceneModal() {
+            document.getElementById('scene-modal-overlay').style.display = 'none';
+        }
+
+        // Close modals on Escape key
+        document.addEventListener('keydown', e => {
+            if (e.key === 'Escape') {
+                closeSceneModal();
+                closeLogoModal();
+            }
+        });
     </script>

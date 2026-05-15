@@ -1,0 +1,74 @@
+    <div id="page-guide" class="page hidden">
+        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
+            <h2 class="page-title" style="margin-bottom:0;">TV Guide</h2>
+        </div>
+
+        <div class="guide-nav">
+            <button class="guide-nav-btn" onclick="guideShiftDay(-1)">&#8592; Prev</button>
+            <span class="guide-date-label" id="guide-date-label"></span>
+            <button class="guide-nav-btn guide-now-btn" onclick="guideJumpToNow()">Now</button>
+            <button class="guide-nav-btn" onclick="guideShiftDay(1)">Next &#8594;</button>
+        </div>
+
+        <div id="guide-loading" class="empty-state hidden">Loading schedule&hellip;</div>
+        <div id="guide-empty" class="empty-state hidden">No channels scheduled. Enable Stash channels in Configuration.</div>
+
+        <div class="guide-wrapper" id="guide-wrapper"></div>
+    </div>
+
+    <!-- Scene detail modal -->
+    <div id="scene-modal-overlay" class="scene-modal-overlay" onclick="if(event.target===this)closeSceneModal()">
+        <div class="scene-modal-card">
+            <button class="scene-modal-close" onclick="closeSceneModal()">&times;</button>
+            <div class="scene-modal-top">
+                <img id="scene-modal-poster" class="scene-modal-poster" src="" alt="" onerror="this.style.display='none'">
+                <div class="scene-modal-header-info">
+                    <div class="scene-modal-title" id="scene-modal-title-el"></div>
+                    <div class="scene-modal-studio" id="scene-modal-studio"></div>
+                    <div class="scene-modal-meta" id="scene-modal-meta"></div>
+                    <div class="scene-modal-stats" id="scene-modal-stats" style="margin-top:auto;"></div>
+                </div>
+            </div>
+            <div class="scene-modal-body">
+                <div class="scene-modal-section" id="scene-modal-desc-section">
+                    <div class="scene-modal-section-title">Description</div>
+                    <div class="scene-modal-desc" id="scene-modal-desc"></div>
+                </div>
+                <div class="scene-modal-section" id="scene-modal-performers-section">
+                    <div class="scene-modal-section-title">Performers</div>
+                    <div class="scene-modal-pills" id="scene-modal-performers"></div>
+                </div>
+                <div class="scene-modal-section" id="scene-modal-tags-section">
+                    <div class="scene-modal-section-title">Tags</div>
+                    <div class="scene-modal-pills" id="scene-modal-tags"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Logo management modal -->
+    <div id="logo-modal-overlay" class="logo-modal-overlay" onclick="if(event.target===this)closeLogoModal()">
+        <div class="logo-modal-card">
+            <div class="logo-modal-header">
+                <span class="logo-modal-title" id="logo-modal-title">Channel Logo</span>
+                <button class="logo-modal-close" onclick="closeLogoModal()">&times;</button>
+            </div>
+
+            <img id="logo-modal-preview" class="logo-preview" src="" alt="Current logo" onerror="this.style.display='none'">
+
+            <div class="logo-modal-section">
+                <div class="logo-modal-label">Upload custom logo</div>
+                <input type="file" id="logo-file-input" accept=".jpg,.jpeg,.png,.webp,.gif"
+                       class="form-input" style="padding:6px;" onchange="previewLogoFile(this)">
+                <div class="form-hint">PNG, JPG, WebP, or GIF. Replaces the current art in Jellyfin.</div>
+            </div>
+
+            <div id="logo-upload-status" style="font-size:13px; min-height:18px;"></div>
+
+            <div class="logo-modal-actions">
+                <button class="btn btn-primary" onclick="uploadLogo()" style="flex:1;">Save Logo</button>
+                <button class="btn btn-secondary" onclick="clearLogo()" style="color:var(--error); border-color:var(--error);">Clear Custom</button>
+                <button class="btn btn-secondary" onclick="closeLogoModal()">Cancel</button>
+            </div>
+        </div>
+    </div>

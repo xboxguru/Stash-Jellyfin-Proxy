@@ -1,7 +1,9 @@
 import asyncio
+import glob
 import hashlib
 import json
 import logging
+import mimetypes
 import os
 import random
 import re
@@ -9,11 +11,12 @@ import shutil
 import tempfile
 import time
 import xml.etree.ElementTree as ET
+from datetime import date as _date_cls
 from datetime import datetime, timedelta, timezone
 
 import httpx
 from starlette.requests import Request
-from starlette.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
+from starlette.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 import config
@@ -245,6 +248,25 @@ def _to_uuid_key(hex_id: str) -> str:
 def _logo_tag(logo_url: str) -> str:
     """Stable image-tag hash derived from the logo URL."""
     return hashlib.md5(logo_url.encode()).hexdigest() if logo_url else ""
+
+
+def _logo_dir() -> str:
+    """Return (and create) the directory where custom channel logos are stored."""
+    d = os.path.join(config.LOG_DIR, "channel_logos")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _custom_logo_path(tvg_id: str) -> str | None:
+    """Return the path to a custom logo file for this channel, or None."""
+    if not tvg_id:
+        return None
+    base = os.path.join(config.LOG_DIR, "channel_logos", tvg_id)
+    for ext in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+        p = base + ext
+        if os.path.exists(p):
+            return p
+    return None
 
 
 def _stash_screenshot_url(scene_id: str) -> str:
@@ -514,12 +536,17 @@ async def _fetch_scenes_for_stash_channel(ch: dict) -> list[dict]:
     return result
 
 
-def _build_random_schedule(scenes: list[dict]) -> list[dict]:
-    """Build a time-indexed schedule by drawing scenes in random order.
+def _new_eid() -> str:
+    """Generate a compact random entry ID (8 hex chars, ~4 billion space)."""
+    return os.urandom(4).hex()
 
-    Fills the window [now - KEEP_DAYS, now + SCHEDULE_DAYS].  Scenes are
-    drawn from a shuffled pool; when the pool is exhausted it is refilled and
-    reshuffled so no scene repeats until every other scene has aired.
+
+def _build_random_schedule(scenes: list[dict]) -> list[dict]:
+    """Build a full schedule from scratch for a channel.
+
+    Fills [now - KEEP_DAYS, now + SCHEDULE_DAYS].  Scenes cycle through a
+    shuffled pool; when exhausted the pool refills so no scene repeats until
+    every other scene has aired once.  Each entry receives a stable eid.
     """
     if not scenes:
         return []
@@ -542,6 +569,7 @@ def _build_random_schedule(scenes: list[dict]) -> list[dict]:
         s = pool.pop()
         stop = cursor + s["duration_sec"]
         entries.append({
+            "eid": _new_eid(),
             "start_ts": cursor,
             "stop_ts": stop,
             "scene_id": s["id"],
@@ -574,15 +602,108 @@ def _build_shorts_block_schedule() -> list[dict]:
     cursor = window_start
     while cursor < window_end:
         entries.append({
+            "eid": _new_eid(),
             "start_ts":    cursor,
             "stop_ts":     cursor + BLOCK_SECS,
-            "scene_id":    None,          # synthetic — no individual scene
+            "scene_id":    None,
             "title":       "Shorts",
             "duration_sec": BLOCK_SECS,
         })
         cursor += BLOCK_SECS
 
     return entries
+
+
+def _maintenance_extend_channel(
+    existing: list[dict],
+    all_scenes: list[dict],
+    keep_days: int,
+    sched_days: int,
+) -> tuple[list[dict], int, int]:
+    """Prune stale entries and extend a channel's schedule to fill the window.
+
+    Scenes already retained in the schedule are treated as "used" — new
+    entries draw from the remaining pool first, cycling through all available
+    scenes before any repeats.  Returns (updated_entries, pruned_count, added_count).
+    """
+    now = time.time()
+    cutoff     = now - keep_days * 86400
+    target_end = now + sched_days * 86400
+
+    retained  = [e for e in existing if e.get("stop_ts", 0) > cutoff]
+    pruned    = len(existing) - len(retained)
+    frontier  = max((e["stop_ts"] for e in retained), default=cutoff)
+
+    if frontier >= target_end:
+        return retained, pruned, 0
+
+    # Scenes in the retained schedule are "used"; everything else is available.
+    used_ids  = {e["scene_id"] for e in retained if e.get("scene_id")}
+    available = [s for s in all_scenes if s["id"] not in used_ids]
+    random.shuffle(available)
+    used      = [s for s in all_scenes if s["id"] in used_ids]
+
+    if not available:
+        # Every scene is already scheduled — start a fresh cycle.
+        available = list(all_scenes)
+        random.shuffle(available)
+        used = []
+
+    new_entries: list[dict] = []
+    cursor = frontier
+    while cursor < target_end:
+        if not available:
+            available = used
+            random.shuffle(available)
+            used = []
+        s = available.pop()
+        used.append(s)
+        stop = cursor + s["duration_sec"]
+        new_entries.append({
+            "eid":          _new_eid(),
+            "start_ts":     cursor,
+            "stop_ts":      stop,
+            "scene_id":     s["id"],
+            "title":        s["title"],
+            "duration_sec": s["duration_sec"],
+        })
+        cursor = stop
+
+    return retained + new_entries, pruned, len(new_entries)
+
+
+def _maintenance_extend_shorts(
+    existing: list[dict],
+    keep_days: int,
+    sched_days: int,
+) -> tuple[list[dict], int, int]:
+    """Prune stale Shorts blocks and append new ones to fill the window."""
+    BLOCK_SECS = 1800
+    now        = time.time()
+    cutoff     = now - keep_days * 86400
+    target_end = now + sched_days * 86400
+
+    retained = [e for e in existing if e.get("stop_ts", 0) > cutoff]
+    pruned   = len(existing) - len(retained)
+    frontier = max((e["stop_ts"] for e in retained), default=cutoff)
+
+    if frontier >= target_end:
+        return retained, pruned, 0
+
+    new_entries: list[dict] = []
+    cursor = frontier
+    while cursor < target_end:
+        new_entries.append({
+            "eid":          _new_eid(),
+            "start_ts":     cursor,
+            "stop_ts":      cursor + BLOCK_SECS,
+            "scene_id":     None,
+            "title":        "Shorts",
+            "duration_sec": BLOCK_SECS,
+        })
+        cursor += BLOCK_SECS
+
+    return retained + new_entries, pruned, len(new_entries)
 
 
 async def _get_stash_channels() -> list[dict]:
@@ -700,10 +821,62 @@ async def _rebuild_stash_schedules():
         _save_schedule()
 
 
+async def _run_maintenance_update():
+    """Prune old entries and extend each channel's schedule forward.
+
+    Preserves all existing entries within the keep-days window so users see
+    the same schedule they already looked at.  Only prunes the past and
+    appends new content at the end.
+    """
+    global _stash_schedule, _stash_schedule_built_at
+
+    if not getattr(config, "ENABLE_STASH_CHANNELS", False):
+        return
+
+    async with _rebuild_lock:
+        channels  = await _get_stash_channels()
+        keep_days = max(1, int(getattr(config, "STASH_KEEP_DAYS", 2)))
+        sched_days = max(1, int(getattr(config, "STASH_SCHEDULE_DAYS", 7)))
+        changed   = False
+
+        for ch in channels:
+            tvg_id   = ch["tvg_id"]
+            existing = _stash_schedule.get(tvg_id, [])
+            try:
+                if ch.get("stash_type") == "shorts":
+                    updated, pruned, added = _maintenance_extend_shorts(existing, keep_days, sched_days)
+                else:
+                    scenes = await _fetch_scenes_for_stash_channel(ch)
+                    if not scenes:
+                        continue
+                    updated, pruned, added = _maintenance_extend_channel(existing, scenes, keep_days, sched_days)
+
+                if pruned or added:
+                    logger.info(
+                        f"LiveTV maintenance: '{ch['name']}' pruned={pruned} added={added} "
+                        f"total={len(updated)}"
+                    )
+                _stash_schedule[tvg_id] = updated
+                changed = True
+            except Exception as e:
+                logger.error(f"LiveTV maintenance: failed for '{ch['name']}': {e}", exc_info=True)
+
+        if changed:
+            _stash_schedule_built_at = time.time()
+            _save_schedule()
+
+
 async def _ensure_stash_schedules():
-    """Rebuild schedules if stale or empty (safety net for first request)."""
-    if time.time() - _stash_schedule_built_at > _SCHEDULE_TTL:
+    """Bootstrap or refresh schedules on first request.
+
+    - No schedule at all → full rebuild (first run or after a manual clear).
+    - Schedule loaded from disk but older than TTL → incremental maintenance
+      (preserves existing entries, only prunes + extends).
+    """
+    if not _stash_schedule:
         await _rebuild_stash_schedules()
+    elif time.time() - _stash_schedule_built_at > _SCHEDULE_TTL:
+        await _run_maintenance_update()
 
 
 # ---------------------------------------------------------------------------
@@ -714,12 +887,12 @@ _maintenance_task: asyncio.Task | None = None
 
 
 async def _schedule_maintenance_loop():
-    """Prune old schedule entries and extend the window — runs every 24 hours."""
+    """Prune old entries and extend the schedule window — runs every 24 hours."""
     while True:
         await asyncio.sleep(_SCHEDULE_TTL)
         logger.info("LiveTV: 24h maintenance — pruning old entries and extending schedule window")
         try:
-            await _rebuild_stash_schedules()
+            await _run_maintenance_update()
         except Exception as e:
             logger.error(f"LiveTV: scheduled maintenance failed: {e}", exc_info=True)
 
@@ -1061,7 +1234,13 @@ def _channel_to_jellyfin(ch: dict, server_id: str, item_id: str | None = None,
     # Id and ItemId must be non-hyphenated (Jellyfin normalizes on the way in but stores raw)
     item_id = item_id.replace("-", "")
     logo = ch.get("logo", "")
-    tag = _logo_tag(logo) if logo else ""
+    custom = _custom_logo_path(ch.get("tvg_id", ""))
+    if custom:
+        tag = hashlib.md5(f"custom:{ch['tvg_id']}:{os.path.getmtime(custom):.0f}".encode()).hexdigest()
+    elif logo:
+        tag = _logo_tag(logo)
+    else:
+        tag = ""
     num = ch.get("number", "")
     sort_name = f"{str(num).zfill(5)}.0-{ch['name']}"
     livetv_parent = encode_id("root", "livetv")
@@ -1650,3 +1829,203 @@ async def endpoint_rebuild_schedule(request: Request):
     prog_count = sum(len(v) for v in _stash_schedule.values())
     logger.info(f"Schedule rebuild complete: {channel_count} channels, {prog_count} entries")
     return JSONResponse({"ok": True, "channels": channel_count, "programs": prog_count})
+
+
+async def endpoint_guide_data(request: Request):
+    """Return full-day EPG data for all Stash channels.
+
+    Query params:
+        date (optional): YYYY-MM-DD in UTC; defaults to today UTC.
+    """
+    # Prefer a Unix timestamp sent by the browser (local midnight in the user's
+    # timezone).  Fall back to a YYYY-MM-DD date string interpreted as UTC midnight,
+    # then to today UTC midnight.
+    ts_str   = request.query_params.get("ts", "")
+    date_str = request.query_params.get("date", "")
+    try:
+        if ts_str:
+            day_start = int(float(ts_str))
+        elif date_str:
+            d = _date_cls.fromisoformat(date_str)
+            day_start = int(datetime(d.year, d.month, d.day, tzinfo=timezone.utc).timestamp())
+        else:
+            d = _date_cls.today()
+            day_start = int(datetime(d.year, d.month, d.day, tzinfo=timezone.utc).timestamp())
+    except Exception:
+        return JSONResponse({"error": "invalid date"}, status_code=400)
+
+    day_end = day_start + 86400
+
+    if not getattr(config, "ENABLE_STASH_CHANNELS", False):
+        return JSONResponse({"date": str(d), "day_start": day_start, "day_end": day_end, "channels": []})
+
+    await _ensure_stash_schedules()
+    # _ensure_stash_schedules loads/builds the schedule but does NOT populate
+    # _stash_channels_cache if the schedule was already on disk.  Load it now.
+    channels = _stash_channels_cache["data"]
+    if channels is None:
+        channels = await _get_stash_channels()
+
+    result: list[dict] = []
+    for ch in channels:
+        tvg_id = ch["tvg_id"]
+        schedule = _stash_schedule.get(tvg_id, [])
+
+        programs = []
+        for entry in schedule:
+            if entry["stop_ts"] <= day_start or entry["start_ts"] >= day_end:
+                continue
+            programs.append({
+                "eid": entry.get("eid", ""),
+                "start_ts": entry["start_ts"],
+                "stop_ts": entry["stop_ts"],
+                "title": entry["title"],
+                "scene_id": entry.get("scene_id"),
+            })
+
+        # Build a logo URL that will bust the browser cache when the custom file changes.
+        custom = _custom_logo_path(tvg_id)
+        if custom:
+            logo_url = f"/api/livetv/channel-logo/{tvg_id}?v={int(os.path.getmtime(custom))}"
+        elif ch.get("logo"):
+            logo_url = f"/api/livetv/channel-logo/{tvg_id}"
+        else:
+            logo_url = ""
+
+        result.append({
+            "tvg_id": tvg_id,
+            "name": ch["name"],
+            "number": ch.get("number", ""),
+            "logo_url": logo_url,
+            "programs": programs,
+        })
+
+    date_label = datetime.fromtimestamp(day_start, tz=timezone.utc).strftime("%Y-%m-%d")
+    return JSONResponse({"date": date_label, "day_start": day_start, "day_end": day_end, "channels": result})
+
+
+async def endpoint_channel_logo_get(request: Request):
+    """Serve the logo for a channel: custom file → Stash proxy → 404."""
+    tvg_id = request.path_params.get("tvg_id", "")
+
+    custom = _custom_logo_path(tvg_id)
+    if custom:
+        mt = mimetypes.guess_type(custom)[0] or "image/jpeg"
+        return FileResponse(custom, media_type=mt, headers={"Cache-Control": "public, max-age=3600"})
+
+    channels = _stash_channels_cache["data"] or []
+    ch = next((c for c in channels if c["tvg_id"] == tvg_id), None)
+    if ch and ch.get("logo"):
+        from api.image_routes import _proxy_image
+        return await _proxy_image(ch["logo"])
+
+    return Response(status_code=404)
+
+
+async def endpoint_channel_logo_upload(request: Request):
+    """Upload a custom logo for a channel (multipart/form-data, field name: 'file')."""
+    tvg_id = request.path_params.get("tvg_id", "")
+    if not re.match(r'^[a-zA-Z0-9_-]{1,60}$', tvg_id):
+        return JSONResponse({"error": "invalid tvg_id"}, status_code=400)
+
+    try:
+        form = await request.form()
+        upload = form.get("file")
+        if not upload or not getattr(upload, "filename", None):
+            return JSONResponse({"error": "no file provided"}, status_code=400)
+
+        ext = os.path.splitext(upload.filename)[1].lower()
+        if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+            return JSONResponse({"error": "unsupported file type"}, status_code=400)
+
+        logo_dir = _logo_dir()
+        # Remove any existing custom logo for this channel (any extension)
+        for existing in glob.glob(os.path.join(logo_dir, f"{tvg_id}.*")):
+            os.remove(existing)
+
+        dest = os.path.join(logo_dir, f"{tvg_id}{ext}")
+        content = await upload.read()
+        with open(dest, "wb") as fh:
+            fh.write(content)
+
+        logger.info(f"LiveTV: custom logo saved for '{tvg_id}' ({len(content)} bytes) → {dest}")
+        return JSONResponse({"ok": True})
+    except Exception as exc:
+        logger.error(f"LiveTV: logo upload failed for '{tvg_id}': {exc}")
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+async def endpoint_scene_detail(request: Request):
+    """Return scene metadata for the guide scene-detail popup (no file paths)."""
+    scene_id = request.path_params.get("scene_id", "")
+    if not re.match(r'^\d+$', scene_id):
+        return JSONResponse({"error": "invalid scene id"}, status_code=400)
+
+    from core import stash_client
+    scene = await stash_client.get_scene(scene_id)
+    if not scene:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    duration = None
+    files = scene.get("files") or []
+    if files:
+        duration = files[0].get("duration")
+
+    result = {
+        "id": scene.get("id"),
+        "title": scene.get("title") or "",
+        "code": scene.get("code") or "",
+        "date": scene.get("date") or "",
+        "details": scene.get("details") or "",
+        "rating": scene.get("rating100"),
+        "o_counter": scene.get("o_counter", 0),
+        "play_count": scene.get("play_count", 0),
+        "organized": scene.get("organized", False),
+        "studio": (scene.get("studio") or {}).get("name", ""),
+        "performers": [p["name"] for p in (scene.get("performers") or [])],
+        "tags": [t["name"] for t in (scene.get("tags") or [])],
+        "duration": duration,
+    }
+    return JSONResponse(result)
+
+
+async def endpoint_scene_screenshot(request: Request):
+    """Proxy the Stash screenshot for a scene so the guide modal can display it."""
+    scene_id = request.path_params.get("scene_id", "")
+    if not re.match(r'^\d+$', scene_id):
+        return Response(status_code=400)
+
+    stash_base = config.get_stash_base()
+    apikey = getattr(config, "STASH_API_KEY", "")
+    url = f"{stash_base}/scene/{scene_id}/screenshot"
+    if apikey:
+        url += f"?apikey={apikey}"
+
+    try:
+        r = await _live_client.get(url)
+        if r.status_code != 200:
+            return Response(status_code=r.status_code)
+        ct = r.headers.get("content-type", "image/jpeg")
+        return Response(r.content, media_type=ct, headers={"Cache-Control": "public, max-age=3600"})
+    except Exception as exc:
+        logger.error(f"LiveTV: scene screenshot proxy failed for {scene_id}: {exc}")
+        return Response(status_code=502)
+
+
+async def endpoint_channel_logo_delete(request: Request):
+    """Delete the custom logo for a channel, reverting to Stash art or default."""
+    tvg_id = request.path_params.get("tvg_id", "")
+    if not re.match(r'^[a-zA-Z0-9_-]{1,60}$', tvg_id):
+        return JSONResponse({"error": "invalid tvg_id"}, status_code=400)
+
+    custom = _custom_logo_path(tvg_id)
+    if not custom:
+        return JSONResponse({"ok": True, "removed": False})
+
+    try:
+        os.remove(custom)
+        logger.info(f"LiveTV: custom logo cleared for '{tvg_id}'")
+        return JSONResponse({"ok": True, "removed": True})
+    except Exception as exc:
+        logger.error(f"LiveTV: logo delete failed for '{tvg_id}': {exc}")
+        return JSONResponse({"error": str(exc)}, status_code=500)

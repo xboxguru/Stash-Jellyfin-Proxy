@@ -132,4 +132,71 @@
         .collapsed .collapse-icon { transform: rotate(-90deg); }
         .collapsible-content { overflow: hidden; transition: max-height 0.3s ease-out; max-height: 500px; }
         .collapsible-content.hidden { max-height: 0; padding: 0; border: none; opacity: 0; }
+
+        /* ── TV Guide — two-panel layout ──────────────────────────────────── */
+        .guide-nav { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+        .guide-nav-btn { padding: 7px 14px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); cursor: pointer; font-size: 13px; transition: background 0.2s; }
+        .guide-nav-btn:hover { background: var(--accent); border-color: var(--accent); color: white; }
+        .guide-nav-btn.guide-now-btn { background: var(--accent); color: white; border-color: var(--accent); }
+        .guide-nav-btn.guide-now-btn:hover { background: var(--accent-hover); }
+        .guide-date-label { font-size: 15px; font-weight: 600; flex: 1; text-align: center; }
+        /* Outer container: flex row, fixed height, no overflow (overflow lives in the two panels) */
+        .guide-wrapper { display: flex; height: calc(100vh - 230px); min-height: 300px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg-primary); }
+        /* Left panel: channel column — only the right panel scrolls horizontally */
+        .guide-left { width: 160px; flex-shrink: 0; overflow: hidden; display: flex; flex-direction: column; border-right: 1px solid var(--border); }
+        .guide-corner { height: 36px; flex-shrink: 0; background: var(--bg-secondary); border-bottom: 1px solid var(--border); }
+        .guide-channel-cell { height: 80px; flex-shrink: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; padding: 6px; background: var(--bg-card); border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.15s; overflow: hidden; }
+        .guide-channel-cell:hover { background: var(--bg-secondary); }
+        .guide-ch-logo { width: 44px; height: 44px; object-fit: contain; border-radius: 4px; background: var(--bg-primary); flex-shrink: 0; }
+        .guide-ch-logo-placeholder { width: 44px; height: 44px; border-radius: 4px; background: var(--bg-secondary); border: 1px dashed var(--border); flex-shrink: 0; }
+        .guide-ch-name { font-size: 11px; color: var(--text-secondary); text-align: center; line-height: 1.3; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+        .guide-ch-edit-hint { font-size: 10px; color: var(--accent); opacity: 0; transition: opacity 0.15s; flex-shrink: 0; }
+        .guide-channel-cell:hover .guide-ch-edit-hint { opacity: 1; }
+        /* Right panel: ruler + programs — scrolls both directions */
+        .guide-right { flex: 1; overflow: auto; min-width: 0; }
+        .guide-ruler { position: sticky; top: 0; z-index: 10; height: 36px; background: var(--bg-secondary); border-bottom: 1px solid var(--border); }
+        .guide-hour-label { position: absolute; top: 0; height: 100%; display: flex; align-items: center; padding-left: 6px; font-size: 11px; color: var(--text-secondary); border-left: 1px solid var(--border); white-space: nowrap; pointer-events: none; box-sizing: border-box; }
+        .guide-programs-row { position: relative; height: 80px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+        .guide-programs-row:last-child { border-bottom: none; }
+        .guide-program { position: absolute; top: 4px; bottom: 4px; border-radius: 4px; background: var(--bg-card); border: 1px solid var(--border); overflow: hidden; padding: 4px 6px; transition: border-color 0.15s, background 0.15s; box-sizing: border-box; }
+        .guide-program:hover { border-color: var(--accent); z-index: 5; }
+        .guide-program[data-scene] { cursor: pointer; }
+        .guide-program[data-scene]:hover { background: rgba(74,144,217,0.12); }
+        .guide-program-live { background: rgba(74, 144, 217, 0.18); border-color: var(--accent); }
+        .guide-program-title { display: block; font-size: 11px; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.4; }
+        .guide-now-line { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent); z-index: 5; pointer-events: none; }
+
+        /* ── Logo modal ───────────────────────────────────────────────────── */
+        .logo-modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15,15,26,0.85); z-index: 9999; justify-content: center; align-items: center; backdrop-filter: blur(4px); }
+        .logo-modal-card { background: var(--bg-card); border-radius: 8px; padding: 28px; width: 100%; max-width: 440px; position: relative; }
+        .logo-modal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+        .logo-modal-title { font-size: 16px; font-weight: 600; color: var(--text-primary); }
+        .logo-modal-close { background: none; border: none; color: var(--text-secondary); font-size: 22px; cursor: pointer; padding: 2px 6px; }
+        .logo-modal-close:hover { color: var(--text-primary); }
+        .logo-preview { width: 80px; height: 80px; object-fit: contain; border-radius: 6px; background: var(--bg-secondary); border: 1px solid var(--border); margin-bottom: 16px; display: block; }
+        .logo-modal-section { margin-bottom: 16px; }
+        .logo-modal-label { font-size: 12px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+        .logo-modal-actions { display: flex; gap: 10px; margin-top: 20px; }
+
+        /* ── Scene detail modal ───────────────────────────────────────────── */
+        .scene-modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15,15,26,0.90); z-index: 9998; justify-content: center; align-items: center; backdrop-filter: blur(4px); padding: 20px; box-sizing: border-box; }
+        .scene-modal-card { background: var(--bg-card); border-radius: 10px; width: 100%; max-width: 720px; max-height: 85vh; overflow-y: auto; position: relative; }
+        .scene-modal-top { display: flex; }
+        .scene-modal-poster { width: 213px; min-width: 213px; height: 120px; object-fit: cover; border-radius: 10px 0 0 0; flex-shrink: 0; background: var(--bg-secondary); display: block; }
+        .scene-modal-header-info { flex: 1; padding: 14px 40px 14px 18px; display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+        .scene-modal-title { font-size: 17px; font-weight: 700; color: var(--text-primary); line-height: 1.35; }
+        .scene-modal-studio { font-size: 13px; color: var(--accent); font-weight: 500; }
+        .scene-modal-meta { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; color: var(--text-secondary); margin-top: 4px; }
+        .scene-modal-meta-item { display: flex; align-items: center; gap: 4px; }
+        .scene-modal-body { padding: 14px 20px 20px; }
+        .scene-modal-section { margin-bottom: 14px; }
+        .scene-modal-section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-secondary); margin-bottom: 7px; font-weight: 600; }
+        .scene-modal-desc { font-size: 13px; color: var(--text-primary); line-height: 1.65; white-space: pre-wrap; }
+        .scene-modal-pills { display: flex; flex-wrap: wrap; gap: 6px; }
+        .scene-pill { padding: 3px 10px; border-radius: 12px; font-size: 12px; background: var(--bg-secondary); border: 1px solid var(--border); color: var(--text-primary); white-space: nowrap; }
+        .scene-pill-performer { border-color: var(--accent); color: var(--accent); }
+        .scene-modal-close { position: absolute; top: 10px; right: 14px; background: rgba(0,0,0,0.4); border: none; color: var(--text-secondary); font-size: 20px; cursor: pointer; z-index: 1; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; border-radius: 50%; }
+        .scene-modal-close:hover { color: white; background: rgba(0,0,0,0.7); }
+        .scene-modal-stats { display: flex; flex-wrap: wrap; gap: 16px; font-size: 12px; color: var(--text-secondary); }
+        .scene-modal-stat-val { font-weight: 600; color: var(--text-primary); }
     </style>

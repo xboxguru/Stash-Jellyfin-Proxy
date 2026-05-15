@@ -232,6 +232,12 @@ routes = [
     Route('/api/quickconnect/authorize', auth_routes.endpoint_quickconnect_authorize, methods=['POST']),
     Route("/api/sysinfo", ui_routes.api_get_sysinfo, methods=["GET"]),
     Route("/api/livetv/rebuild-schedule", live_tv_routes.endpoint_rebuild_schedule, methods=["POST"]),
+    Route("/api/livetv/guide", live_tv_routes.endpoint_guide_data, methods=["GET"]),
+    Route("/api/livetv/channel-logo/{tvg_id}", live_tv_routes.endpoint_channel_logo_get, methods=["GET"]),
+    Route("/api/livetv/channel-logo/{tvg_id}", live_tv_routes.endpoint_channel_logo_upload, methods=["POST"]),
+    Route("/api/livetv/channel-logo/{tvg_id}", live_tv_routes.endpoint_channel_logo_delete, methods=["DELETE"]),
+    Route("/api/livetv/scene/{scene_id}", live_tv_routes.endpoint_scene_detail, methods=["GET"]),
+    Route("/api/livetv/scene/{scene_id}/screenshot", live_tv_routes.endpoint_scene_screenshot, methods=["GET"]),
     
     Route("/system/info/public", auth_routes.endpoint_system_info_public, methods=["GET"]),
     Route("/public/system/info", auth_routes.endpoint_system_info_public, methods=["GET"]),
