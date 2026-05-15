@@ -612,7 +612,7 @@ async def _get_stash_channels() -> list[dict]:
             if not tag:
                 logger.warning(f"LiveTV: tag '{name}' not found in Stash — skipping channel")
                 continue
-            tvg_id = f"stash-tag-{tag['id']}"
+            tvg_id = f"t{tag['id']}"
             logo = tag.get("image_path") or ""
             if logo:
                 if not logo.startswith("http"):
@@ -634,7 +634,7 @@ async def _get_stash_channels() -> list[dict]:
             if not sf:
                 logger.warning(f"LiveTV: saved filter '{name}' not found in Stash — skipping channel")
                 continue
-            tvg_id = f"stash-filter-{sf['id']}"
+            tvg_id = f"f{sf['id']}"
             channels.append({"tvg_id": tvg_id, "name": name, "number": _next_num(),
                               "logo": "", "stash_type": "filter", "stash_id": sf["id"],
                               "object_filter": sf.get("object_filter"),
@@ -642,7 +642,7 @@ async def _get_stash_channels() -> list[dict]:
 
     # Shorts channel
     if getattr(config, "ENABLE_SHORTS_CHANNEL", False):
-        channels.append({"tvg_id": "stash-shorts", "name": "Shorts", "number": _next_num(),
+        channels.append({"tvg_id": "shorts", "name": "Shorts", "number": _next_num(),
                          "logo": "", "stash_type": "shorts"})
 
     _stash_channels_cache["data"] = channels
@@ -800,7 +800,7 @@ async def stash_channel_playback_info(ch: dict, item_id: str, request=None) -> J
         host = "127.0.0.1" if bind in ("0.0.0.0", "") else bind
         base_url = f"http://{host}:{port}"
 
-    stream_url = f"{base_url}/livetv/channels/{item_id}/stash-stream"
+    stream_url = f"{base_url}/livetv/channels/{item_id}/stash-stream.m3u8"
 
     source: dict = {
         "Protocol": "Http",
@@ -845,7 +845,7 @@ async def stash_channel_playback_info(ch: dict, item_id: str, request=None) -> J
     logger.info(f"LiveTV: stash channel playback_info '{ch['name']}' ({item_id}) -> {stream_url}")
     return JSONResponse({
         "MediaSources": [source],
-        "PlaySessionId": f"stash_live_{item_id}",
+        "PlaySessionId": f"stash_live_{ch['tvg_id']}",
     })
 
 
@@ -948,7 +948,7 @@ async def endpoint_stash_channel_stream(request: Request):
         else:
             out_lines.append(line)
 
-    logger.debug(
+    logger.trace(
         f"LiveTV FFmpeg: served manifest for '{ch['name']}' "
         f"channel={channel_id_clean} seek={seek:.1f}s entries={len(upcoming)}"
     )

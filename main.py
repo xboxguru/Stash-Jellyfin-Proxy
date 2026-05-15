@@ -15,6 +15,67 @@ from starlette.routing import Route, WebSocketRoute, Mount
 from starlette.websockets import WebSocket
 from logging.handlers import RotatingFileHandler
 from starlette.middleware.cors import CORSMiddleware
+
+class _RobustRotatingFileHandler(RotatingFileHandler):
+    """RotatingFileHandler that survives rotation failures and external file moves.
+
+    Two failure modes are handled:
+
+    1. Rotation failure — on some Docker bind mounts / FUSE filesystems
+       os.rename() raises an exception.  The base class swallows it but leaves
+       self.stream = None, so every subsequent write is silently dropped.
+       We catch the failure and reopen the original file so logging continues.
+
+    2. File moved externally — Unraid's Mover copies the log file to the array
+       then deletes the cache copy.  Python's fd becomes orphaned (writing to a
+       deleted inode that will never appear in the directory).  We detect this
+       every _WATCH_INTERVAL seconds by comparing the inode/dev of our open fd
+       against the file currently at the log path, and reopen when they diverge.
+    """
+
+    _WATCH_INTERVAL = 10.0  # seconds between orphan-detection checks
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._last_watch: float = 0.0
+
+    def _reopen_if_orphaned(self) -> None:
+        now = time.time()
+        if now - self._last_watch < self._WATCH_INTERVAL:
+            return
+        self._last_watch = now
+        if self.stream is None:
+            return
+        try:
+            fd_stat   = os.fstat(self.stream.fileno())
+            path_stat = os.stat(self.baseFilename)
+            if fd_stat.st_ino != path_stat.st_ino or fd_stat.st_dev != path_stat.st_dev:
+                self.stream.flush()
+                self.stream.close()
+                self.stream = self._open()
+        except FileNotFoundError:
+            # Path no longer exists — close orphan and open fresh
+            try:
+                self.stream.close()
+            except Exception:
+                pass
+            self.stream = self._open()
+        except Exception:
+            pass
+
+    def doRollover(self) -> None:
+        try:
+            super().doRollover()
+        except Exception:
+            if self.stream is None:
+                try:
+                    self.stream = self._open()
+                except Exception:
+                    pass
+
+    def emit(self, record) -> None:
+        self._reopen_if_orphaned()
+        super().emit(record)
 from starlette.staticfiles import StaticFiles
 import mimetypes
 
@@ -50,12 +111,29 @@ def trace(self, message, *args, **kws):
 logging.Logger.notice = notice
 logging.Logger.trace = trace
 
+class _SuppressLibraryDebugFilter(logging.Filter):
+    """Drop DEBUG/INFO records from noisy third-party libraries.
+
+    setLevel() on named loggers is the right tool, but hypercorn's serve() calls
+    logging.config.dictConfig() during startup which resets every named logger's
+    level back to NOTSET — nuking any setLevel() we applied at module load time.
+    Attaching a filter to the handlers instead survives that reset because filters
+    live on the handler object, not on logger objects.
+    """
+    _SUPPRESS_PREFIXES = ("httpcore", "httpx", "hpack", "h11", "h2")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if any(record.name.startswith(p) for p in self._SUPPRESS_PREFIXES):
+            return record.levelno >= logging.WARNING
+        return True
+
+
 logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL, logging.INFO),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        RotatingFileHandler(
+        _RobustRotatingFileHandler(
             os.path.join(config.LOG_DIR, config.LOG_FILE),
             maxBytes=getattr(config, "LOG_MAX_SIZE_MB", 5) * 1024 * 1024,
             backupCount=getattr(config, "LOG_BACKUP_COUNT", 2),
@@ -63,6 +141,12 @@ logging.basicConfig(
         )
     ]
 )
+
+# Belt-and-suspenders: suppress library debug at the handler level (survives
+# hypercorn's dictConfig reset) and also at the logger level for the common case.
+_lib_filter = _SuppressLibraryDebugFilter()
+for _h in logging.root.handlers:
+    _h.addFilter(_lib_filter)
 
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -271,6 +355,7 @@ routes = [
     Route("/livetv/timers", live_tv_routes.endpoint_timers, methods=["GET"]),
     Route("/livetv/seriestimers", live_tv_routes.endpoint_series_timers, methods=["GET"]),
     Route("/livetv/channels/{channel_id}/stash-stream", live_tv_routes.endpoint_stash_channel_stream, methods=["GET"]),
+    Route("/livetv/channels/{channel_id}/stash-stream.m3u8", live_tv_routes.endpoint_stash_channel_stream, methods=["GET"]),
     Route("/livetv/channels/{channel_id}/seg/{seg_name}", live_tv_routes.endpoint_stash_channel_segment, methods=["GET"]),
     Route("/livetv/channels/{channel_id}/stream.m3u8", live_tv_routes.endpoint_channel_m3u8, methods=["GET"]),
     Route("/livetv/channels/{channel_id}/stream", live_tv_routes.endpoint_channel_stream, methods=["GET"]),
