@@ -484,6 +484,22 @@
                 </div>
             </div>
 
+            <div class="card">
+                <h3 class="card-title">FFmpeg / Streaming</h3>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">FFmpeg Path</label>
+                        <input type="text" class="form-input" name="FFMPEG_PATH" placeholder="ffmpeg">
+                        <div class="form-hint">Path to the ffmpeg binary. Leave as <code>ffmpeg</code> if it is on your PATH (default in Docker).</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Channel Idle Timeout (seconds)</label>
+                        <input type="number" class="form-input" name="LIVE_TV_IDLE_TIMEOUT" placeholder="60">
+                        <div class="form-hint">Seconds of inactivity before the FFmpeg process for a channel is shut down.</div>
+                    </div>
+                </div>
+            </div>
+
         </div>
 
         <div id="env-notice" class="env-notice" style="margin-bottom: 16px;">
