@@ -589,6 +589,10 @@
 
         const GUIDE_PX_PER_MIN = 5;     // 300px per hour
         const GUIDE_CH_COL_W   = 160;   // channel column width in px
+        const GENRE_CLASS = {
+            'Movie':'gp-movie','Kids':'gp-kids','Sports':'gp-sports','Comedy':'gp-comedy',
+            'Documentary':'gp-documentary','Talk':'gp-talk','Music':'gp-music','News':'gp-news'
+        };
 
         let _guideDate = null;          // midnight LOCAL time of displayed day (Date object)
         let _guideData = null;          // last loaded response
@@ -712,7 +716,8 @@
                     const sceneAttrs = prog.scene_id
                         ? ` data-scene="${prog.scene_id}" data-title="${escapeHTML(prog.title)}" onclick="openSceneModal(this)"`
                         : '';
-                    progsHtml += `<div class="guide-program${isLive ? ' guide-program-live' : ''}"
+                    const genreClass = GENRE_CLASS[prog.genre] || '';
+                    progsHtml += `<div class="guide-program${isLive ? ' guide-program-live' : ''}${genreClass ? ' ' + genreClass : ''}"
                         style="left:${left}px;width:${width}px;"
                         title="${escapeHTML(prog.title)}"${sceneAttrs}>
                         <span class="guide-program-title">${escapeHTML(prog.title)}</span>

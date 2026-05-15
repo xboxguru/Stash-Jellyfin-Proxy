@@ -251,8 +251,13 @@ def _logo_tag(logo_url: str) -> str:
 
 
 def _logo_dir() -> str:
-    """Return (and create) the directory where custom channel logos are stored."""
-    d = os.path.join(config.LOG_DIR, "channel_logos")
+    """Return (and create) the directory where custom channel logos are stored.
+
+    Derives from CONFIG_FILE so Docker deployments always write to /config/channel_logos
+    even when LOG_DIR has not been explicitly set.
+    """
+    config_dir = os.path.dirname(config.CONFIG_FILE)
+    d = os.path.join(config_dir, "channel_logos")
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -261,7 +266,7 @@ def _custom_logo_path(tvg_id: str) -> str | None:
     """Return the path to a custom logo file for this channel, or None."""
     if not tvg_id:
         return None
-    base = os.path.join(config.LOG_DIR, "channel_logos", tvg_id)
+    base = os.path.join(_logo_dir(), tvg_id)
     for ext in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
         p = base + ext
         if os.path.exists(p):
@@ -471,14 +476,17 @@ async def _fetch_scenes_for_stash_channel(ch: dict) -> list[dict]:
     from core.stash_client import call_graphql
     channel_type = ch.get("stash_type", "")
 
+    # Fields needed for schedule building and genre classification.
+    _SCENE_FIELDS = "id title files { duration } organized rating100 o_counter tags { name } performers { id } details"
+
     if channel_type == "tag":
         scene_filter = {"tags": {"value": [ch["stash_id"]], "modifier": "INCLUDES", "depth": 1}}
-        query = """
-        query($sf: SceneFilterType) {
-            findScenes(filter: {per_page: -1, sort: "id", direction: ASC}, scene_filter: $sf) {
-                scenes { id title files { duration } }
-            }
-        }
+        query = f"""
+        query($sf: SceneFilterType) {{
+            findScenes(filter: {{per_page: -1, sort: "id", direction: ASC}}, scene_filter: $sf) {{
+                scenes {{ {_SCENE_FIELDS} }}
+            }}
+        }}
         """
         data = await call_graphql(query, {"sf": scene_filter})
     elif channel_type == "filter":
@@ -504,12 +512,12 @@ async def _fetch_scenes_for_stash_channel(ch: dict) -> list[dict]:
                     for k in ("q", "sort", "direction"):
                         if k in parsed:
                             filter_args[k] = parsed[k]
-        query = """
-        query($filter: FindFilterType, $sf: SceneFilterType) {
-            findScenes(filter: $filter, scene_filter: $sf) {
-                scenes { id title files { duration } }
-            }
-        }
+        query = f"""
+        query($filter: FindFilterType, $sf: SceneFilterType) {{
+            findScenes(filter: $filter, scene_filter: $sf) {{
+                scenes {{ {_SCENE_FIELDS} }}
+            }}
+        }}
         """
         data = await call_graphql(query, {"filter": filter_args, "sf": scene_filter})
     elif channel_type == "shorts":
@@ -532,13 +540,48 @@ async def _fetch_scenes_for_stash_channel(ch: dict) -> list[dict]:
         files = s.get("files") or []
         duration = float(files[0].get("duration") or 0) if files else 0.0
         if duration >= 5.0:
-            result.append({"id": s["id"], "title": s.get("title") or f"Scene {s['id']}", "duration_sec": duration})
+            result.append({
+                "id": s["id"],
+                "title": s.get("title") or f"Scene {s['id']}",
+                "duration_sec": duration,
+                "organized": bool(s.get("organized")),
+                "rating": s.get("rating100") or 0,
+                "o_counter": s.get("o_counter") or 0,
+                "tag_count": len(s.get("tags") or []),
+                "performer_count": len(s.get("performers") or []),
+                "has_description": bool((s.get("details") or "").strip()),
+            })
     return result
 
 
 def _new_eid() -> str:
     """Generate a compact random entry ID (8 hex chars, ~4 billion space)."""
     return os.urandom(4).hex()
+
+
+def _scene_genre(scene: dict) -> str:
+    """Map Stash scene metadata to a Jellyfin guide color category.
+
+    Priority (first match wins):
+        1. Movie  — organized OR rating=100 OR o_counter > 3  → purple
+        2. Kids   — tag_count > 3 OR o_counter ≥ 1           → light blue
+        3. Sports — tag_count < 3                             → indigo
+        4. News   — no description                            → green
+
+    o_counter = Stash "O Counter" (times marked as enjoyed, not watched).
+    """
+    if (scene.get("organized")
+            or (scene.get("rating") or 0) == 100
+            or (scene.get("o_counter") or 0) > 3):
+        return "Movie"
+    tag_count = scene.get("tag_count") or 0
+    if tag_count >= 3 or (scene.get("o_counter") or 0) >= 1:
+        return "Kids"
+    if tag_count < 3:
+        return "Sports"
+    if not scene.get("has_description"):
+        return "News"
+    return ""
 
 
 def _build_random_schedule(scenes: list[dict]) -> list[dict]:
@@ -575,6 +618,9 @@ def _build_random_schedule(scenes: list[dict]) -> list[dict]:
             "scene_id": s["id"],
             "title": s["title"],
             "duration_sec": s["duration_sec"],
+            "genre": _scene_genre(s),
+            "rating": s.get("rating") or 0,
+            "o_counter": s.get("o_counter") or 0,
         })
         cursor = stop
 
@@ -666,6 +712,9 @@ def _maintenance_extend_channel(
             "scene_id":     s["id"],
             "title":        s["title"],
             "duration_sec": s["duration_sec"],
+            "genre":        _scene_genre(s),
+            "rating":       s.get("rating") or 0,
+            "o_counter":    s.get("o_counter") or 0,
         })
         cursor = stop
 
@@ -942,7 +991,7 @@ def _get_stash_programs_for_channel(ch: dict, server_id: str, channels_by_tvg_id
             "start_ts": entry["start_ts"],
             "stop_ts": entry["stop_ts"],
             "run_time_ticks": int(entry["duration_sec"] * 10_000_000),
-            "genre": "",
+            "genre": entry.get("genre", ""),
             "desc": "",
             "scene_id": entry["scene_id"],
             "icon": _stash_screenshot_url(entry["scene_id"]) if entry.get("scene_id") else "",
@@ -1380,6 +1429,12 @@ def _program_to_jellyfin(prog: dict, server_id: str, channels_by_tvg_id: dict,
         "RemoteTrailers": [],
         "LockedFields": [],
         "LockData": False,
+        # Boolean type flags — Jellyfin Web and Wholphin use these (not Genres) for EPG color coding.
+        "IsMovie":  prog.get("genre") == "Movie",
+        "IsKids":   prog.get("genre") == "Kids",
+        "IsSports": prog.get("genre") == "Sports",
+        "IsNews":   prog.get("genre") == "News",
+        "IsSeries": prog.get("genre") not in ("Movie", ""),
     }
 
     if icon_tag:
@@ -1670,7 +1725,7 @@ async def endpoint_programs(request: Request):
                 "start_ts": entry["start_ts"],
                 "stop_ts": entry["stop_ts"],
                 "run_time_ticks": int(entry["duration_sec"] * 10_000_000),
-                "genre": "", "desc": "", "scene_id": entry["scene_id"],
+                "genre": entry.get("genre", ""), "desc": "", "scene_id": entry.get("scene_id"),
                 "icon": _stash_screenshot_url(entry["scene_id"]) if entry.get("scene_id") else "",
             }
             prog_id = encode_id("program", f"{tvg_id}|{raw_prog['start']}")
@@ -1736,15 +1791,19 @@ async def endpoint_programs(request: Request):
     max_start_ts = _parse_guide_ts(_qp("MaxStartDate", ""))
     min_end_ts   = _parse_guide_ts(_qp("MinEndDate",   ""))
 
-    # Always apply a server-side cap on the guide window.
-    # Clients like Jellyfin Web send a tight window (4-6h) and are unaffected.
-    # Clients like Wholphin send the full schedule range (7+ days) or nothing,
-    # which produced 8000+ items and caused guide rendering failures.
-    GUIDE_FORWARD_CAP = 43_200   # 12h forward
-    GUIDE_PAST_CAP    =  7_200   #  2h back
+    # Guide time-window capping strategy:
+    # - If no date range provided (Wholphin home-screen widgets, old clients): default to a
+    #   14h window (2h past → 12h future) so we don't flood with thousands of short-clip entries.
+    # - If an explicit MaxStartDate is provided (Jellyfin Web guide, Wholphin EPG): honour it
+    #   so the full guide day renders. Cap at 48h absolute max to prevent absurdly large responses.
+    DEFAULT_FORWARD   = 43_200    # 12h — used only when client sends no MaxStartDate
+    GUIDE_FORWARD_MAX = 172_800   # 48h — hard ceiling even when client provides a date
+    GUIDE_PAST_CAP    =  7_200    #  2h back
 
-    if max_start_ts is None or max_start_ts > now_ts + GUIDE_FORWARD_CAP:
-        max_start_ts = now_ts + GUIDE_FORWARD_CAP
+    if max_start_ts is None:
+        max_start_ts = now_ts + DEFAULT_FORWARD
+    elif max_start_ts > now_ts + GUIDE_FORWARD_MAX:
+        max_start_ts = now_ts + GUIDE_FORWARD_MAX
     if min_end_ts is None or min_end_ts < now_ts - GUIDE_PAST_CAP:
         min_end_ts = now_ts - GUIDE_PAST_CAP
 
@@ -1764,6 +1823,33 @@ async def endpoint_programs(request: Request):
         programs = [p for p in programs if p.get("stop_ts", 0) > now_ts]
     elif has_aired == "true":
         programs = [p for p in programs if p.get("stop_ts", now_ts + 1) <= now_ts]
+
+    # Genre filters — used by Jellyfin/Wholphin home-screen carousels
+    _GENRE_PARAM_MAP = {
+        "IsMovie":       ("true",  "Movie"),
+        "IsSports":      ("true",  "Sports"),
+        "IsKids":        ("true",  "Kids"),
+        "IsNews":        ("true",  "News"),
+        "IsSeries":      ("true",  None),   # "Series" means non-Movie in Jellyfin
+        "IsMovie_false": ("false", "Movie"),
+    }
+    is_movie = _qp("IsMovie",  "").lower()
+    is_sports = _qp("IsSports", "").lower()
+    is_kids   = _qp("IsKids",   "").lower()
+    is_news   = _qp("IsNews",   "").lower()
+    is_series = _qp("IsSeries", "").lower()
+    if is_movie == "true":
+        programs = [p for p in programs if p.get("genre") == "Movie"]
+    elif is_movie == "false":
+        programs = [p for p in programs if p.get("genre") != "Movie"]
+    if is_sports == "true":
+        programs = [p for p in programs if p.get("genre") == "Sports"]
+    if is_kids == "true":
+        programs = [p for p in programs if p.get("genre") == "Kids"]
+    if is_news == "true":
+        programs = [p for p in programs if p.get("genre") == "News"]
+    if is_series == "true":
+        programs = [p for p in programs if p.get("genre") not in ("Movie", "")]
 
     # Pagination
     total = len(programs)
@@ -1881,6 +1967,7 @@ async def endpoint_guide_data(request: Request):
                 "stop_ts": entry["stop_ts"],
                 "title": entry["title"],
                 "scene_id": entry.get("scene_id"),
+                "genre": entry.get("genre", ""),
             })
 
         # Build a logo URL that will bust the browser cache when the custom file changes.
