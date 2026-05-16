@@ -463,6 +463,9 @@
                     const result = await res.json();
                     showToast(result.needs_restart ? 'Saved. Restart required for some changes.' : 'Configuration saved.', 'success');
                     fetchConfig();
+                    const shouldShowGuide = !!(data.ENABLE_LIVE_TV && (data.ENABLE_TUNARR || data.ENABLE_STASH_CHANNELS));
+                    const guideNav = document.getElementById('guide-nav-item');
+                    if (guideNav) guideNav.style.display = shouldShowGuide ? '' : 'none';
                 }
             } catch (e) { showToast('Failed to save', 'error'); }
         });
@@ -596,6 +599,7 @@
 
         let _guideDate = null;          // midnight LOCAL time of displayed day (Date object)
         let _guideData = null;          // last loaded response
+        let _epgModalToken = 0;         // incremented on each openEpgModal to cancel stale responses
         let _logoModalTvgId = null;
         let _guideEditMode = false;
         let _pickerTvgId = null;
@@ -689,16 +693,26 @@
                 const logoHtml = ch.logo_url
                     ? `<img class="guide-ch-logo" src="${escapeHTML(ch.logo_url)}" alt="" onerror="this.style.display='none'">`
                     : `<div class="guide-ch-logo-placeholder"></div>`;
-                leftHtml += `<div class="guide-channel-cell" style="height:${ROW_H}px;"
-                    data-tvgid="${escapeHTML(ch.tvg_id)}" data-chname="${escapeHTML(ch.name)}"
-                    draggable="true"
-                    onclick="openChannelEditModal(this)" title="Click to edit channel">
-                    <span class="guide-ch-drag-handle">&#8942;</span>
-                    ${logoHtml}
-                    ${ch.number != null ? `<span class="guide-ch-number">${escapeHTML(String(ch.number))}</span>` : ''}
-                    <span class="guide-ch-name">${escapeHTML(ch.name)}</span>
-                    <span class="guide-ch-edit-hint">&#9998; Edit</span>
-                </div>`;
+                if (ch.readonly) {
+                    leftHtml += `<div class="guide-channel-cell guide-channel-readonly" style="height:${ROW_H}px;"
+                        data-tvgid="${escapeHTML(ch.tvg_id)}" data-chname="${escapeHTML(ch.name)}">
+                        ${logoHtml}
+                        ${ch.number != null ? `<span class="guide-ch-number">${escapeHTML(String(ch.number))}</span>` : ''}
+                        <span class="guide-ch-name">${escapeHTML(ch.name)}</span>
+                        <span class="guide-ch-ext-badge">External</span>
+                    </div>`;
+                } else {
+                    leftHtml += `<div class="guide-channel-cell" style="height:${ROW_H}px;"
+                        data-tvgid="${escapeHTML(ch.tvg_id)}" data-chname="${escapeHTML(ch.name)}"
+                        draggable="true"
+                        onclick="openChannelEditModal(this)" title="Click to edit channel">
+                        <span class="guide-ch-drag-handle">&#8942;</span>
+                        ${logoHtml}
+                        ${ch.number != null ? `<span class="guide-ch-number">${escapeHTML(String(ch.number))}</span>` : ''}
+                        <span class="guide-ch-name">${escapeHTML(ch.name)}</span>
+                        <span class="guide-ch-edit-hint">&#9998; Edit</span>
+                    </div>`;
+                }
             }
             leftHtml += `<div class="guide-add-channel-cell" onclick="openAddChannelModal()">&#43; Add Channel</div>`;
 
@@ -744,21 +758,21 @@
                     }
                     const isLive = prog.start_ts <= nowSec && prog.stop_ts > nowSec;
                     const isPast = prog.stop_ts <= nowSec;
-                    // Insert zone only before future programs — inserting before past/live time slots is meaningless
-                    if (prog.start_ts > nowSec) {
+                    // Insert zone only before future programs on editable channels
+                    if (!ch.readonly && prog.start_ts > nowSec) {
                         progsHtml += `<div class="guide-insert-zone" style="left:${left - 3}px;"
                             data-tvgid="${escapeHTML(ch.tvg_id)}" data-aftereid="${escapeHTML(prevEid || '')}"
                             onclick="openInsertModal(this)"><span class="guide-insert-icon">+</span></div>`;
                     }
-                    // Use data-scene / data-title so the title is never embedded inside
-                    // a JS string literal in the onclick — the browser would decode HTML
-                    // entities (&#39; → ') before the JS engine sees the string, breaking
-                    // any title that contains apostrophes.
-                    const sceneAttrs = prog.scene_id
+                    // Use data-* so titles are never embedded in JS string literals:
+                    // the browser decodes HTML entities (&#39; → ') before JS sees them.
+                    const clickAttrs = prog.scene_id
                         ? ` data-scene="${prog.scene_id}" data-title="${escapeHTML(prog.title)}" onclick="openSceneModal(this)"`
+                        : ch.readonly
+                        ? ` data-epg-tvgid="${escapeHTML(ch.tvg_id)}" data-epg-start="${prog.start_ts}" onclick="openEpgModal(this)"`
                         : '';
                     const genreClass = GENRE_CLASS[prog.genre] || '';
-                    const hasDrag = !!(prog.scene_id && prog.eid) && !isPast;
+                    const hasDrag = !ch.readonly && !!(prog.scene_id && prog.eid) && !isPast;
                     progsHtml += `<div class="guide-program${isLive ? ' guide-program-live' : ''}${isPast ? ' guide-program-past' : ''}${genreClass ? ' ' + genreClass : ''}"
                         style="left:${left}px;width:${width}px;"
                         data-eid="${escapeHTML(prog.eid || '')}"
@@ -767,17 +781,17 @@
                         data-orig-left="${left}"
                         data-orig-width="${width}"
                         title="${escapeHTML(prog.title)}"
-                        ${hasDrag ? 'draggable="true"' : ''}${sceneAttrs}>
+                        ${hasDrag ? 'draggable="true"' : ''}${clickAttrs}>
                         ${hasDrag ? '<span class="guide-prog-drag" title="Drag to reorder">&#8942;</span>' : ''}
-                        ${(prog.eid && !isPast) ? `<button class="guide-prog-delete" data-eid="${escapeHTML(prog.eid)}" data-tvgid="${escapeHTML(ch.tvg_id)}" onclick="event.stopPropagation();deleteScheduleEntry(this.dataset.tvgid,this.dataset.eid)" title="Remove from schedule">&#10005;</button>` : ''}
+                        ${(!ch.readonly && prog.eid && !isPast) ? `<button class="guide-prog-delete" data-eid="${escapeHTML(prog.eid)}" data-tvgid="${escapeHTML(ch.tvg_id)}" onclick="event.stopPropagation();deleteScheduleEntry(this.dataset.tvgid,this.dataset.eid)" title="Remove from schedule">&#10005;</button>` : ''}
                         <span class="guide-program-title">${escapeHTML(prog.title)}</span>
                     </div>`;
                     lastProgIsPast = isPast;
                     prevEid = prog.eid || null;
                     prevRightPx = left + width + 2;
                 }
-                // Trailing insert zone after last visible program (only if it hasn't fully aired yet)
-                if (prevEid && !lastProgIsPast) {
+                // Trailing insert zone after last visible program (editable channels only)
+                if (!ch.readonly && prevEid && !lastProgIsPast) {
                     progsHtml += `<div class="guide-insert-zone" style="left:${prevRightPx - 3}px;"
                         data-tvgid="${escapeHTML(ch.tvg_id)}" data-aftereid="${escapeHTML(prevEid)}"
                         onclick="openInsertModal(this)"><span class="guide-insert-icon">+</span></div>`;
@@ -1712,6 +1726,112 @@
 
         function closeSceneModal() {
             document.getElementById('scene-modal-overlay').style.display = 'none';
+        }
+
+        async function openEpgModal(el) {
+            const token   = ++_epgModalToken;
+            const tvgId   = el.dataset.epgTvgid;
+            const startTs = parseInt(el.dataset.epgStart);
+            const ch   = (_guideData.channels || []).find(c => c.tvg_id === tvgId);
+            const prog = ch ? (ch.programs || []).find(p => p.start_ts === startTs) : null;
+
+            document.getElementById('scene-modal-overlay').style.display = 'flex';
+
+            // Phase 1: show available XMLTV data immediately (no network wait)
+            _fillEpgModalFromXmltv(prog, el.getAttribute('title') || '');
+
+            // Phase 2: try to match the scene in Stash for full metadata
+            if (prog && prog.title) {
+                try {
+                    const params = new URLSearchParams({ title: prog.title });
+                    if (prog.year) params.set('year', prog.year);
+                    const res  = await fetch(`/api/livetv/epg-scene-match?${params}`);
+                    const data = await res.json();
+                    // Abort if user closed/changed modal while request was in flight
+                    if (_epgModalToken !== token) return;
+                    if (res.ok && data.match) _fillEpgModalFromScene(data);
+                } catch (_) {}
+            }
+        }
+
+        function _fillEpgModalFromXmltv(prog, fallbackTitle) {
+            document.getElementById('scene-modal-title-el').textContent = prog ? prog.title : fallbackTitle;
+            document.getElementById('scene-modal-studio').textContent   = '';
+            document.getElementById('scene-modal-stats').innerHTML      = '';
+            document.getElementById('scene-modal-performers-section').style.display = 'none';
+            document.getElementById('scene-modal-tags-section').style.display      = 'none';
+            document.getElementById('scene-modal-desc-section').style.display      = 'none';
+
+            const poster = document.getElementById('scene-modal-poster');
+            if (prog && prog.icon_url) {
+                poster.style.display = 'block';
+                poster.src = prog.icon_url;
+            } else {
+                poster.style.display = 'none';
+            }
+
+            const metaParts = [];
+            if (prog && prog.year)   metaParts.push({ icon: '📅', text: prog.year });
+            if (prog && prog.rating) metaParts.push({ icon: '🔞', text: prog.rating });
+            if (prog) {
+                const fmt = ts => new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                metaParts.push({ icon: '🕐', text: `${fmt(prog.start_ts)} – ${fmt(prog.stop_ts)}` });
+            }
+            document.getElementById('scene-modal-meta').innerHTML = metaParts
+                .map(p => `<span class="scene-modal-meta-item"><span>${p.icon}</span><span>${escapeHTML(String(p.text))}</span></span>`)
+                .join('');
+
+            if (prog && prog.desc) {
+                document.getElementById('scene-modal-desc').textContent = prog.desc;
+                document.getElementById('scene-modal-desc-section').style.display = '';
+            }
+        }
+
+        function _fillEpgModalFromScene(scene) {
+            document.getElementById('scene-modal-title-el').textContent = scene.title || '';
+            document.getElementById('scene-modal-studio').textContent   = scene.studio || '';
+
+            const poster = document.getElementById('scene-modal-poster');
+            poster.style.display = 'block';
+            poster.src = `/api/livetv/scene/${scene.id}/screenshot`;
+
+            const metaParts = [];
+            if (scene.date) metaParts.push({ icon: '📅', text: scene.date });
+            if (scene.rating !== null && scene.rating !== undefined && scene.rating > 0)
+                metaParts.push({ icon: '⭐', text: `${(scene.rating / 10).toFixed(1)} / 10` });
+            if (scene.code) metaParts.push({ icon: '#', text: scene.code });
+            document.getElementById('scene-modal-meta').innerHTML = metaParts
+                .map(p => `<span class="scene-modal-meta-item"><span>${p.icon}</span><span>${escapeHTML(String(p.text))}</span></span>`)
+                .join('');
+
+            const statParts = [];
+            if (scene.play_count > 0) statParts.push(`Plays: <span class="scene-modal-stat-val">${scene.play_count}</span>`);
+            if (scene.o_counter > 0)  statParts.push(`O-Counter: <span class="scene-modal-stat-val">${scene.o_counter}</span>`);
+            if (scene.organized)      statParts.push(`<span class="scene-modal-stat-val" style="color:var(--success)">✓ Organized</span>`);
+            document.getElementById('scene-modal-stats').innerHTML = statParts.join('  ·  ');
+
+            if (scene.details) {
+                document.getElementById('scene-modal-desc').textContent = scene.details;
+                document.getElementById('scene-modal-desc-section').style.display = '';
+            } else {
+                document.getElementById('scene-modal-desc-section').style.display = 'none';
+            }
+
+            if (scene.performers && scene.performers.length) {
+                document.getElementById('scene-modal-performers').innerHTML =
+                    scene.performers.map(p => `<span class="scene-pill scene-pill-performer">${escapeHTML(p)}</span>`).join('');
+                document.getElementById('scene-modal-performers-section').style.display = '';
+            } else {
+                document.getElementById('scene-modal-performers-section').style.display = 'none';
+            }
+
+            if (scene.tags && scene.tags.length) {
+                document.getElementById('scene-modal-tags').innerHTML =
+                    scene.tags.map(t => `<span class="scene-pill">${escapeHTML(t)}</span>`).join('');
+                document.getElementById('scene-modal-tags-section').style.display = '';
+            } else {
+                document.getElementById('scene-modal-tags-section').style.display = 'none';
+            }
         }
 
         // Close modals on Escape key

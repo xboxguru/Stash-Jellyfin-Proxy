@@ -471,12 +471,19 @@ def _parse_xmltv(content: str) -> list[dict]:
                     pass
             icon_el = prog.find("icon")
             icon_url = icon_el.get("src", "") if icon_el is not None else ""
+            rating_el = prog.find("rating")
+            rating = ""
+            if rating_el is not None:
+                val_el = rating_el.find("value")
+                if val_el is not None and val_el.text:
+                    rating = val_el.text.strip()
             programs.append({
                 "channel_id": prog.get("channel", ""),
-                "title": title_el.text if title_el is not None else "Unknown",
-                "desc": desc_el.text if desc_el is not None else "",
+                "title": (title_el.text or "Unknown").strip() if title_el is not None else "Unknown",
+                "desc": (desc_el.text or "").strip() if desc_el is not None else "",
                 "genre": cat_el.text if cat_el is not None else "",
                 "year": year,
+                "rating": rating,
                 "start": start_iso,
                 "start_ts": start_ts,
                 "stop": stop_iso,
@@ -2287,7 +2294,7 @@ async def endpoint_rebuild_schedule(request: Request):
 
 
 async def endpoint_guide_data(request: Request):
-    """Return full-day EPG data for all Stash channels.
+    """Return full-day EPG data for all channels (Tunarr + Stash).
 
     Query params:
         date (optional): YYYY-MM-DD in UTC; defaults to today UTC.
@@ -2310,53 +2317,95 @@ async def endpoint_guide_data(request: Request):
         return JSONResponse({"error": "invalid date"}, status_code=400)
 
     day_end = day_start + 86400
+    date_label = datetime.fromtimestamp(day_start, tz=timezone.utc).strftime("%Y-%m-%d")
 
-    if not getattr(config, "ENABLE_STASH_CHANNELS", False):
-        return JSONResponse({"date": str(d), "day_start": day_start, "day_end": day_end, "channels": []})
+    tunarr_enabled = getattr(config, "ENABLE_TUNARR", False)
+    stash_enabled  = getattr(config, "ENABLE_STASH_CHANNELS", False)
 
-    await _ensure_stash_schedules()
-    # _ensure_stash_schedules loads/builds the schedule but does NOT populate
-    # _stash_channels_cache if the schedule was already on disk.  Load it now.
-    channels = _stash_channels_cache["data"]
-    if channels is None:
-        channels = await _get_stash_channels()
+    if not tunarr_enabled and not stash_enabled:
+        return JSONResponse({"date": date_label, "day_start": day_start, "day_end": day_end, "channels": []})
 
     result: list[dict] = []
-    for ch in channels:
-        tvg_id = ch["tvg_id"]
-        schedule = _stash_schedule.get(tvg_id, [])
 
-        programs = []
-        for entry in schedule:
-            if entry["stop_ts"] <= day_start or entry["start_ts"] >= day_end:
-                continue
-            programs.append({
-                "eid": entry.get("eid", ""),
-                "start_ts": entry["start_ts"],
-                "stop_ts": entry["stop_ts"],
-                "title": entry["title"],
-                "scene_id": entry.get("scene_id"),
-                "genre": entry.get("genre", ""),
+    # ── Tunarr / Ersatz channels (read-only — managed externally) ──────────
+    if tunarr_enabled:
+        tunarr_channels = await _get_channels()
+        tunarr_programs = await _get_programs()
+        programs_by_channel: dict[str, list] = {}
+        for prog in tunarr_programs:
+            programs_by_channel.setdefault(prog["channel_id"], []).append(prog)
+
+        for ch in tunarr_channels:
+            tvg_id = ch["tvg_id"]
+            programs = []
+            for prog in programs_by_channel.get(tvg_id, []):
+                if prog.get("stop_ts", 0) <= day_start or prog.get("start_ts", 0) >= day_end:
+                    continue
+                programs.append({
+                    "eid": "",
+                    "start_ts": prog["start_ts"],
+                    "stop_ts": prog["stop_ts"],
+                    "title": prog["title"],
+                    "scene_id": None,
+                    "genre": prog.get("genre", ""),
+                    "desc": prog.get("desc", ""),
+                    "year": prog.get("year"),
+                    "rating": prog.get("rating", ""),
+                    "icon_url": prog.get("icon", ""),
+                })
+            custom = _custom_logo_path(tvg_id)
+            if custom:
+                logo_url = f"/api/livetv/channel-logo/{tvg_id}?v={int(os.path.getmtime(custom))}"
+            elif ch.get("logo"):
+                logo_url = f"/api/livetv/channel-logo/{tvg_id}"
+            else:
+                logo_url = ""
+            result.append({
+                "tvg_id": tvg_id,
+                "name": ch["name"],
+                "number": ch.get("number", ""),
+                "logo_url": logo_url,
+                "programs": programs,
+                "readonly": True,
             })
 
-        # Build a logo URL that will bust the browser cache when the custom file changes.
-        custom = _custom_logo_path(tvg_id)
-        if custom:
-            logo_url = f"/api/livetv/channel-logo/{tvg_id}?v={int(os.path.getmtime(custom))}"
-        elif ch.get("logo"):
-            logo_url = f"/api/livetv/channel-logo/{tvg_id}"
-        else:
-            logo_url = ""
+    # ── Dynamic Stash channels (editable) ──────────────────────────────────
+    if stash_enabled:
+        await _ensure_stash_schedules()
+        channels = _stash_channels_cache["data"]
+        if channels is None:
+            channels = await _get_stash_channels()
 
-        result.append({
-            "tvg_id": tvg_id,
-            "name": ch["name"],
-            "number": ch.get("number", ""),
-            "logo_url": logo_url,
-            "programs": programs,
-        })
+        for ch in channels:
+            tvg_id = ch["tvg_id"]
+            schedule = _stash_schedule.get(tvg_id, [])
+            programs = []
+            for entry in schedule:
+                if entry["stop_ts"] <= day_start or entry["start_ts"] >= day_end:
+                    continue
+                programs.append({
+                    "eid": entry.get("eid", ""),
+                    "start_ts": entry["start_ts"],
+                    "stop_ts": entry["stop_ts"],
+                    "title": entry["title"],
+                    "scene_id": entry.get("scene_id"),
+                    "genre": entry.get("genre", ""),
+                })
+            custom = _custom_logo_path(tvg_id)
+            if custom:
+                logo_url = f"/api/livetv/channel-logo/{tvg_id}?v={int(os.path.getmtime(custom))}"
+            elif ch.get("logo"):
+                logo_url = f"/api/livetv/channel-logo/{tvg_id}"
+            else:
+                logo_url = ""
+            result.append({
+                "tvg_id": tvg_id,
+                "name": ch["name"],
+                "number": ch.get("number", ""),
+                "logo_url": logo_url,
+                "programs": programs,
+            })
 
-    date_label = datetime.fromtimestamp(day_start, tz=timezone.utc).strftime("%Y-%m-%d")
     return JSONResponse({"date": date_label, "day_start": day_start, "day_end": day_end, "channels": result})
 
 
@@ -2376,6 +2425,12 @@ async def endpoint_channel_logo_get(request: Request):
     if ch and ch.get("logo"):
         from api.image_routes import _proxy_image
         return await _proxy_image(ch["logo"])
+
+    tunarr_channels = _m3u_cache.get("data") or []
+    tunarr_ch = next((c for c in tunarr_channels if c["tvg_id"] == tvg_id), None)
+    if tunarr_ch and tunarr_ch.get("logo"):
+        from api.image_routes import _proxy_image
+        return await _proxy_image(tunarr_ch["logo"])
 
     return Response(status_code=404)
 
@@ -2411,6 +2466,74 @@ async def endpoint_channel_logo_upload(request: Request):
     except Exception as exc:
         logger.error(f"LiveTV: logo upload failed for '{tvg_id}': {exc}")
         return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+async def endpoint_epg_scene_match(request: Request):
+    """Search Stash for a scene matching an XMLTV title + year.
+
+    Returns full scene metadata (same shape as endpoint_scene_detail) plus
+    {"match": true} when exactly one title-exact scene is found, or
+    {"match": false} when there is no confident hit.
+    """
+    title = request.query_params.get("title", "").strip()
+    year_str = request.query_params.get("year", "").strip()
+
+    if not title:
+        return JSONResponse({"match": False})
+
+    from core import stash_client
+
+    scene_filter: dict = {
+        "title": {"modifier": "EQUALS", "value": title}
+    }
+    if year_str:
+        try:
+            y = int(year_str)
+            scene_filter["date"] = {
+                "modifier": "BETWEEN",
+                "value": f"{y}-01-01",
+                "value2": f"{y}-12-31",
+            }
+        except ValueError:
+            pass
+
+    _MATCH_FIELDS = (
+        "id title code date details o_counter play_count rating100 organized "
+        "studio { name } performers { name } tags { name } files { duration }"
+    )
+    query = (
+        f"query($filter: FindFilterType, $scene_filter: SceneFilterType) {{"
+        f" findScenes(filter: $filter, scene_filter: $scene_filter)"
+        f" {{ count scenes {{ {_MATCH_FIELDS} }} }} }}"
+    )
+    data = await stash_client.call_graphql(
+        query, {"filter": {"per_page": 5}, "scene_filter": scene_filter}
+    )
+    scenes = (data or {}).get("findScenes", {}).get("scenes", [])
+
+    if len(scenes) != 1:
+        return JSONResponse({"match": False})
+
+    scene = scenes[0]
+    files = scene.get("files") or []
+    duration = files[0].get("duration") if files else None
+
+    return JSONResponse({
+        "match": True,
+        "id": scene.get("id"),
+        "title": scene.get("title") or "",
+        "code": scene.get("code") or "",
+        "date": scene.get("date") or "",
+        "details": scene.get("details") or "",
+        "rating": scene.get("rating100"),
+        "o_counter": scene.get("o_counter", 0),
+        "play_count": scene.get("play_count", 0),
+        "organized": scene.get("organized", False),
+        "studio": (scene.get("studio") or {}).get("name", ""),
+        "performers": [p["name"] for p in (scene.get("performers") or [])],
+        "tags": [t["name"] for t in (scene.get("tags") or [])],
+        "duration": duration,
+    })
 
 
 async def endpoint_scene_detail(request: Request):

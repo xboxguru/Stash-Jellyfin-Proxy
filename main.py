@@ -248,6 +248,7 @@ routes = [
     Route("/api/livetv/channel-logo/{tvg_id}", live_tv_routes.endpoint_channel_logo_get, methods=["GET"]),
     Route("/api/livetv/channel-logo/{tvg_id}", live_tv_routes.endpoint_channel_logo_upload, methods=["POST"]),
     Route("/api/livetv/channel-logo/{tvg_id}", live_tv_routes.endpoint_channel_logo_delete, methods=["DELETE"]),
+    Route("/api/livetv/epg-scene-match", live_tv_routes.endpoint_epg_scene_match, methods=["GET"]),
     Route("/api/livetv/scene/{scene_id}", live_tv_routes.endpoint_scene_detail, methods=["GET"]),
     Route("/api/livetv/scene/{scene_id}/screenshot", live_tv_routes.endpoint_scene_screenshot, methods=["GET"]),
     Route("/api/livetv/channel-scenes/{tvg_id}", live_tv_routes.endpoint_channel_scenes, methods=["GET"]),
