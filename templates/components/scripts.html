@@ -23,7 +23,7 @@
             CLIENT_LOG_MAX_BYTES: 1048576, UI_PUBLIC_STATUS_ENDPOINT: false, UI_ALLOWED_IPS: '',
             UI_CSRF_PROTECTION: true, AUTH_RATE_LIMIT_WINDOW_MINUTES: 15, AUTH_RATE_LIMIT_MAX_ATTEMPTS: 10,
             ENABLE_LIVE_TV: false, ENABLE_TUNARR: false, TUNER_M3U_URL: '', TUNER_XMLTV_URL: '',
-            ENABLE_STASH_CHANNELS: false, STASH_TV_TAGS: '', STASH_TV_FILTERS: '',
+            ENABLE_STASH_CHANNELS: false,
             STASH_SCHEDULE_DAYS: 7, STASH_KEEP_DAYS: 2, STASH_CHANNEL_START_NUMBER: 5001,
             ENABLE_SHORTS_CHANNEL: false, SHORTS_MAX_MINUTES: 5,
             FFMPEG_PATH: 'ffmpeg', LIVE_TV_IDLE_TIMEOUT: 60
@@ -75,9 +75,9 @@
         async function showPage(page) {
             state.currentPage = page;
             document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-            document.querySelector(`[data-page="${page}"]`).classList.add('active');
+            document.querySelector(`[data-page="${page}"]`)?.classList.add('active');
             document.querySelectorAll('.page').forEach(p => p.classList.add('hidden'));
-            document.getElementById(`page-${page}`).classList.remove('hidden');
+            document.getElementById(`page-${page}`)?.classList.remove('hidden');
 
             if (page === 'config') fetchConfig();
             else if (page === 'logs') fetchLogs();
