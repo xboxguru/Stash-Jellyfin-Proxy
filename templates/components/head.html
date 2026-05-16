@@ -145,10 +145,11 @@
         /* Left panel: channel column — only the right panel scrolls horizontally */
         .guide-left { width: 160px; flex-shrink: 0; overflow: hidden; display: flex; flex-direction: column; border-right: 1px solid var(--border); }
         .guide-corner { height: 36px; flex-shrink: 0; background: var(--bg-secondary); border-bottom: 1px solid var(--border); }
-        .guide-channel-cell { height: 80px; flex-shrink: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; padding: 6px; background: var(--bg-card); border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.15s; overflow: hidden; }
+        .guide-channel-cell { height: 80px; flex-shrink: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; padding: 6px; background: var(--bg-card); border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.15s; overflow: hidden; }
         .guide-channel-cell:hover { background: var(--bg-secondary); }
-        .guide-ch-logo { width: 44px; height: 44px; object-fit: contain; border-radius: 4px; background: var(--bg-primary); flex-shrink: 0; }
-        .guide-ch-logo-placeholder { width: 44px; height: 44px; border-radius: 4px; background: var(--bg-secondary); border: 1px dashed var(--border); flex-shrink: 0; }
+        .guide-ch-logo { width: 40px; height: 40px; object-fit: contain; border-radius: 4px; background: var(--bg-primary); flex-shrink: 0; }
+        .guide-ch-logo-placeholder { width: 40px; height: 40px; border-radius: 4px; background: var(--bg-secondary); border: 1px dashed var(--border); flex-shrink: 0; }
+        .guide-ch-number { font-size: 9px; font-weight: 600; color: var(--accent); text-align: center; line-height: 1; flex-shrink: 0; }
         .guide-ch-name { font-size: 11px; color: var(--text-secondary); text-align: center; line-height: 1.3; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
         .guide-ch-edit-hint { font-size: 10px; color: var(--accent); opacity: 0; transition: opacity 0.15s; flex-shrink: 0; }
         .guide-channel-cell:hover .guide-ch-edit-hint { opacity: 1; }
@@ -174,17 +175,115 @@
         .guide-program-title { display: block; font-size: 11px; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.4; }
         .guide-now-line { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent); z-index: 5; pointer-events: none; }
 
-        /* ── Logo modal ───────────────────────────────────────────────────── */
-        .logo-modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15,15,26,0.85); z-index: 9999; justify-content: center; align-items: center; backdrop-filter: blur(4px); }
-        .logo-modal-card { background: var(--bg-card); border-radius: 8px; padding: 28px; width: 100%; max-width: 440px; position: relative; }
+        /* ── Guide edit mode ──────────────────────────────────────────────── */
+        .guide-edit-btn { font-size: 12px; padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg-card); color: var(--text-secondary); cursor: pointer; transition: background 0.15s, color 0.15s; }
+        .guide-edit-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+        /* delete button overlaid on each program block — fades in on parent hover */
+        .guide-prog-delete { display: none; position: absolute; top: 2px; right: 2px; width: 16px; height: 16px; font-size: 11px; line-height: 16px; text-align: center; border-radius: 50%; background: rgba(200,50,40,0.85); color: #fff; cursor: pointer; z-index: 8; border: none; padding: 0; opacity: 0; transition: opacity 0.15s; }
+        /* drag handle */
+        .guide-prog-drag { display: none; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; font-size: 10px; line-height: 14px; text-align: center; color: var(--text-secondary); cursor: grab; z-index: 8; user-select: none; }
+        /* show controls when guide is in edit mode */
+        .guide-edit-active .guide-prog-delete { display: block; }
+        .guide-edit-active .guide-prog-drag   { display: block; }
+        /* X fades in when hovering the program block */
+        .guide-edit-active .guide-program:hover .guide-prog-delete { opacity: 1; }
+        /* drag-over highlight and drag state */
+        .guide-program.drag-over { outline: 2px solid var(--accent); outline-offset: -2px; }
+        .guide-program.dragging  { opacity: 0.3; pointer-events: none; }
+        /* smooth left-shift during drag operations */
+        .guide-drag-active .guide-program:not(.dragging) { transition: left 0.1s ease; }
+        /* insert zone — thin strip between programs, expands on hover (only shown in edit mode) */
+        .guide-insert-zone { display: none; position: absolute; top: 4px; bottom: 4px; width: 6px; transform: translateX(-3px); z-index: 9; cursor: pointer; align-items: center; justify-content: center; transition: width 0.15s, transform 0.15s, background 0.15s; border-radius: 4px; }
+        .guide-edit-active .guide-insert-zone { display: flex; }
+        .guide-insert-zone:hover { width: 30px; transform: translateX(-15px); background: rgba(74,200,120,0.25); border: 1px dashed #4ac878; }
+        .guide-program-past { opacity: 0.5; }
+        .guide-insert-icon { opacity: 0; font-size: 15px; color: #4ac878; font-weight: bold; line-height: 1; transition: opacity 0.15s; pointer-events: none; }
+        .guide-insert-zone:hover .guide-insert-icon { opacity: 1; }
+
+        /* ── Scene picker modal ───────────────────────────────────────────── */
+        .picker-modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15,15,26,0.92); z-index: 10000; justify-content: center; align-items: center; backdrop-filter: blur(4px); padding: 20px; box-sizing: border-box; }
+        .picker-modal-overlay.open { display: flex; }
+        .picker-modal-card { background: var(--bg-card); border-radius: 10px; width: 100%; max-width: 820px; max-height: 88vh; display: flex; flex-direction: column; overflow: hidden; position: relative; }
+        .picker-modal-header { display: flex; align-items: center; justify-content: space-between; padding: 18px 20px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+        .picker-modal-title { font-size: 15px; font-weight: 600; color: var(--text-primary); }
+        .picker-modal-close { background: none; border: none; font-size: 20px; color: var(--text-secondary); cursor: pointer; line-height: 1; }
+        .picker-filters { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 20px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+        .picker-filter-input { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); font-size: 12px; padding: 5px 8px; }
+        .picker-filter-input:focus { outline: none; border-color: var(--accent); }
+        .picker-filter-check { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--text-secondary); cursor: pointer; }
+        .picker-filter-check input { cursor: pointer; }
+        .picker-scene-list { overflow-y: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+        .picker-scene-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-secondary); cursor: pointer; transition: border-color 0.15s, background 0.15s; }
+        .picker-scene-item:hover { border-color: var(--accent); background: rgba(74,144,217,0.08); }
+        .picker-scene-thumb { width: 64px; height: 36px; object-fit: cover; border-radius: 3px; flex-shrink: 0; background: var(--bg-card); }
+        .picker-scene-info { flex: 1; min-width: 0; }
+        .picker-scene-title { font-size: 12px; font-weight: 500; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .picker-scene-meta  { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+        .picker-scene-badge { display: inline-block; font-size: 10px; padding: 1px 5px; border-radius: 3px; margin-right: 4px; }
+        .picker-badge-org  { background: rgba(90,60,180,0.3); color: #a88af0; }
+        .picker-badge-enj  { background: rgba(74,200,120,0.2); color: #4ac878; }
+        .picker-badge-genre { background: var(--bg-card); color: var(--text-secondary); border: 1px solid var(--border); }
+        .picker-thumb-placeholder { width: 64px; height: 36px; flex-shrink: 0; background: var(--bg-card); border-radius: 3px; }
+        .picker-empty { text-align: center; color: var(--text-secondary); font-size: 13px; padding: 30px; }
+        .picker-count { font-size: 11px; color: var(--text-secondary); padding: 4px 20px 8px; flex-shrink: 0; }
+        .picker-scene-tags { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 4px; }
+        .picker-tag { font-size: 10px; padding: 1px 5px; border-radius: 3px; background: var(--bg-card); border: 1px solid var(--border); color: var(--text-secondary); white-space: nowrap; }
+
+        /* ── Edit-channel modal ───────────────────────────────────────────── */
+        .logo-modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15,15,26,0.85); z-index: 9999; justify-content: center; align-items: flex-start; backdrop-filter: blur(4px); padding: 24px 16px; box-sizing: border-box; overflow-y: auto; }
+        .logo-modal-card { background: var(--bg-card); border-radius: 8px; padding: 28px; width: 100%; max-width: 540px; position: relative; margin: auto; }
         .logo-modal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
         .logo-modal-title { font-size: 16px; font-weight: 600; color: var(--text-primary); }
         .logo-modal-close { background: none; border: none; color: var(--text-secondary); font-size: 22px; cursor: pointer; padding: 2px 6px; }
         .logo-modal-close:hover { color: var(--text-primary); }
-        .logo-preview { width: 80px; height: 80px; object-fit: contain; border-radius: 6px; background: var(--bg-secondary); border: 1px solid var(--border); margin-bottom: 16px; display: block; }
-        .logo-modal-section { margin-bottom: 16px; }
+        .logo-preview { width: 72px; height: 72px; object-fit: contain; border-radius: 6px; background: var(--bg-secondary); border: 1px solid var(--border); display: block; flex-shrink: 0; }
+        .logo-modal-section { margin-bottom: 18px; }
         .logo-modal-label { font-size: 12px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
         .logo-modal-actions { display: flex; gap: 10px; margin-top: 20px; }
+        .logo-artwork-row { display: flex; gap: 16px; align-items: flex-start; }
+        .logo-artwork-inputs { flex: 1; min-width: 0; }
+        /* Tag art picker */
+        .ch-tag-art-picker { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+        .ch-tag-art-thumb { width: 60px; height: 60px; object-fit: contain; border-radius: 6px; cursor: pointer; border: 2px solid transparent; background: var(--bg-secondary); transition: border-color 0.15s; flex-shrink: 0; }
+        .ch-tag-art-thumb:hover { border-color: var(--text-secondary); }
+        .ch-tag-art-thumb.selected { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(74,144,217,0.3); }
+        .ch-tag-art-label { font-size: 11px; color: var(--text-secondary); margin-bottom: 6px; }
+        /* Source picker inside edit modal */
+        .ch-source-type-tabs { display: flex; gap: 4px; margin-bottom: 10px; }
+        .ch-source-type-tabs button { padding: 5px 14px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg-secondary); color: var(--text-secondary); font-size: 13px; cursor: pointer; }
+        .ch-source-type-tabs button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+        .ch-source-search { width: 100%; padding: 7px 10px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg-secondary); color: var(--text-primary); font-size: 13px; box-sizing: border-box; margin-bottom: 8px; }
+        .ch-source-list { max-height: 160px; overflow-y: auto; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-secondary); }
+        .ch-source-item { display: flex; align-items: center; gap: 8px; padding: 7px 10px; cursor: pointer; font-size: 13px; color: var(--text-primary); transition: background 0.1s; }
+        .ch-source-item:hover { background: rgba(255,255,255,0.05); }
+        .ch-source-item input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; flex-shrink: 0; pointer-events: none; }
+        .ch-source-item.selected { background: rgba(74,144,217,0.1); }
+        .ch-source-pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; min-height: 28px; }
+        .ch-source-pill { display: flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 12px; background: rgba(74,144,217,0.2); border: 1px solid var(--accent); font-size: 12px; color: var(--accent); }
+        .ch-source-pill-x { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 14px; padding: 0; line-height: 1; }
+        /* Regenerate warning */
+        .ch-regen-box { border: 1px solid rgba(220,100,50,0.4); border-radius: 6px; padding: 14px; background: rgba(220,100,50,0.07); margin-top: 18px; }
+        .ch-regen-warn { font-size: 12px; color: #e07040; margin-bottom: 10px; }
+        .ch-regen-warn strong { display: block; margin-bottom: 4px; font-size: 13px; }
+        .btn-danger { border-color: var(--error); color: var(--error); }
+        .btn-danger:hover { background: rgba(220,60,60,0.12); }
+        /* ── Add-channel modal ────────────────────────────────────────────── */
+        .add-ch-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15,15,26,0.85); z-index: 9999; justify-content: center; align-items: flex-start; backdrop-filter: blur(4px); padding: 24px 16px; box-sizing: border-box; overflow-y: auto; }
+        .add-ch-card { background: var(--bg-card); border-radius: 8px; padding: 28px; width: 100%; max-width: 500px; margin: auto; }
+        .add-ch-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+        .add-ch-title { font-size: 16px; font-weight: 600; color: var(--text-primary); }
+        .add-ch-close { background: none; border: none; color: var(--text-secondary); font-size: 22px; cursor: pointer; padding: 2px 6px; }
+        .add-ch-close:hover { color: var(--text-primary); }
+        .add-ch-footer { display: flex; gap: 10px; margin-top: 20px; justify-content: flex-end; }
+        /* ── Add-channel button (bottom of left panel) ────────────────────── */
+        .guide-add-channel-cell { height: 48px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; gap: 6px; padding: 8px; background: var(--bg-card); border-top: 1px solid var(--border); cursor: pointer; font-size: 13px; color: var(--accent); transition: background 0.15s; }
+        .guide-add-channel-cell:hover { background: var(--bg-secondary); }
+        /* ── Channel drag-to-reorder (edit mode) ─────────────────────────── */
+        .guide-channel-cell { position: relative; }
+        .guide-ch-drag-handle { position: absolute; left: 4px; top: 50%; transform: translateY(-50%); color: var(--text-secondary); font-size: 14px; opacity: 0; cursor: grab; transition: opacity 0.15s; padding: 4px; }
+        .guide-edit-active .guide-channel-cell .guide-ch-drag-handle { opacity: 0.5; }
+        .guide-edit-active .guide-channel-cell:hover .guide-ch-drag-handle { opacity: 1; }
+        .guide-channel-cell.ch-drag-over { border-top: 2px solid var(--accent); background: rgba(74,144,217,0.05); }
 
         /* ── Scene detail modal ───────────────────────────────────────────── */
         .scene-modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15,15,26,0.90); z-index: 9998; justify-content: center; align-items: center; backdrop-filter: blur(4px); padding: 20px; box-sizing: border-box; }

@@ -17,6 +17,13 @@ def transform_saved_filter(object_filter: dict) -> dict:
         if key in ('has_markers', 'is_missing'):
             result[key] = str(value['value']).lower() if isinstance(value, dict) and 'value' in value else str(value).lower()
             continue
+        # Stash GraphQL expects these as plain Booleans, not filter objects
+        if key in ('organized', 'interactive'):
+            if isinstance(value, bool):
+                result[key] = value
+            elif isinstance(value, dict) and 'value' in value:
+                result[key] = bool(value['value'])
+            continue
         if key in ('AND', 'OR', 'NOT'):
             if isinstance(value, list):
                 result[key] = [transform_saved_filter(v) for v in value if v]

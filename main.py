@@ -233,11 +233,27 @@ routes = [
     Route("/api/sysinfo", ui_routes.api_get_sysinfo, methods=["GET"]),
     Route("/api/livetv/rebuild-schedule", live_tv_routes.endpoint_rebuild_schedule, methods=["POST"]),
     Route("/api/livetv/guide", live_tv_routes.endpoint_guide_data, methods=["GET"]),
+    # Channel config CRUD
+    Route("/api/livetv/channels-config", live_tv_routes.endpoint_channels_config_list, methods=["GET"]),
+    Route("/api/livetv/channels-config", live_tv_routes.endpoint_channels_config_create, methods=["POST"]),
+    Route("/api/livetv/channels-config/reorder", live_tv_routes.endpoint_channels_config_reorder, methods=["POST"]),
+    Route("/api/livetv/channels-config/{tvg_id}", live_tv_routes.endpoint_channels_config_update, methods=["PATCH"]),
+    Route("/api/livetv/channels-config/{tvg_id}", live_tv_routes.endpoint_channels_config_delete, methods=["DELETE"]),
+    Route("/api/livetv/channels-config/{tvg_id}/rebuild", live_tv_routes.endpoint_channel_rebuild, methods=["POST"]),
+    # Stash source lists
+    Route("/api/livetv/stash-tags", live_tv_routes.endpoint_stash_tags_list, methods=["GET"]),
+    Route("/api/livetv/stash-filters", live_tv_routes.endpoint_stash_filters_list, methods=["GET"]),
+    Route("/api/livetv/stash-tag-image/{tag_id}", live_tv_routes.endpoint_stash_tag_image, methods=["GET"]),
+    Route("/api/livetv/channel-logo/{tvg_id}/from-tag", live_tv_routes.endpoint_channel_logo_set_from_tag, methods=["POST"]),
     Route("/api/livetv/channel-logo/{tvg_id}", live_tv_routes.endpoint_channel_logo_get, methods=["GET"]),
     Route("/api/livetv/channel-logo/{tvg_id}", live_tv_routes.endpoint_channel_logo_upload, methods=["POST"]),
     Route("/api/livetv/channel-logo/{tvg_id}", live_tv_routes.endpoint_channel_logo_delete, methods=["DELETE"]),
     Route("/api/livetv/scene/{scene_id}", live_tv_routes.endpoint_scene_detail, methods=["GET"]),
     Route("/api/livetv/scene/{scene_id}/screenshot", live_tv_routes.endpoint_scene_screenshot, methods=["GET"]),
+    Route("/api/livetv/channel-scenes/{tvg_id}", live_tv_routes.endpoint_channel_scenes, methods=["GET"]),
+    Route("/api/livetv/schedule/{tvg_id}/{eid}", live_tv_routes.endpoint_schedule_delete, methods=["DELETE"]),
+    Route("/api/livetv/schedule/{tvg_id}/reorder", live_tv_routes.endpoint_schedule_reorder, methods=["POST"]),
+    Route("/api/livetv/schedule/{tvg_id}/insert", live_tv_routes.endpoint_schedule_insert, methods=["POST"]),
     
     Route("/system/info/public", auth_routes.endpoint_system_info_public, methods=["GET"]),
     Route("/public/system/info", auth_routes.endpoint_system_info_public, methods=["GET"]),
@@ -376,6 +392,7 @@ routes = [
 
 @asynccontextmanager
 async def lifespan(app):
+    live_tv_routes._load_channels_config()
     if getattr(config, "ENABLE_STASH_CHANNELS", False):
         live_tv_routes._load_schedule()
         await live_tv_routes.start_maintenance_task()

@@ -597,6 +597,22 @@
         let _guideDate = null;          // midnight LOCAL time of displayed day (Date object)
         let _guideData = null;          // last loaded response
         let _logoModalTvgId = null;
+        let _guideEditMode = false;
+        let _pickerTvgId = null;
+        let _pickerAfterEid = null;
+        let _channelScenesCache = {};
+        let _dragData = null;
+        let _dragCurrentShiftLeft = -1;
+        let _dragInsertAfterEid = null;
+        let _chEditTvgId = null;
+        let _chEditType = 'tag';
+        let _chEditSources = [];
+        let _chEditStashArtTagId = null;
+        let _chAddType = 'tag';
+        let _chAddSources = [];
+        let _tagsCache = null;
+        let _filtersCache = null;
+        let _chDragSrc = null;
 
         function _guideDateMidnightLocal(d) {
             // Return a new Date at 00:00:00 in the browser's local timezone.
@@ -667,19 +683,24 @@
 
             // ── Left panel: channel column ────────────────────────────────────
             // Fixed width, overflow:hidden — JS syncs its scrollTop from the right panel.
+            const sortedChannels = [...channels].sort((a, b) => (Number(a.number) || 0) - (Number(b.number) || 0));
             let leftHtml = `<div class="guide-corner" style="height:${RULER_H}px;"></div>`;
-            for (const ch of channels) {
+            for (const ch of sortedChannels) {
                 const logoHtml = ch.logo_url
                     ? `<img class="guide-ch-logo" src="${escapeHTML(ch.logo_url)}" alt="" onerror="this.style.display='none'">`
                     : `<div class="guide-ch-logo-placeholder"></div>`;
                 leftHtml += `<div class="guide-channel-cell" style="height:${ROW_H}px;"
                     data-tvgid="${escapeHTML(ch.tvg_id)}" data-chname="${escapeHTML(ch.name)}"
-                    onclick="openLogoModal(this)" title="Click to manage logo">
+                    draggable="true"
+                    onclick="openChannelEditModal(this)" title="Click to edit channel">
+                    <span class="guide-ch-drag-handle">&#8942;</span>
                     ${logoHtml}
+                    ${ch.number != null ? `<span class="guide-ch-number">${escapeHTML(String(ch.number))}</span>` : ''}
                     <span class="guide-ch-name">${escapeHTML(ch.name)}</span>
-                    <span class="guide-ch-edit-hint">&#9998; Logo</span>
+                    <span class="guide-ch-edit-hint">&#9998; Edit</span>
                 </div>`;
             }
+            leftHtml += `<div class="guide-add-channel-cell" onclick="openAddChannelModal()">&#43; Add Channel</div>`;
 
             // ── Right panel: ruler + program rows ─────────────────────────────
             // overflow:auto in both directions — this is the real scroll container.
@@ -694,21 +715,41 @@
             rulerHtml += `</div>`;
 
             let rowsHtml = '';
-            for (const ch of channels) {
+            for (const ch of sortedChannels) {
                 let progsHtml = '';
+                let prevEid = null;
+                let prevRightPx = 0;
                 if (isToday) {
                     const nowLeft = Math.round(Math.min(totalMins, Math.max(0, (nowSec - dayStart) / 60)) * GUIDE_PX_PER_MIN);
                     progsHtml += `<div class="guide-now-line" style="left:${nowLeft}px;"></div>`;
                 }
-                for (const prog of ch.programs) {
+                const sortedProgs = [...(ch.programs || [])].sort((a, b) => a.start_ts - b.start_ts);
+                let lastProgIsPast = true;
+                for (const prog of sortedProgs) {
                     const startMin = (prog.start_ts - dayStart) / 60;
                     const stopMin  = (prog.stop_ts  - dayStart) / 60;
                     const s = Math.max(0, startMin);
                     const e = Math.min(totalMins, stopMin);
                     if (e <= s) continue;
-                    const left  = Math.round(s * GUIDE_PX_PER_MIN);
-                    const width = Math.max(2, Math.round((e - s) * GUIDE_PX_PER_MIN) - 2);
+                    let left  = Math.round(s * GUIDE_PX_PER_MIN);
+                    // 14 = the smallest width .guide-program can actually render at:
+                    // box-sizing:border-box + 1px border ×2 + 6px padding ×2 (see head.html .guide-program).
+                    // Recording a narrower width here would desync data-orig-width from the rendered box.
+                    let width = Math.max(14, Math.round((e - s) * GUIDE_PX_PER_MIN) - 2);
+                    // Push right if it would visually overlap the previous program
+                    if (left < prevRightPx) {
+                        const push = prevRightPx - left;
+                        left += push;
+                        width = Math.max(14, width - push);
+                    }
                     const isLive = prog.start_ts <= nowSec && prog.stop_ts > nowSec;
+                    const isPast = prog.stop_ts <= nowSec;
+                    // Insert zone only before future programs — inserting before past/live time slots is meaningless
+                    if (prog.start_ts > nowSec) {
+                        progsHtml += `<div class="guide-insert-zone" style="left:${left - 3}px;"
+                            data-tvgid="${escapeHTML(ch.tvg_id)}" data-aftereid="${escapeHTML(prevEid || '')}"
+                            onclick="openInsertModal(this)"><span class="guide-insert-icon">+</span></div>`;
+                    }
                     // Use data-scene / data-title so the title is never embedded inside
                     // a JS string literal in the onclick — the browser would decode HTML
                     // entities (&#39; → ') before the JS engine sees the string, breaking
@@ -717,11 +758,29 @@
                         ? ` data-scene="${prog.scene_id}" data-title="${escapeHTML(prog.title)}" onclick="openSceneModal(this)"`
                         : '';
                     const genreClass = GENRE_CLASS[prog.genre] || '';
-                    progsHtml += `<div class="guide-program${isLive ? ' guide-program-live' : ''}${genreClass ? ' ' + genreClass : ''}"
+                    const hasDrag = !!(prog.scene_id && prog.eid) && !isPast;
+                    progsHtml += `<div class="guide-program${isLive ? ' guide-program-live' : ''}${isPast ? ' guide-program-past' : ''}${genreClass ? ' ' + genreClass : ''}"
                         style="left:${left}px;width:${width}px;"
-                        title="${escapeHTML(prog.title)}"${sceneAttrs}>
+                        data-eid="${escapeHTML(prog.eid || '')}"
+                        data-tvgid="${escapeHTML(ch.tvg_id)}"
+                        data-sceneid="${escapeHTML(prog.scene_id || '')}"
+                        data-orig-left="${left}"
+                        data-orig-width="${width}"
+                        title="${escapeHTML(prog.title)}"
+                        ${hasDrag ? 'draggable="true"' : ''}${sceneAttrs}>
+                        ${hasDrag ? '<span class="guide-prog-drag" title="Drag to reorder">&#8942;</span>' : ''}
+                        ${(prog.eid && !isPast) ? `<button class="guide-prog-delete" data-eid="${escapeHTML(prog.eid)}" data-tvgid="${escapeHTML(ch.tvg_id)}" onclick="event.stopPropagation();deleteScheduleEntry(this.dataset.tvgid,this.dataset.eid)" title="Remove from schedule">&#10005;</button>` : ''}
                         <span class="guide-program-title">${escapeHTML(prog.title)}</span>
                     </div>`;
+                    lastProgIsPast = isPast;
+                    prevEid = prog.eid || null;
+                    prevRightPx = left + width + 2;
+                }
+                // Trailing insert zone after last visible program (only if it hasn't fully aired yet)
+                if (prevEid && !lastProgIsPast) {
+                    progsHtml += `<div class="guide-insert-zone" style="left:${prevRightPx - 3}px;"
+                        data-tvgid="${escapeHTML(ch.tvg_id)}" data-aftereid="${escapeHTML(prevEid)}"
+                        onclick="openInsertModal(this)"><span class="guide-insert-icon">+</span></div>`;
                 }
                 rowsHtml += `<div class="guide-programs-row" style="width:${totalW}px;height:${ROW_H}px;">${progsHtml}</div>`;
             }
@@ -730,10 +789,179 @@
                 `<div class="guide-left" id="guide-left">${leftHtml}</div>` +
                 `<div class="guide-right" id="guide-right">${rulerHtml}${rowsHtml}</div>`;
 
+            // Re-apply edit mode class after re-render
+            wrapper.classList.toggle('guide-edit-active', _guideEditMode);
+
+            // Insert zone hover: adjacent programs shrink to make visual room
+            wrapper.querySelectorAll('.guide-insert-zone').forEach(zone => {
+                zone.addEventListener('mouseenter', () => {
+                    if (_dragData) return;
+                    const row = zone.closest('.guide-programs-row');
+                    if (!row) return;
+                    const zonePx = parseInt(zone.style.left); // DOM left (before transform)
+                    // Hover CSS: width:30px, transform:translateX(-15px)
+                    // Visual left  = zonePx - 15  →  clear target with 2px margin = zonePx - 17
+                    // Visual right = zonePx + 15  →  clear target with 2px margin = zonePx + 17
+                    const progs = Array.from(row.querySelectorAll('.guide-program[data-orig-left]'));
+                    const sorted = progs.slice().sort((a, b) => parseInt(a.dataset.origLeft) - parseInt(b.dataset.origLeft));
+                    // zone.style.left = right_prog_left - 3, so right_prog_left = zonePx + 3.
+                    // Filters are mutually exclusive: a program can only satisfy both if origWidth=0 (impossible).
+                    // Using origRight <= zonePx+3 captures programs clamped to 0px gap (no gap to rightProg).
+                    const leftProgs  = sorted.filter(p => parseInt(p.dataset.origLeft) + parseInt(p.dataset.origWidth) <= zonePx + 3).reverse();
+                    const rightProgs = sorted.filter(p => parseInt(p.dataset.origLeft) >= zonePx + 3);
+                    // Smallest width .guide-program can actually render at: box-sizing:border-box
+                    // means width includes 1px border ×2 + 6px padding ×2 = 14px floor (see head.html).
+                    // The browser clamps narrower inline widths to this, so canShrink must use 14, not 4 —
+                    // otherwise the absorber is picked thinking it can shrink more than it physically can.
+                    const MIN_W = 14;
+
+                    // Pixels each side must yield for the expanded zone (visual [zonePx-15, zonePx+15])
+                    // to have 2px clearance at each boundary.
+                    const leftNeed  = leftProgs.length  > 0 ? Math.max(0, (parseInt(leftProgs[0].dataset.origLeft)  + parseInt(leftProgs[0].dataset.origWidth))  - (zonePx - 17)) : 0;
+                    const rightNeed = rightProgs.length > 0 ? Math.max(0, (zonePx + 17) - parseInt(rightProgs[0].dataset.origLeft)) : 0;
+
+                    // Absorber strategy: walk outward from the zone until we find the first program
+                    // with enough spare capacity to absorb the full amount in one shot.
+                    // Smaller programs between the zone and the absorber just slide as a block.
+                    // The absorber itself shrinks; everything past it is untouched.
+                    const applyAbsorber = (progs, need, direction) => {
+                        if (need <= 0 || progs.length === 0) return;
+                        // Find first program that can absorb the full amount
+                        let absIdx = progs.length - 1; // fallback: last program absorbs what it can
+                        for (let i = 0; i < progs.length; i++) {
+                            if (Math.max(0, parseInt(progs[i].dataset.origWidth) - MIN_W) >= need) {
+                                absIdx = i;
+                                break;
+                            }
+                        }
+                        const abs    = progs[absIdx];
+                        const absL   = parseInt(abs.dataset.origLeft);
+                        const absW   = parseInt(abs.dataset.origWidth);
+                        // shrink = how much the absorber's near edge actually moves.
+                        // Non-absorbers must slide by the same amount so inter-program gaps are preserved.
+                        // Using 'need' for non-absorbers when the absorber can only yield 'shrink < need'
+                        // would slide them into the absorber.
+                        const shrink = Math.min(need, Math.max(0, absW - MIN_W));
+                        for (let i = 0; i < absIdx; i++) {
+                            const p = progs[i];
+                            const origL = parseInt(p.dataset.origLeft);
+                            p.style.transition = 'left 0.15s ease';
+                            p.style.left = (origL + direction * shrink) + 'px';
+                        }
+                        // Absorber: shrink from near (zone-facing) edge; far edge stays anchored.
+                        // Left: left edge anchors, right retreats → left stays, width shrinks.
+                        // Right: right edge anchors, left retreats → left moves right by shrink, width shrinks.
+                        abs.style.transition = 'left 0.15s ease, width 0.15s ease';
+                        abs.style.left  = (direction > 0 ? absL + shrink : absL) + 'px';
+                        abs.style.width = (absW - shrink) + 'px';
+                    };
+
+                    applyAbsorber(leftProgs,  leftNeed,  -1); // left side slides left  (direction -1)
+                    applyAbsorber(rightProgs, rightNeed, +1); // right side slides right (direction +1)
+                });
+                zone.addEventListener('mouseleave', () => {
+                    if (_dragData) return;
+                    const row = zone.closest('.guide-programs-row');
+                    if (!row) return;
+                    row.querySelectorAll('.guide-program[data-orig-left]').forEach(p => {
+                        p.style.transition = 'left 0.15s ease, width 0.15s ease';
+                        p.style.left  = p.dataset.origLeft + 'px';
+                        p.style.width = p.dataset.origWidth + 'px';
+                        setTimeout(() => { p.style.transition = ''; }, 160);
+                    });
+                });
+            });
+
+            // Wire drag-and-drop with live visual shift
+            wrapper.querySelectorAll('.guide-program[draggable="true"]').forEach(el => {
+                el.addEventListener('dragstart', e => {
+                    if (!_guideEditMode) { e.preventDefault(); return; }
+                    _dragData = {
+                        tvg_id: el.dataset.tvgid, eid: el.dataset.eid, scene_id: el.dataset.sceneid,
+                        px_width: parseInt(el.dataset.origWidth)
+                    };
+                    el.classList.add('dragging');
+                    wrapper.classList.add('guide-drag-active');
+                    e.dataTransfer.effectAllowed = 'move';
+                });
+                el.addEventListener('dragend', () => {
+                    el.classList.remove('dragging');
+                    wrapper.classList.remove('guide-drag-active');
+                    clearDragShifts();
+                    _dragData = null;
+                    _dragInsertAfterEid = null;
+                });
+                el.addEventListener('dragover', e => {
+                    if (!_guideEditMode || !_dragData || el.dataset.eid === _dragData.eid) return;
+                    e.preventDefault();
+                    e.dataTransfer.dropEffect = 'move';
+                    const rect = el.getBoundingClientRect();
+                    const isLeftHalf  = e.clientX < rect.left + rect.width / 2;
+                    const elOrigLeft  = parseInt(el.dataset.origLeft);
+                    const elOrigWidth = parseInt(el.dataset.origWidth);
+                    const gapLeft = isLeftHalf ? elOrigLeft : elOrigLeft + elOrigWidth + 2;
+                    if (gapLeft !== _dragCurrentShiftLeft) {
+                        _dragCurrentShiftLeft = gapLeft;
+                        _dragInsertAfterEid   = isLeftHalf ? _getPrevEid(el) : el.dataset.eid;
+                        // Reset row positions, then apply new shift (no animation during rapid drag updates)
+                        const row = el.closest('.guide-programs-row');
+                        row.querySelectorAll('.guide-program[data-orig-left]').forEach(p => {
+                            p.style.left = p.dataset.origLeft + 'px';
+                        });
+                        applyDragShift(row, gapLeft);
+                    }
+                });
+                el.addEventListener('drop', e => {
+                    e.preventDefault();
+                    clearDragShifts();
+                    if (!_dragData || !_guideEditMode) return;
+                    const targetTvgId = el.dataset.tvgid;
+                    if (_dragData.tvg_id !== targetTvgId || _dragData.eid === el.dataset.eid) {
+                        _dragData = null;
+                        return;
+                    }
+                    const afterEid = _dragInsertAfterEid;
+                    const { eid: srcEid, scene_id } = _dragData;
+                    _dragData = null;
+                    _dragInsertAfterEid = null;
+                    _dragCurrentShiftLeft = -1;
+                    doReorderDrop(afterEid, srcEid, scene_id, targetTvgId);
+                });
+            });
+
             // Sync left panel vertical scroll to right panel's vertical scroll.
             const rightEl = document.getElementById('guide-right');
             const leftEl  = document.getElementById('guide-left');
             rightEl.addEventListener('scroll', () => { leftEl.scrollTop = rightEl.scrollTop; });
+
+            // Wire channel cell drag-to-reorder (edit mode only)
+            leftEl.querySelectorAll('.guide-channel-cell[draggable]').forEach(cell => {
+                cell.addEventListener('dragstart', e => {
+                    if (!_guideEditMode) { e.preventDefault(); return; }
+                    _chDragSrc = cell.dataset.tvgid;
+                    cell.classList.add('ch-dragging');
+                    e.dataTransfer.effectAllowed = 'move';
+                });
+                cell.addEventListener('dragend', () => {
+                    cell.classList.remove('ch-dragging');
+                    leftEl.querySelectorAll('.guide-channel-cell').forEach(c => c.classList.remove('ch-drag-over'));
+                    _chDragSrc = null;
+                });
+                cell.addEventListener('dragover', e => {
+                    if (!_guideEditMode || !_chDragSrc || cell.dataset.tvgid === _chDragSrc) return;
+                    e.preventDefault();
+                    leftEl.querySelectorAll('.guide-channel-cell').forEach(c => c.classList.remove('ch-drag-over'));
+                    cell.classList.add('ch-drag-over');
+                });
+                cell.addEventListener('drop', e => {
+                    e.preventDefault();
+                    leftEl.querySelectorAll('.guide-channel-cell').forEach(c => c.classList.remove('ch-drag-over'));
+                    if (!_chDragSrc || !_guideEditMode || cell.dataset.tvgid === _chDragSrc) return;
+                    const srcId = _chDragSrc;
+                    _chDragSrc = null;
+                    reorderChannel(srcId, cell.dataset.tvgid);
+                });
+            });
 
             // Scroll to current time, roughly centred in a 4-hour viewport.
             if (isToday) {
@@ -756,34 +984,61 @@
             loadGuide();
         }
 
-        // ── Logo modal ────────────────────────────────────────────────────────
+        // ── Channel edit modal ────────────────────────────────────────────────
 
-        function openLogoModal(el) {
-            const tvgId       = el.dataset.tvgid;
-            const channelName = el.dataset.chname;
+        async function openChannelEditModal(el) {
+            const tvgId = el.dataset.tvgid;
+            _chEditTvgId = tvgId;
             _logoModalTvgId = tvgId;
-            document.getElementById('logo-modal-title').textContent = channelName;
-            document.getElementById('logo-file-input').value = '';
+            _chEditSources = [];
+            _chEditType = 'tag';
+            _chEditStashArtTagId = null;
+
+            document.getElementById('logo-modal-title').textContent = el.dataset.chname || 'Edit Channel';
+            document.getElementById('ch-edit-name').value = '';
+            document.getElementById('ch-edit-number').value = '';
+            document.getElementById('ch-edit-source-search').value = '';
+            document.getElementById('ch-edit-source-list').innerHTML = '<div class="empty-state" style="padding:12px;">Loading…</div>';
+            document.getElementById('ch-edit-source-pills').innerHTML = '';
+            document.getElementById('ch-regen-status').textContent = '';
             document.getElementById('logo-upload-status').textContent = '';
+            document.getElementById('logo-file-input').value = '';
+            const artSection = document.getElementById('ch-tag-art-section');
+            if (artSection) artSection.style.display = 'none';
+            const regenBtn = document.getElementById('ch-regen-btn');
+            regenBtn.disabled = false;
+            regenBtn.textContent = 'Regenerate Schedule for This Channel';
+            const deleteBtn = document.getElementById('ch-delete-btn');
+            if (deleteBtn) { deleteBtn.dataset.confirming = 'false'; deleteBtn.textContent = 'Delete Channel'; }
 
             const preview = document.getElementById('logo-modal-preview');
-            // Find the current logo URL from guide data
-            const ch = (_guideData && _guideData.channels)
-                ? _guideData.channels.find(c => c.tvg_id === tvgId)
-                : null;
-            if (ch && ch.logo_url) {
-                preview.src = ch.logo_url;
-                preview.style.display = 'block';
-            } else {
-                preview.src = '';
-                preview.style.display = 'none';
-            }
+            const ch = (_guideData && _guideData.channels) ? _guideData.channels.find(c => c.tvg_id === tvgId) : null;
+            if (ch && ch.logo_url) { preview.src = ch.logo_url; preview.style.display = 'block'; }
+            else { preview.src = ''; preview.style.display = 'none'; }
 
             document.getElementById('logo-modal-overlay').style.display = 'flex';
+
+            try {
+                const res = await fetch('/api/livetv/channels-config');
+                if (res.ok) {
+                    const data = await res.json();
+                    const cfg = (data.channels || []).find(c => c.tvg_id === tvgId);
+                    if (cfg) {
+                        document.getElementById('ch-edit-name').value = cfg.name || '';
+                        document.getElementById('ch-edit-number').value = cfg.number != null ? cfg.number : '';
+                        _chEditType = cfg.stash_type || 'tag';
+                        _chEditSources = (cfg.source_ids || []).map(id => ({ id: String(id), name: String(id) }));
+                    }
+                }
+            } catch (e) { /* proceed with empty state */ }
+
+            _setChEditTab(_chEditType);
+            await _loadChEditSources();
         }
 
         function closeLogoModal() {
             document.getElementById('logo-modal-overlay').style.display = 'none';
+            _chEditTvgId = null;
             _logoModalTvgId = null;
         }
 
@@ -793,35 +1048,6 @@
                 const reader = new FileReader();
                 reader.onload = e => { preview.src = e.target.result; preview.style.display = 'block'; };
                 reader.readAsDataURL(input.files[0]);
-            }
-        }
-
-        async function uploadLogo() {
-            const fileInput = document.getElementById('logo-file-input');
-            const status    = document.getElementById('logo-upload-status');
-            if (!_logoModalTvgId || !fileInput.files.length) {
-                status.textContent = 'Please select a file first.';
-                status.style.color = 'var(--warning)';
-                return;
-            }
-            status.textContent = 'Uploading…';
-            status.style.color = 'var(--text-secondary)';
-            const form = new FormData();
-            form.append('file', fileInput.files[0]);
-            try {
-                const res = await fetch(`/api/livetv/channel-logo/${_logoModalTvgId}`, { method: 'POST', body: form });
-                if (res.ok) {
-                    showToast('Logo saved', 'success');
-                    closeLogoModal();
-                    loadGuide();
-                } else {
-                    const data = await res.json().catch(() => ({}));
-                    status.textContent = data.error || 'Upload failed.';
-                    status.style.color = 'var(--error)';
-                }
-            } catch (e) {
-                status.textContent = 'Network error.';
-                status.style.color = 'var(--error)';
             }
         }
 
@@ -836,6 +1062,569 @@
                     loadGuide();
                 } else {
                     showToast('Clear failed', 'error');
+                }
+            } catch (e) {
+                showToast('Network error', 'error');
+            }
+        }
+
+        // ── Channel edit modal helpers ────────────────────────────────────────
+
+        async function _loadTagsCache() {
+            if (_tagsCache) return _tagsCache;
+            const res = await fetch('/api/livetv/stash-tags');
+            if (!res.ok) return [];
+            _tagsCache = (await res.json()).tags || [];
+            return _tagsCache;
+        }
+
+        async function _loadFiltersCache() {
+            if (_filtersCache) return _filtersCache;
+            const res = await fetch('/api/livetv/stash-filters');
+            if (!res.ok) return [];
+            _filtersCache = (await res.json()).filters || [];
+            return _filtersCache;
+        }
+
+        function _setChEditTab(type) {
+            _chEditType = type;
+            document.getElementById('ch-edit-tab-tag').classList.toggle('active', type === 'tag');
+            document.getElementById('ch-edit-tab-filter').classList.toggle('active', type === 'filter');
+        }
+
+        function switchChEditTab(type) {
+            if (type === _chEditType) return;
+            _chEditSources = [];
+            _chEditStashArtTagId = null;
+            _setChEditTab(type);
+            document.getElementById('ch-edit-source-search').value = '';
+            _loadChEditSources();
+        }
+
+        async function _loadChEditSources() {
+            const list = document.getElementById('ch-edit-source-list');
+            list.innerHTML = '<div class="empty-state" style="padding:12px;">Loading…</div>';
+            try {
+                const items = _chEditType === 'tag' ? await _loadTagsCache() : await _loadFiltersCache();
+                // Resolve placeholder names for pre-selected source IDs
+                _chEditSources = _chEditSources.map(s => {
+                    const found = items.find(i => String(i.id) === s.id);
+                    return found ? { id: String(found.id), name: found.name } : s;
+                });
+                renderChEditSourceList();
+                _renderChEditPills();
+                _renderTagArtPicker();
+            } catch (e) {
+                list.innerHTML = '<div class="empty-state" style="padding:12px;">Failed to load.</div>';
+            }
+        }
+
+        async function renderChEditSourceList() {
+            const search = (document.getElementById('ch-edit-source-search').value || '').toLowerCase();
+            const list = document.getElementById('ch-edit-source-list');
+            try {
+                const items = _chEditType === 'tag' ? await _loadTagsCache() : await _loadFiltersCache();
+                const filtered = search ? items.filter(i => i.name.toLowerCase().includes(search)) : items;
+                if (!filtered.length) { list.innerHTML = '<div class="empty-state" style="padding:12px;">No results.</div>'; return; }
+                // Selected items first, then alphabetical within each group
+                const sorted = [...filtered].sort((a, b) => {
+                    const asel = _chEditSources.some(s => s.id === String(a.id));
+                    const bsel = _chEditSources.some(s => s.id === String(b.id));
+                    if (asel !== bsel) return asel ? -1 : 1;
+                    return a.name.localeCompare(b.name);
+                });
+                list.innerHTML = sorted.map(i => {
+                    const sid = String(i.id);
+                    const sel = _chEditSources.some(s => s.id === sid);
+                    return `<div class="ch-source-item${sel ? ' selected' : ''}" onclick="toggleChEditSource('${escapeHTML(sid)}','${escapeHTML(i.name)}')">
+                        <input type="checkbox"${sel ? ' checked' : ''}>
+                        <span>${escapeHTML(i.name)}</span>
+                    </div>`;
+                }).join('');
+            } catch (e) {}
+        }
+
+        function toggleChEditSource(id, name) {
+            const idx = _chEditSources.findIndex(s => s.id === id);
+            if (idx >= 0) _chEditSources.splice(idx, 1);
+            else _chEditSources.push({ id, name });
+            renderChEditSourceList();
+            _renderChEditPills();
+            _renderTagArtPicker();
+        }
+
+        function _renderChEditPills() {
+            document.getElementById('ch-edit-source-pills').innerHTML = _chEditSources.map(s =>
+                `<span class="ch-source-pill">${escapeHTML(s.name)}<button class="ch-source-pill-x" onclick="toggleChEditSource('${escapeHTML(s.id)}','${escapeHTML(s.name)}')">&times;</button></span>`
+            ).join('');
+        }
+
+        function _tagArtThumbError(el) {
+            el.remove();
+            const picker = document.getElementById('ch-tag-art-picker');
+            if (picker && picker.childElementCount === 0) {
+                const section = document.getElementById('ch-tag-art-section');
+                if (section) section.style.display = 'none';
+            }
+        }
+
+        function _renderTagArtPicker() {
+            const section = document.getElementById('ch-tag-art-section');
+            const picker  = document.getElementById('ch-tag-art-picker');
+            if (!section || !picker) return;
+            if (_chEditType !== 'tag' || !_chEditSources.length) {
+                section.style.display = 'none';
+                return;
+            }
+            section.style.display = 'block';
+            picker.innerHTML = _chEditSources.map(s =>
+                `<img class="ch-tag-art-thumb${_chEditStashArtTagId === s.id ? ' selected' : ''}"
+                    src="/api/livetv/stash-tag-image/${escapeHTML(s.id)}"
+                    title="${escapeHTML(s.name)}"
+                    onerror="_tagArtThumbError(this)"
+                    onclick="_selectTagArt('${escapeHTML(s.id)}')">`
+            ).join('');
+        }
+
+        function _selectTagArt(tagId) {
+            _chEditStashArtTagId = tagId;
+            document.getElementById('logo-file-input').value = '';
+            // Preview the selected art
+            const preview = document.getElementById('logo-modal-preview');
+            preview.src = `/api/livetv/stash-tag-image/${tagId}`;
+            preview.style.display = 'block';
+            // Update selection highlight
+            document.querySelectorAll('.ch-tag-art-thumb').forEach(el => {
+                el.classList.toggle('selected', el.getAttribute('onclick').includes(`'${tagId}'`));
+            });
+        }
+
+        async function saveChannelEdit() {
+            if (!_chEditTvgId) return;
+            const name   = document.getElementById('ch-edit-name').value.trim();
+            const number = document.getElementById('ch-edit-number').value.trim();
+            if (!name) { showToast('Channel name is required', 'error'); return; }
+            const tvgId = _chEditTvgId;
+            const status = document.getElementById('logo-upload-status');
+
+            // Upload file if one is selected
+            const fileInput = document.getElementById('logo-file-input');
+            if (fileInput.files.length) {
+                status.textContent = 'Uploading art…';
+                status.style.color = 'var(--text-secondary)';
+                const form = new FormData();
+                form.append('file', fileInput.files[0]);
+                try {
+                    const ur = await fetch(`/api/livetv/channel-logo/${encodeURIComponent(tvgId)}`, { method: 'POST', body: form });
+                    if (!ur.ok) {
+                        const ud = await ur.json().catch(() => ({}));
+                        status.textContent = ud.error || 'Art upload failed.';
+                        status.style.color = 'var(--error)';
+                        return;
+                    }
+                } catch (e) {
+                    status.textContent = 'Network error uploading art.';
+                    status.style.color = 'var(--error)';
+                    return;
+                }
+                status.textContent = '';
+            } else if (_chEditStashArtTagId) {
+                // Use selected Stash tag artwork
+                status.textContent = 'Saving tag art…';
+                status.style.color = 'var(--text-secondary)';
+                try {
+                    const ar = await fetch(`/api/livetv/channel-logo/${encodeURIComponent(tvgId)}/from-tag`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ tag_id: _chEditStashArtTagId })
+                    });
+                    if (!ar.ok) {
+                        const ad = await ar.json().catch(() => ({}));
+                        status.textContent = ad.error || 'Failed to save tag art.';
+                        status.style.color = 'var(--error)';
+                        return;
+                    }
+                } catch (e) {
+                    status.textContent = 'Network error saving tag art.';
+                    status.style.color = 'var(--error)';
+                    return;
+                }
+                status.textContent = '';
+            }
+
+            try {
+                const res = await fetch(`/api/livetv/channels-config/${encodeURIComponent(tvgId)}`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        name,
+                        number: number !== '' ? parseInt(number) : null,
+                        stash_type: _chEditType,
+                        source_ids: _chEditSources.map(s => s.id)
+                    })
+                });
+                if (res.ok) {
+                    showToast('Channel saved', 'success');
+                    closeLogoModal();
+                    loadGuide();
+                } else {
+                    const data = await res.json().catch(() => ({}));
+                    showToast(data.error || 'Save failed', 'error');
+                }
+            } catch (e) { showToast('Network error', 'error'); }
+        }
+
+        function deleteChannel() {
+            const btn = document.getElementById('ch-delete-btn');
+            if (!btn || !_chEditTvgId) return;
+            if (btn.dataset.confirming === 'true') {
+                btn.dataset.confirming = 'false';
+                btn.textContent = 'Delete Channel';
+                fetch(`/api/livetv/channels-config/${encodeURIComponent(_chEditTvgId)}`, { method: 'DELETE' })
+                    .then(res => {
+                        if (res.ok) { showToast('Channel deleted', 'success'); closeLogoModal(); loadGuide(); }
+                        else res.json().catch(() => ({})).then(d => showToast(d.error || 'Delete failed', 'error'));
+                    }).catch(() => showToast('Network error', 'error'));
+            } else {
+                btn.dataset.confirming = 'true';
+                btn.textContent = 'Are you sure?';
+                setTimeout(() => {
+                    if (btn.dataset.confirming === 'true') { btn.dataset.confirming = 'false'; btn.textContent = 'Delete Channel'; }
+                }, 3000);
+            }
+        }
+
+        async function rebuildChannelSchedule() {
+            if (!_chEditTvgId) return;
+            const btn = document.getElementById('ch-regen-btn');
+            const statusEl = document.getElementById('ch-regen-status');
+            btn.disabled = true;
+            btn.textContent = 'Rebuilding…';
+            statusEl.textContent = '';
+            statusEl.style.color = 'var(--text-secondary)';
+            try {
+                const res = await fetch(`/api/livetv/channels-config/${encodeURIComponent(_chEditTvgId)}/rebuild`, { method: 'POST' });
+                const data = await res.json().catch(() => ({}));
+                if (res.ok) {
+                    statusEl.textContent = `Done — ${data.programs || 0} programs scheduled.`;
+                    statusEl.style.color = 'var(--success)';
+                } else {
+                    statusEl.textContent = data.error || 'Rebuild failed.';
+                    statusEl.style.color = 'var(--error)';
+                }
+            } catch (e) {
+                statusEl.textContent = 'Network error.';
+                statusEl.style.color = 'var(--error)';
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Regenerate Schedule for This Channel';
+            }
+        }
+
+        // ── Add channel modal ─────────────────────────────────────────────────
+
+        function openAddChannelModal() {
+            _chAddType = 'tag';
+            _chAddSources = [];
+            document.getElementById('add-ch-tab-tag').classList.add('active');
+            document.getElementById('add-ch-tab-filter').classList.remove('active');
+            document.getElementById('add-ch-source-search').value = '';
+            document.getElementById('add-ch-source-list').innerHTML = '<div class="empty-state" style="padding:12px;">Loading…</div>';
+            document.getElementById('add-ch-source-pills').innerHTML = '';
+            document.getElementById('add-ch-name').value = '';
+            document.getElementById('add-ch-number').value = '';
+            document.getElementById('add-ch-status').textContent = '';
+            document.getElementById('add-ch-overlay').style.display = 'flex';
+            _loadAddChSources();
+        }
+
+        function closeAddChannelModal() {
+            document.getElementById('add-ch-overlay').style.display = 'none';
+            _chAddSources = [];
+        }
+
+        function switchAddChTab(type) {
+            if (type === _chAddType) return;
+            _chAddSources = [];
+            _chAddType = type;
+            document.getElementById('add-ch-tab-tag').classList.toggle('active', type === 'tag');
+            document.getElementById('add-ch-tab-filter').classList.toggle('active', type === 'filter');
+            document.getElementById('add-ch-source-search').value = '';
+            _loadAddChSources();
+            _renderAddChPills();
+        }
+
+        async function _loadAddChSources() {
+            try {
+                _chAddType === 'tag' ? await _loadTagsCache() : await _loadFiltersCache();
+                renderAddChSourceList();
+            } catch (e) {
+                document.getElementById('add-ch-source-list').innerHTML = '<div class="empty-state" style="padding:12px;">Failed to load.</div>';
+            }
+        }
+
+        async function renderAddChSourceList() {
+            const search = (document.getElementById('add-ch-source-search').value || '').toLowerCase();
+            const list = document.getElementById('add-ch-source-list');
+            try {
+                const items = _chAddType === 'tag' ? await _loadTagsCache() : await _loadFiltersCache();
+                const filtered = search ? items.filter(i => i.name.toLowerCase().includes(search)) : items;
+                if (!filtered.length) { list.innerHTML = '<div class="empty-state" style="padding:12px;">No results.</div>'; return; }
+                // Selected items first, then alphabetical within each group
+                const sorted = [...filtered].sort((a, b) => {
+                    const asel = _chAddSources.some(s => s.id === String(a.id));
+                    const bsel = _chAddSources.some(s => s.id === String(b.id));
+                    if (asel !== bsel) return asel ? -1 : 1;
+                    return a.name.localeCompare(b.name);
+                });
+                list.innerHTML = sorted.map(i => {
+                    const sid = String(i.id);
+                    const sel = _chAddSources.some(s => s.id === sid);
+                    return `<div class="ch-source-item${sel ? ' selected' : ''}" onclick="toggleAddChSource('${escapeHTML(sid)}','${escapeHTML(i.name)}')">
+                        <input type="checkbox"${sel ? ' checked' : ''}>
+                        <span>${escapeHTML(i.name)}</span>
+                    </div>`;
+                }).join('');
+            } catch (e) {}
+        }
+
+        function toggleAddChSource(id, name) {
+            const idx = _chAddSources.findIndex(s => s.id === id);
+            if (idx >= 0) {
+                _chAddSources.splice(idx, 1);
+            } else {
+                _chAddSources.push({ id, name });
+                const nameEl = document.getElementById('add-ch-name');
+                if (!nameEl.value && _chAddSources.length === 1) nameEl.value = name;
+            }
+            renderAddChSourceList();
+            _renderAddChPills();
+        }
+
+        function _renderAddChPills() {
+            document.getElementById('add-ch-source-pills').innerHTML = _chAddSources.map(s =>
+                `<span class="ch-source-pill">${escapeHTML(s.name)}<button class="ch-source-pill-x" onclick="toggleAddChSource('${escapeHTML(s.id)}','${escapeHTML(s.name)}')">&times;</button></span>`
+            ).join('');
+        }
+
+        async function saveNewChannel() {
+            const statusEl = document.getElementById('add-ch-status');
+            const name   = document.getElementById('add-ch-name').value.trim();
+            const number = document.getElementById('add-ch-number').value.trim();
+            if (!name) { statusEl.textContent = 'Channel name is required.'; statusEl.style.color = 'var(--error)'; return; }
+            if (!_chAddSources.length) { statusEl.textContent = 'Select at least one source.'; statusEl.style.color = 'var(--error)'; return; }
+            statusEl.textContent = 'Creating…';
+            statusEl.style.color = 'var(--text-secondary)';
+            try {
+                const res = await fetch('/api/livetv/channels-config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, number: number !== '' ? parseInt(number) : null, stash_type: _chAddType, source_ids: _chAddSources.map(s => s.id) })
+                });
+                const data = await res.json().catch(() => ({}));
+                if (res.ok) {
+                    showToast('Channel created — schedule building in background', 'success');
+                    closeAddChannelModal();
+                    loadGuide();
+                } else {
+                    statusEl.textContent = data.error || 'Create failed.';
+                    statusEl.style.color = 'var(--error)';
+                }
+            } catch (e) { statusEl.textContent = 'Network error.'; statusEl.style.color = 'var(--error)'; }
+        }
+
+        // ── Channel reorder ───────────────────────────────────────────────────
+
+        async function reorderChannel(srcId, targetId) {
+            const cells = Array.from(document.querySelectorAll('#guide-left .guide-channel-cell[data-tvgid]'));
+            const ordered = cells.map(c => c.dataset.tvgid);
+            const srcIdx = ordered.indexOf(srcId);
+            const tgtIdx = ordered.indexOf(targetId);
+            if (srcIdx < 0 || tgtIdx < 0 || srcIdx === tgtIdx) return;
+            // Always insert BEFORE the target (drop-into-gap model):
+            // after removing src, target shifts left by 1 if src was above it.
+            ordered.splice(srcIdx, 1);
+            const insertIdx = srcIdx < tgtIdx ? tgtIdx - 1 : tgtIdx;
+            ordered.splice(insertIdx, 0, srcId);
+            try {
+                const res = await fetch('/api/livetv/channels-config/reorder', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ order: ordered, src_id: srcId })
+                });
+                if (res.ok) loadGuide();
+                else showToast('Reorder failed', 'error');
+            } catch (e) { showToast('Network error', 'error'); }
+        }
+
+        // ── Schedule editor ───────────────────────────────────────────────────
+
+        function toggleGuideEdit() {
+            _guideEditMode = !_guideEditMode;
+            document.getElementById('guide-edit-btn').classList.toggle('active', _guideEditMode);
+            const wrapper = document.getElementById('guide-wrapper');
+            if (wrapper) wrapper.classList.toggle('guide-edit-active', _guideEditMode);
+        }
+
+        async function deleteScheduleEntry(tvg_id, eid) {
+            if (!confirm('Remove this scene from the schedule?')) return;
+            try {
+                const res = await fetch(`/api/livetv/schedule/${encodeURIComponent(tvg_id)}/${eid}`, { method: 'DELETE' });
+                if (res.ok) {
+                    showToast('Scene removed', 'success');
+                    loadGuide();
+                } else {
+                    const data = await res.json().catch(() => ({}));
+                    showToast(data.error || 'Delete failed', 'error');
+                }
+            } catch (e) {
+                showToast('Network error', 'error');
+            }
+        }
+
+        async function doReorderDrop(afterEid, srcEid, scene_id, tvg_id) {
+            try {
+                const delRes = await fetch(`/api/livetv/schedule/${encodeURIComponent(tvg_id)}/${srcEid}`, { method: 'DELETE' });
+                if (!delRes.ok) { showToast('Move failed', 'error'); loadGuide(); return; }
+                const insRes = await fetch(`/api/livetv/schedule/${encodeURIComponent(tvg_id)}/insert`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ after_eid: afterEid, scene_id })
+                });
+                if (!insRes.ok) showToast('Move partially failed', 'error');
+                loadGuide();
+            } catch (e) {
+                showToast('Network error', 'error');
+                loadGuide();
+            }
+        }
+
+        function applyDragShift(row, gapLeft) {
+            if (!_dragData) return;
+            const shiftAmt = _dragData.px_width + 2;
+            row.querySelectorAll('.guide-program[data-orig-left]:not(.dragging)').forEach(p => {
+                if (parseInt(p.dataset.origLeft) >= gapLeft)
+                    p.style.left = (parseInt(p.dataset.origLeft) + shiftAmt) + 'px';
+            });
+        }
+
+        function clearDragShifts() {
+            _dragCurrentShiftLeft = -1;
+            document.querySelectorAll('.guide-program[data-orig-left]').forEach(p => {
+                p.style.left = p.dataset.origLeft + 'px';
+            });
+        }
+
+        function _getPrevEid(el) {
+            const row = el.closest('.guide-programs-row');
+            if (!row) return null;
+            const elOrigLeft = parseInt(el.dataset.origLeft);
+            let prevEid = null, prevLeft = -1;
+            row.querySelectorAll('.guide-program[data-orig-left]:not(.dragging)').forEach(p => {
+                const pLeft = parseInt(p.dataset.origLeft);
+                if (pLeft < elOrigLeft && pLeft > prevLeft) {
+                    prevLeft = pLeft;
+                    prevEid  = p.dataset.eid || null;
+                }
+            });
+            return prevEid;
+        }
+
+        function openInsertModal(el) {
+            if (!_guideEditMode) return;
+            _pickerTvgId    = el.dataset.tvgid;
+            _pickerAfterEid = el.dataset.aftereid || null;
+            document.getElementById('picker-filter-title').value = '';
+            document.getElementById('picker-filter-tags').value = '';
+            document.getElementById('picker-filter-organized').checked = false;
+            document.getElementById('picker-filter-enjoyed').checked = false;
+            document.getElementById('picker-modal-overlay').style.display = 'flex';
+            loadChannelScenes(_pickerTvgId);
+        }
+
+        function closeInsertModal() {
+            document.getElementById('picker-modal-overlay').style.display = 'none';
+            _pickerTvgId    = null;
+            _pickerAfterEid = null;
+        }
+
+        async function loadChannelScenes(tvg_id) {
+            const listEl = document.getElementById('picker-scene-list');
+            if (_channelScenesCache[tvg_id]) {
+                renderPickerScenes();
+                return;
+            }
+            listEl.innerHTML = '<div class="empty-state">Loading&hellip;</div>';
+            try {
+                const res = await fetch(`/api/livetv/channel-scenes/${encodeURIComponent(tvg_id)}`);
+                if (!res.ok) throw new Error(res.status);
+                const data = await res.json();
+                _channelScenesCache[tvg_id] = data.scenes || [];
+                renderPickerScenes();
+            } catch (e) {
+                listEl.innerHTML = '<div class="empty-state">Failed to load scenes.</div>';
+            }
+        }
+
+        function renderPickerScenes() {
+            const listEl  = document.getElementById('picker-scene-list');
+            const scenes  = _channelScenesCache[_pickerTvgId];
+            if (!scenes) return;
+
+            const titleQ  = document.getElementById('picker-filter-title').value.toLowerCase();
+            const tagsQ   = document.getElementById('picker-filter-tags').value.toLowerCase();
+            const onlyOrg = document.getElementById('picker-filter-organized').checked;
+            const onlyEnj = document.getElementById('picker-filter-enjoyed').checked;
+
+            let filtered = scenes;
+            if (titleQ)  filtered = filtered.filter(s => (s.title || '').toLowerCase().includes(titleQ));
+            if (tagsQ)   filtered = filtered.filter(s => (s.tags || []).some(t => t.toLowerCase().includes(tagsQ)));
+            if (onlyOrg) filtered = filtered.filter(s => s.organized);
+            if (onlyEnj) filtered = filtered.filter(s => (s.o_counter || 0) > 0);
+
+            if (filtered.length === 0) {
+                listEl.innerHTML = '<div class="empty-state">No scenes match the filters.</div>';
+                return;
+            }
+
+            const tvgEscaped = escapeHTML(_pickerTvgId);
+            const eidEscaped = escapeHTML(_pickerAfterEid || '');
+            listEl.innerHTML = filtered.map(s => {
+                const dur      = formatDuration(s.duration_sec);
+                const orgBadge = s.organized ? '<span class="picker-scene-badge picker-badge-org">Org</span>' : '';
+                const enjBadge = (s.o_counter || 0) > 0 ? `<span class="picker-scene-badge picker-badge-enj">O&#215;${s.o_counter}</span>` : '';
+                const idEscaped  = escapeHTML(s.id);
+                const tagsHtml   = (s.tags || []).length > 0
+                    ? `<div class="picker-scene-tags">${s.tags.map(t => `<span class="picker-tag">${escapeHTML(t)}</span>`).join('')}</div>`
+                    : '';
+                return `<div class="picker-scene-item"
+                    data-tvgid="${tvgEscaped}" data-aftereid="${eidEscaped}" data-sceneid="${idEscaped}"
+                    onclick="insertScene(this.dataset.tvgid,this.dataset.aftereid,this.dataset.sceneid)">
+                    ${s.thumb ? `<img class="picker-scene-thumb" src="${escapeHTML(s.thumb)}" alt="" onerror="this.style.display='none'">` : '<div class="picker-thumb-placeholder"></div>'}
+                    <div class="picker-scene-info">
+                        <div class="picker-scene-title">${escapeHTML(s.title || 'Untitled')}</div>
+                        <div class="picker-scene-meta">${escapeHTML(dur)}${orgBadge}${enjBadge}</div>
+                        ${tagsHtml}
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        async function insertScene(tvg_id, after_eid, scene_id) {
+            closeInsertModal();
+            try {
+                const res = await fetch(`/api/livetv/schedule/${encodeURIComponent(tvg_id)}/insert`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ after_eid: after_eid || null, scene_id })
+                });
+                if (res.ok) {
+                    showToast('Scene added to schedule', 'success');
+                    _channelScenesCache = {};
+                    loadGuide();
+                } else {
+                    const data = await res.json().catch(() => ({}));
+                    showToast(data.error || 'Insert failed', 'error');
                 }
             } catch (e) {
                 showToast('Network error', 'error');
@@ -930,6 +1719,8 @@
             if (e.key === 'Escape') {
                 closeSceneModal();
                 closeLogoModal();
+                closeInsertModal();
+                closeAddChannelModal();
             }
         });
     </script>

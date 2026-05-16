@@ -8,6 +8,7 @@
             <span class="guide-date-label" id="guide-date-label"></span>
             <button class="guide-nav-btn guide-now-btn" onclick="guideJumpToNow()">Now</button>
             <button class="guide-nav-btn" onclick="guideShiftDay(1)">Next &#8594;</button>
+            <button class="guide-edit-btn" id="guide-edit-btn" onclick="toggleGuideEdit()" title="Toggle schedule editing">&#9998; Edit</button>
         </div>
 
         <div id="guide-loading" class="empty-state hidden">Loading schedule&hellip;</div>
@@ -46,29 +47,126 @@
         </div>
     </div>
 
-    <!-- Logo management modal -->
+    <!-- Scene picker modal (schedule insert) -->
+    <div id="picker-modal-overlay" class="picker-modal-overlay" onclick="if(event.target===this)closeInsertModal()">
+        <div class="picker-modal-card">
+            <div class="picker-modal-header">
+                <span class="picker-modal-title">Add Scene</span>
+                <button class="picker-modal-close" onclick="closeInsertModal()">&times;</button>
+            </div>
+            <div class="picker-filters">
+                <input type="text" id="picker-filter-title" class="picker-filter-input" placeholder="Filter by title&hellip;" oninput="renderPickerScenes()">
+                <input type="text" id="picker-filter-tags" class="picker-filter-input" placeholder="Filter by tag&hellip;" oninput="renderPickerScenes()">
+                <label class="picker-filter-check"><input type="checkbox" id="picker-filter-organized" onchange="renderPickerScenes()"> Organized only</label>
+                <label class="picker-filter-check"><input type="checkbox" id="picker-filter-enjoyed" onchange="renderPickerScenes()"> Enjoyed (O&gt;0)</label>
+            </div>
+            <div id="picker-scene-list" class="picker-scene-list">
+                <div class="empty-state">Loading&hellip;</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit channel modal -->
     <div id="logo-modal-overlay" class="logo-modal-overlay" onclick="if(event.target===this)closeLogoModal()">
         <div class="logo-modal-card">
             <div class="logo-modal-header">
-                <span class="logo-modal-title" id="logo-modal-title">Channel Logo</span>
+                <span class="logo-modal-title" id="logo-modal-title">Edit Channel</span>
                 <button class="logo-modal-close" onclick="closeLogoModal()">&times;</button>
             </div>
 
-            <img id="logo-modal-preview" class="logo-preview" src="" alt="Current logo" onerror="this.style.display='none'">
-
+            <!-- Name + Number -->
             <div class="logo-modal-section">
-                <div class="logo-modal-label">Upload custom logo</div>
-                <input type="file" id="logo-file-input" accept=".jpg,.jpeg,.png,.webp,.gif"
-                       class="form-input" style="padding:6px;" onchange="previewLogoFile(this)">
-                <div class="form-hint">PNG, JPG, WebP, or GIF. Replaces the current art in Jellyfin.</div>
+                <div class="logo-modal-label">Channel Info</div>
+                <div style="display:flex; gap:10px;">
+                    <input type="text" id="ch-edit-name" class="form-input" placeholder="Channel name" style="flex:1;">
+                    <input type="text" id="ch-edit-number" class="form-input" placeholder="#" style="width:70px;">
+                </div>
             </div>
 
-            <div id="logo-upload-status" style="font-size:13px; min-height:18px;"></div>
+            <!-- Source (tags / filters) -->
+            <div class="logo-modal-section">
+                <div class="logo-modal-label">Source</div>
+                <div class="ch-source-type-tabs">
+                    <button id="ch-edit-tab-tag" class="active" onclick="switchChEditTab('tag')">Tags</button>
+                    <button id="ch-edit-tab-filter" onclick="switchChEditTab('filter')">Filters</button>
+                </div>
+                <input type="text" id="ch-edit-source-search" class="ch-source-search" placeholder="Search&hellip;" oninput="renderChEditSourceList()">
+                <div class="ch-source-list" id="ch-edit-source-list"><div class="empty-state" style="padding:12px;">Loading&hellip;</div></div>
+                <div class="ch-source-pills" id="ch-edit-source-pills"></div>
+            </div>
 
-            <div class="logo-modal-actions">
-                <button class="btn btn-primary" onclick="uploadLogo()" style="flex:1;">Save Logo</button>
-                <button class="btn btn-secondary" onclick="clearLogo()" style="color:var(--error); border-color:var(--error);">Clear Custom</button>
+            <!-- Artwork -->
+            <div class="logo-modal-section">
+                <div class="logo-modal-label">Artwork</div>
+                <div id="ch-tag-art-section" style="display:none; margin-bottom:12px;">
+                    <div class="ch-tag-art-label">Select from tag artwork:</div>
+                    <div class="ch-tag-art-picker" id="ch-tag-art-picker"></div>
+                </div>
+                <div class="logo-artwork-row">
+                    <img id="logo-modal-preview" class="logo-preview" src="" alt="" onerror="this.style.display='none'">
+                    <div class="logo-artwork-inputs">
+                        <input type="file" id="logo-file-input" accept=".jpg,.jpeg,.png,.webp,.gif"
+                               class="form-input" style="padding:6px;" onchange="previewLogoFile(this)">
+                        <div class="form-hint" style="margin-top:4px;">PNG, JPG, WebP, GIF — or select tag art above.</div>
+                        <div id="logo-upload-status" style="font-size:13px; min-height:16px; margin-top:4px;"></div>
+                        <div style="display:flex; gap:8px; margin-top:8px;">
+                            <button class="btn btn-secondary btn-danger" onclick="clearLogo()" style="font-size:12px;">Clear Art</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Regenerate -->
+            <div class="ch-regen-box">
+                <div class="ch-regen-warn">
+                    <strong>&#9888; Regenerate Schedule</strong>
+                    This will permanently wipe the existing schedule for this channel and rebuild it from scratch. Any manual edits will be lost.
+                </div>
+                <button class="btn btn-secondary btn-danger" onclick="rebuildChannelSchedule()" id="ch-regen-btn" style="width:100%;">Regenerate Schedule for This Channel</button>
+                <div id="ch-regen-status" style="font-size:12px; margin-top:6px; min-height:16px;"></div>
+            </div>
+
+            <!-- Footer -->
+            <div class="logo-modal-actions" style="margin-top:20px;">
+                <button class="btn btn-secondary btn-danger" id="ch-delete-btn" onclick="deleteChannel()" style="margin-right:auto;">Delete Channel</button>
                 <button class="btn btn-secondary" onclick="closeLogoModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveChannelEdit()">Save Changes</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add channel modal -->
+    <div id="add-ch-overlay" class="add-ch-overlay" onclick="if(event.target===this)closeAddChannelModal()">
+        <div class="add-ch-card">
+            <div class="add-ch-header">
+                <span class="add-ch-title">Add Channel</span>
+                <button class="add-ch-close" onclick="closeAddChannelModal()">&times;</button>
+            </div>
+
+            <div class="logo-modal-section">
+                <div class="logo-modal-label">Source Type</div>
+                <div class="ch-source-type-tabs">
+                    <button id="add-ch-tab-tag" class="active" onclick="switchAddChTab('tag')">Tags</button>
+                    <button id="add-ch-tab-filter" onclick="switchAddChTab('filter')">Filters</button>
+                </div>
+                <input type="text" id="add-ch-source-search" class="ch-source-search" placeholder="Search&hellip;" oninput="renderAddChSourceList()">
+                <div class="ch-source-list" id="add-ch-source-list"><div class="empty-state" style="padding:12px;">Loading&hellip;</div></div>
+                <div class="ch-source-pills" id="add-ch-source-pills"></div>
+            </div>
+
+            <div class="logo-modal-section">
+                <div class="logo-modal-label">Channel Details</div>
+                <div style="display:flex; gap:10px;">
+                    <input type="text" id="add-ch-name" class="form-input" placeholder="Channel name (auto-filled)" style="flex:1;">
+                    <input type="text" id="add-ch-number" class="form-input" placeholder="# (auto)" style="width:80px;">
+                </div>
+            </div>
+
+            <div id="add-ch-status" style="font-size:13px; min-height:16px;"></div>
+
+            <div class="add-ch-footer">
+                <button class="btn btn-secondary" onclick="closeAddChannelModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveNewChannel()">Add Channel</button>
             </div>
         </div>
     </div>
