@@ -373,4 +373,5 @@ async def endpoint_blackhole(request: Request):
     if "configuration" in path_lower:
         return JSONResponse({"PlayDefaultAudioTrack": True, "SubtitleMode": "Default"})
 
+    logger.warning(f"Blackhole: {request.method} {request.url.path}")
     return JSONResponse({})

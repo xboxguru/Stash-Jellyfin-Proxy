@@ -33,7 +33,10 @@ _xmltv_cache: dict = {"data": None, "ts": 0.0}
 
 _channel_stream_map: dict[str, str] = {}   # encoded_id -> stream_url
 _channel_info_map: dict[str, dict] = {}    # encoded_id -> raw channel dict
-_program_info_map: dict[str, dict] = {}    # encoded_id -> raw program dict
+_channel_tvgid_map: dict[str, str] = {}    # encoded_id (dashless) -> tvg_id (reverse lookup for MD5 hashes)
+_program_info_map: dict[str, dict] = {}    # encoded_id -> raw program dict (Tunarr/XMLTV; cleared on every XMLTV refresh)
+_program_tvgkey_map: dict[str, tuple] = {} # encoded_id (dashless) -> (channel_id, start) for MD5 hash reversal
+_stash_program_map: dict[str, dict] = {}   # encoded_id -> raw program dict (Stash only; never cleared by XMLTV fetch)
 
 # Stash dynamic-channel state
 _stash_channels_cache: dict = {"data": None, "ts": 0.0}
@@ -59,6 +62,7 @@ class _FFmpegChannelManager:
         self._dirs:   dict[str, str]        = {}
         self._last:   dict[str, float]      = {}   # channel_id → last request timestamp
         self._stderr: dict[str, list[str]]  = {}   # channel_id → rolling stderr lines
+        self._launch_info: dict[str, dict]  = {}   # channel_id → {start_ts, seek, playlist}
         self._lock    = asyncio.Lock()
         self._watchdog: asyncio.Task | None = None
 
@@ -84,6 +88,38 @@ class _FFmpegChannelManager:
         p = self._procs.get(cid)
         return p is not None and p.returncode is None
 
+    def get_scene_at(self, cid: str) -> dict:
+        """Return the currently playing scene and context based on elapsed wall-clock time."""
+        info = self._launch_info.get(cid)
+        if not info:
+            return {}
+        elapsed = time.time() - info["start_ts"] + info["seek"]
+        playlist = info["playlist"]
+        cursor = 0.0
+        for i, entry in enumerate(playlist):
+            dur = float(entry.get("duration_sec") or 0)
+            if cursor + dur > elapsed or i == len(playlist) - 1:
+                scene_elapsed = max(0.0, elapsed - cursor)
+                return {
+                    "scene_id": entry.get("scene_id") or entry.get("id"),
+                    "title": entry.get("title", ""),
+                    "duration_sec": dur,
+                    "elapsed_sec": scene_elapsed,
+                    "remaining_sec": max(0.0, dur - scene_elapsed),
+                    "scene_index": i,
+                    "total_scenes": len(playlist),
+                    "upcoming": [
+                        {
+                            "scene_id": e.get("scene_id") or e.get("id"),
+                            "title": e.get("title", ""),
+                            "duration_sec": float(e.get("duration_sec") or 0),
+                        }
+                        for e in playlist[i + 1 : i + 6]
+                    ],
+                }
+            cursor += dur
+        return {}
+
     async def ensure(self, cid: str, entries: list[dict], seek: float) -> bool:
         """Start FFmpeg for the channel if it isn't already running."""
         async with self._lock:
@@ -103,7 +139,8 @@ class _FFmpegChannelManager:
     # ── internals ──────────────────────────────────────────────────────────
 
     async def _launch(self, cid: str, entries: list[dict], seek: float) -> bool:
-        d = tempfile.mkdtemp(prefix=f"sjp_{cid[:8]}_")
+        hls_base = getattr(config, "HLS_TEMP_DIR", None) or None
+        d = tempfile.mkdtemp(prefix=f"sjp_{cid[:8]}_", dir=hls_base)
         self._dirs[cid] = d
 
         stash_base = config.get_stash_base()
@@ -139,11 +176,48 @@ class _FFmpegChannelManager:
             # Single transcode to consistent H.264+AAC — works regardless of
             # source codec/container.  veryfast keeps CPU usage low.
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            # Normalize all scenes to 1080p30 so resolution/framerate changes between
+            # scenes don't produce EXT-X-DISCONTINUITY codec mismatches that crash
+            # ExoPlayer on Android.  Letterbox/pillarbox with black padding.
+            # setsar=1 first: portrait phone videos often carry a non-1:1 SAR which
+            # causes force_original_aspect_ratio to compute against the wrong DAR and
+            # stretch instead of pillarbox.  Resetting SAR before scale fixes this.
+            # force_divisible_by=2 avoids odd-dimension errors in libx264.
+            # fps=30 after pad: resamples frames to exactly 30fps with monotonically
+            # increasing timestamps, closing any DTS gaps at ffconcat file boundaries.
+            # This prevents the HLS muxer from re-inserting EXT-X-DISCONTINUITY due
+            # to timestamp jumps even after we strip it from the rewritten manifest.
+            "-vf", ("setsar=1,"
+                    "scale=w=1920:h=1080:force_original_aspect_ratio=decrease"
+                    ":force_divisible_by=2,"
+                    "pad=w=1920:h=1080:x=(ow-iw)/2:y=(oh-ih)/2:color=black,"
+                    "setsar=1,"
+                    "fps=30"),
+            # aresample=async=1: smooths audio timestamp gaps at scene boundaries
+            # so the audio track stays in sync without hard cuts in the DTS stream.
+            "-af", "aresample=async=1",
             "-force_key_frames", "expr:gte(t,n_forced*4)",
             "-c:a", "aac", "-b:a", "192k",
             "-hls_time", "4",
-            "-hls_list_size", "10",
-            "-hls_flags", "delete_segments+append_list+omit_endlist",
+            "-hls_list_size", "450",  # 30 min of segments (450 × 4 s)
+            # program_date_time: emit #EXT-X-PROGRAM-DATE-TIME on every segment.
+            # This is how ExoPlayer (Jellyfin Android TV) anchors the live edge
+            # to a wall clock and computes playback position.  Without it,
+            # ExoPlayer falls back to segment-index position, Jellyfin Android
+            # reports PlaybackPositionTicks=0, treats the stream as stalled, and
+            # restarts in a loop.  Real Jellyfin/Tunarr include this tag; it is
+            # THE fix for the long-standing restart loop.
+            # independent_segments: matches real Jellyfin/Tunarr output and tells
+            # the player every segment is independently decodable.
+            "-hls_flags",
+            "delete_segments+append_list+omit_endlist+program_date_time+independent_segments",
+            # Start the HLS media sequence at the seek offset divided by the
+            # segment duration.  ExoPlayer calculates its live playback
+            # position as (mediaSequence × targetDuration) – liveOffset, so a
+            # sequence of 0 always puts the live edge at ~0 s, causing
+            # Jellyfin Android to report PlaybackPositionTicks=0 and restart.
+            # A non-zero starting sequence keeps the reported position above 0.
+            "-start_number", str(max(1, int(seek) // 4)),
             "-hls_segment_filename", seg_tmpl,
             manifest,
         ]
@@ -167,15 +241,19 @@ class _FFmpegChannelManager:
 
         self._procs[cid] = proc
         self._stderr[cid] = []
+        self._launch_info[cid] = {"start_ts": time.time(), "seek": seek, "playlist": entries}
         # Continuously drain stderr so the pipe buffer never fills and
         # blocks FFmpeg.  The last 60 lines are kept for error reporting.
         asyncio.create_task(self._drain_stderr(proc, cid))
 
-        # Wait up to 30 s for the first manifest file to appear.
+        # Wait up to 30 s for the manifest to contain at least
+        # _MIN_READY_SEGMENTS complete segments.  FFmpeg creates the .m3u8
+        # file immediately but lists no segments until each hls_time (4 s)
+        # chunk is fully written.  ExoPlayer rejects a segment-less live
+        # playlist instantly ("Error streaming live tv" with zero segment
+        # requests), so we must not report ready until segments exist.
+        _MIN_READY_SEGMENTS = 3
         for _ in range(60):
-            if os.path.exists(manifest):
-                logger.info(f"LiveTV FFmpeg: channel {cid!r} ready")
-                return True
             if proc.returncode is not None:
                 logger.error(
                     f"LiveTV FFmpeg: exited prematurely (rc={proc.returncode})"
@@ -185,9 +263,24 @@ class _FFmpegChannelManager:
                 if error_lines:
                     logger.error("LiveTV FFmpeg stderr (errors):\n" + "\n".join(error_lines[-30:]))
                 return False
+            if os.path.exists(manifest):
+                try:
+                    with open(manifest, "r", encoding="utf-8") as fh:
+                        seg_count = sum(
+                            1 for ln in fh
+                            if ln.strip() and not ln.startswith("#")
+                        )
+                except OSError:
+                    seg_count = 0
+                if seg_count >= _MIN_READY_SEGMENTS:
+                    logger.info(
+                        f"LiveTV FFmpeg: channel {cid!r} ready "
+                        f"({seg_count} segments)"
+                    )
+                    return True
             await asyncio.sleep(0.5)
 
-        logger.error("LiveTV FFmpeg: timed out waiting for first segment")
+        logger.error("LiveTV FFmpeg: timed out waiting for segments")
         return False
 
     async def _drain_stderr(self, proc: asyncio.subprocess.Process, cid: str) -> None:
@@ -216,9 +309,10 @@ class _FFmpegChannelManager:
         if d:
             shutil.rmtree(d, ignore_errors=True)
         self._stderr.pop(cid, None)
+        self._launch_info.pop(cid, None)
 
     async def _idle_loop(self) -> None:
-        idle_secs = float(getattr(config, "LIVE_TV_IDLE_TIMEOUT", 60))
+        idle_secs = float(getattr(config, "LIVE_TV_IDLE_TIMEOUT", 300))
         while self._procs:
             await asyncio.sleep(20)
             now  = time.time()
@@ -305,7 +399,7 @@ def _save_schedule():
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(payload, f)
         os.replace(tmp, path)
-        logger.info(f"LiveTV: schedule saved to {path}")
+        logger.notice(f"LiveTV: schedule saved to {path}")
     except Exception as e:
         logger.warning(f"LiveTV: could not save schedule: {e}")
 
@@ -321,7 +415,7 @@ def _load_schedule():
         _stash_schedule_built_at = float(payload.get("built_at", 0))
         _stash_schedule = payload.get("schedule", {})
         age_h = (time.time() - _stash_schedule_built_at) / 3600
-        logger.info(f"LiveTV: loaded schedule from disk ({len(_stash_schedule)} channels, {age_h:.1f}h old)")
+        logger.notice(f"LiveTV: loaded schedule from disk ({len(_stash_schedule)} channels, {age_h:.1f}h old)")
     except Exception as e:
         logger.warning(f"LiveTV: could not load schedule: {e}")
 
@@ -519,11 +613,15 @@ async def _get_channels() -> list[dict]:
         # Remove stale Tunarr entries without disturbing Stash channel entries
         for k in [k for k, v in _channel_info_map.items() if not v.get("stash_type")]:
             _channel_info_map.pop(k, None)
+            _channel_tvgid_map.pop(k, None)
         for ch in channels:
-            eid = encode_id("channel", ch["tvg_id"])
+            eid = encode_id("ch", ch["tvg_id"])
             _channel_stream_map[eid] = ch["stream_url"]
+            _channel_stream_map[eid.replace("-", "")] = ch["stream_url"]
             _channel_info_map[eid] = ch
-        logger.info(f"LiveTV: loaded {len(channels)} channels from M3U")
+            _channel_info_map[eid.replace("-", "")] = ch
+            _channel_tvgid_map[eid.replace("-", "")] = ch["tvg_id"]
+        logger.notice(f"LiveTV: loaded {len(channels)} channels from M3U")
         return channels
     except Exception as e:
         logger.warning(f"LiveTV: failed to fetch M3U: {e}")
@@ -546,10 +644,13 @@ async def _get_programs() -> list[dict]:
         _xmltv_cache["data"] = programs
         _xmltv_cache["ts"] = now
         _program_info_map.clear()
+        _program_tvgkey_map.clear()
         for prog in programs:
             eid = encode_id("program", f"{prog['channel_id']}|{prog['start']}")
             _program_info_map[eid] = prog
-        logger.info(f"LiveTV: loaded {len(programs)} programs from XMLTV")
+            _program_info_map[eid.replace("-", "")] = prog
+            _program_tvgkey_map[eid.replace("-", "")] = (prog["channel_id"], prog["start"])
+        logger.notice(f"LiveTV: loaded {len(programs)} programs from XMLTV")
         return programs
     except Exception as e:
         logger.warning(f"LiveTV: failed to fetch XMLTV: {e}")
@@ -920,11 +1021,12 @@ async def _get_stash_channels() -> list[dict]:
     _stash_channels_cache["ts"] = now
 
     for ch in channels:
-        enc = encode_id("channel", ch["tvg_id"])
+        enc = encode_id("ch", ch["tvg_id"])
         _channel_info_map[enc] = ch
         _channel_info_map[enc.replace("-", "")] = ch
         _stash_channel_map[enc] = ch
         _stash_channel_map[enc.replace("-", "")] = ch
+        _channel_tvgid_map[enc.replace("-", "")] = ch["tvg_id"]
 
     logger.info(f"LiveTV: {len(channels)} Stash channels configured")
     return channels
@@ -953,7 +1055,7 @@ async def _rebuild_stash_schedules():
                         continue
                     slots = _build_shorts_block_schedule()
                     new_schedule[tvg_id] = slots
-                    logger.info(f"LiveTV: schedule built for '{ch['name']}' — {len(scenes)} scenes, {len(slots)} 30-min EPG blocks")
+                    logger.notice(f"LiveTV: schedule built for '{ch['name']}' — {len(scenes)} scenes, {len(slots)} 30-min EPG blocks")
                 else:
                     scenes = await _fetch_scenes_for_stash_channel(ch)
                     if not scenes:
@@ -961,7 +1063,7 @@ async def _rebuild_stash_schedules():
                         continue
                     slots = _build_random_schedule(scenes)
                     new_schedule[tvg_id] = slots
-                    logger.info(f"LiveTV: schedule built for '{ch['name']}' — {len(scenes)} scenes, {len(slots)} EPG slots")
+                    logger.notice(f"LiveTV: schedule built for '{ch['name']}' — {len(scenes)} scenes, {len(slots)} EPG slots")
             except Exception as e:
                 logger.error(f"LiveTV: schedule build failed for '{ch['name']}': {e}", exc_info=True)
 
@@ -1001,7 +1103,7 @@ async def _run_maintenance_update():
                     updated, pruned, added = _maintenance_extend_channel(existing, scenes, keep_days, sched_days)
 
                 if pruned or added:
-                    logger.info(
+                    logger.notice(
                         f"LiveTV maintenance: '{ch['name']}' pruned={pruned} added={added} "
                         f"total={len(updated)}"
                     )
@@ -1105,69 +1207,108 @@ def _get_stash_programs_for_channel(ch: dict, server_id: str, channels_by_tvg_id
     return progs
 
 
+async def _build_stash_channel_playlist(ch: dict) -> tuple[list[dict], float] | None:
+    """Return (entries, seek_seconds) for the channel's current content, or None.
+
+    Shared by stash_channel_playback_info (pre-start) and
+    endpoint_stash_channel_stream (manifest serve).
+    """
+    tvg_id = ch["tvg_id"]
+    now = time.time()
+
+    if ch.get("stash_type") == "shorts":
+        scenes = await _fetch_scenes_for_stash_channel(ch)
+        if not scenes:
+            return None
+        pool = list(scenes)
+        random.shuffle(pool)
+        playlist: list[dict] = []
+        total_secs = 0.0
+        for s in pool:
+            if total_secs >= 3600:
+                break
+            playlist.append({"scene_id": s["id"], "title": s.get("title", ""), "duration_sec": s["duration_sec"]})
+            total_secs += s["duration_sec"]
+        return playlist, 0.0
+    else:
+        schedule = _stash_schedule.get(tvg_id, [])
+        upcoming = [e for e in schedule if e["stop_ts"] > now - 5]
+        if not upcoming or upcoming[0]["start_ts"] > now + 10:
+            return None
+        return upcoming, max(0.0, now - upcoming[0]["start_ts"])
+
+
 async def stash_channel_playback_info(ch: dict, item_id: str, request=None) -> JSONResponse:
     """PlaybackInfo for a dynamic Stash channel.
 
-    Returns a MediaSource pointing at our /livetv/channels/{id}/stash-stream
-    endpoint, which 302-redirects to Stash's native HLS URL for the current
-    scene at the correct seek offset.  IsLive suppresses the scrub bar.
+    Advertises an HLS TranscodingUrl and disables direct play so the client uses
+    hls.js / ExoPlayer HlsMediaSource.  Pre-warms FFmpeg so segments are ready
+    by the time the client fetches the manifest.
     """
     item_id = item_id.replace("-", "")
+    play_session_id = f"stash_live_{ch['tvg_id']}"
 
-    if request is not None:
-        base_url = f"{request.url.scheme}://{request.url.netloc}"
-    else:
-        bind = getattr(config, "PROXY_BIND", "0.0.0.0")
-        port = getattr(config, "PROXY_PORT", 8096)
-        host = "127.0.0.1" if bind in ("0.0.0.0", "") else bind
-        base_url = f"http://{host}:{port}"
+    # Relative HLS transcoding URL.  Advertising a TranscodingUrl with
+    # TranscodingSubProtocol=hls makes jellyfin-web use hls.js and Jellyfin
+    # Android TV use ExoPlayer's HlsMediaSource, both pointed straight at our
+    # .m3u8.  Direct play (static=true) must be disabled — otherwise the
+    # client requests /Videos/{id}/stream expecting a raw byte stream and
+    # chokes on the HLS playlist it gets instead.
+    transcode_url = f"/livetv/channels/{item_id}/stash-stream.m3u8"
 
-    stream_url = f"{base_url}/livetv/channels/{item_id}/stash-stream.m3u8"
+    # Pre-warm FFmpeg so the manifest has segments by the time the client
+    # fetches it (the readiness gate waits for >=3 segments).
+    await _ensure_stash_schedules()
+    playlist_result = await _build_stash_channel_playlist(ch)
+    if playlist_result is not None:
+        entries, seek = playlist_result
+        await _ffmpeg_manager.ensure(item_id, entries, seek)
 
     source: dict = {
         "Protocol": "Http",
         "Id": item_id,
+        "Path": transcode_url,
         "Type": "Default",
         "Name": ch.get("name", "Live"),
-        "IsRemote": True,
-        "Path": stream_url,
-        "Container": "ts",
+        "IsRemote": False,
         "ReadAtNativeFramerate": True,
         "IgnoreDts": False,
         "IgnoreIndex": False,
         "GenPtsInput": False,
-        "SupportsTranscoding": False,
-        "SupportsDirectStream": True,
-        "SupportsDirectPlay": True,
+        "SupportsTranscoding": True,
+        "SupportsDirectStream": False,
+        "SupportsDirectPlay": False,
         "IsInfiniteStream": True,
         "IsLive": True,
-        "UseMostCompatibleTranscodingProfile": False,
+        "UseMostCompatibleTranscodingProfile": True,
         "RequiresOpening": False,
         "RequiresClosing": False,
         "RequiresLooping": False,
         "SupportsProbing": False,
+        "TranscodingUrl": transcode_url,
+        "TranscodingSubProtocol": "hls",
+        "TranscodingContainer": "ts",
         "MediaStreams": [
-            {"Type": "Video", "Index": 0, "Codec": "h264",
-             "IsDefault": True, "IsExternal": False,
-             "IsInterlaced": False, "IsForced": False, "IsHearingImpaired": False,
-             "IsTextSubtitleStream": False, "SupportsExternalStream": False},
-            {"Type": "Audio", "Index": 1, "Codec": "aac",
-             "IsDefault": True, "IsExternal": False, "Channels": 2,
-             "IsInterlaced": False, "IsForced": False, "IsHearingImpaired": False,
-             "IsTextSubtitleStream": False, "SupportsExternalStream": False},
+            {"VideoRange": "SDR", "VideoRangeType": "SDR", "AudioSpatialFormat": "None",
+             "DisplayTitle": "SDR", "IsInterlaced": False, "IsDefault": False,
+             "IsForced": False, "IsHearingImpaired": False, "Type": "Video", "Index": -1,
+             "IsExternal": False, "IsTextSubtitleStream": False, "SupportsExternalStream": False},
+            {"VideoRange": "Unknown", "VideoRangeType": "Unknown", "AudioSpatialFormat": "None",
+             "DisplayTitle": "", "IsInterlaced": False, "IsDefault": False,
+             "IsForced": False, "IsHearingImpaired": False, "Type": "Audio", "Index": -1,
+             "IsExternal": False, "IsTextSubtitleStream": False, "SupportsExternalStream": False},
         ],
         "MediaAttachments": [],
         "Formats": [],
         "RequiredHttpHeaders": {},
-        "TranscodingSubProtocol": "hls",
+        "DefaultAudioStreamIndex": -1,
         "HasSegments": False,
-        "RunTimeTicks": 0,
     }
 
-    logger.info(f"LiveTV: stash channel playback_info '{ch['name']}' ({item_id}) -> {stream_url}")
+    logger.info(f"LiveTV: stash channel playback_info '{ch['name']}' ({item_id}) → {transcode_url}")
     return JSONResponse({
         "MediaSources": [source],
-        "PlaySessionId": f"stash_live_{ch['tvg_id']}",
+        "PlaySessionId": play_session_id,
     })
 
 
@@ -1181,7 +1322,7 @@ async def endpoint_stash_channel_stream(request: Request):
       • writes live HLS segments to a per-channel temp directory
 
     The process is killed automatically after LIVE_TV_IDLE_TIMEOUT seconds
-    (default 60 s) of no manifest/segment requests.  Restarted on next play.
+    (default 300 s) of no manifest/segment requests.  Restarted on next play.
 
     ── Earlier approaches kept for reference ──────────────────────────────
     REDIRECT (best raw quality, no auto-advance):
@@ -1199,6 +1340,7 @@ async def endpoint_stash_channel_stream(request: Request):
     """
     channel_id = request.path_params.get("channel_id", "")
     channel_id_clean = channel_id.replace("-", "")
+    is_manifest = request.url.path.lower().endswith(".m3u8")
 
     ch = _stash_channel_map.get(channel_id) or _stash_channel_map.get(channel_id_clean)
     if not ch:
@@ -1208,43 +1350,18 @@ async def endpoint_stash_channel_stream(request: Request):
         logger.warning(f"LiveTV: stash-stream — unknown channel {channel_id}")
         return Response(status_code=404)
 
-    tvg_id = ch["tvg_id"]
+    if is_manifest:
+        logger.debug(f"LiveTV: stash-stream manifest requested for '{ch.get('name')}' ({channel_id_clean})")
+
     await _ensure_stash_schedules()
 
-    now = time.time()
+    playlist_result = await _build_stash_channel_playlist(ch)
+    if playlist_result is None:
+        logger.warning(f"LiveTV: stash-stream — no current program for {ch['tvg_id']}")
+        return Response(status_code=404)
+    entries, seek = playlist_result
 
-    if ch.get("stash_type") == "shorts":
-        # Shorts: build a ~1-hour on-demand playlist from actual scene files.
-        # The EPG shows synthetic 30-minute blocks, so there's no meaningful
-        # seek position — we always start a fresh shuffled playlist.
-        TARGET_SECS = 3600
-        scenes = await _fetch_scenes_for_stash_channel(ch)
-        if not scenes:
-            logger.warning(f"LiveTV: stash-stream — no scenes for shorts channel")
-            return Response(status_code=404)
-        pool = list(scenes)
-        random.shuffle(pool)
-        playlist: list[dict] = []
-        total_secs = 0.0
-        for s in pool:
-            if total_secs >= TARGET_SECS:
-                break
-            playlist.append({"scene_id": s["id"]})
-            total_secs += s["duration_sec"]
-        seek = 0.0
-        upcoming = playlist
-    else:
-        schedule = _stash_schedule.get(tvg_id, [])
-        # All entries not yet finished — FFmpeg works through them in order.
-        upcoming = [e for e in schedule if e["stop_ts"] > now - 5]
-
-        if not upcoming or upcoming[0]["start_ts"] > now + 10:
-            logger.warning(f"LiveTV: stash-stream — no current program for {tvg_id}")
-            return Response(status_code=404)
-
-        seek = max(0.0, now - upcoming[0]["start_ts"])
-
-    ok = await _ffmpeg_manager.ensure(channel_id_clean, upcoming, seek)
+    ok = await _ffmpeg_manager.ensure(channel_id_clean, entries, seek)
     if not ok:
         return Response(status_code=502, content="FFmpeg failed to start")
 
@@ -1261,10 +1378,20 @@ async def endpoint_stash_channel_stream(request: Request):
         return Response(status_code=502)
 
     # Rewrite relative segment filenames → absolute URLs through our proxy.
+    # Strip #EXT-X-DISCONTINUITY: all content is normalized to the same
+    # codec/resolution/fps so there's no actual discontinuity.  The tag causes
+    # Android TV's hardware H.264 decoder to tear down and reinitialize (~20s
+    # freeze per scene transition) even though the codec parameters are identical.
+    # We no longer inject #EXT-X-SERVER-CONTROL:HOLD-BACK — real Jellyfin/Tunarr
+    # do not use it.  #EXT-X-PROGRAM-DATE-TIME (added via the FFmpeg
+    # program_date_time hls_flag) is the correct live-edge anchor and replaces
+    # that hack.
     base = f"{request.url.scheme}://{request.url.netloc}"
     out_lines = []
     for line in raw.splitlines():
         s = line.strip()
+        if s == "#EXT-X-DISCONTINUITY":
+            continue
         if s and not s.startswith("#"):
             out_lines.append(f"{base}/livetv/channels/{channel_id_clean}/seg/{s}")
         else:
@@ -1272,7 +1399,7 @@ async def endpoint_stash_channel_stream(request: Request):
 
     logger.trace(
         f"LiveTV FFmpeg: served manifest for '{ch['name']}' "
-        f"channel={channel_id_clean} seek={seek:.1f}s entries={len(upcoming)}"
+        f"channel={channel_id_clean} seek={seek:.1f}s entries={len(entries)}"
     )
     return Response(
         "\n".join(out_lines),
@@ -1286,7 +1413,7 @@ async def endpoint_stash_channel_segment(request: Request):
     channel_id = request.path_params.get("channel_id", "").replace("-", "")
     seg_name   = request.path_params.get("seg_name",   "")
 
-    if not re.match(r"^seg\d{5}\.ts$", seg_name):
+    if not re.match(r"^seg\d+\.ts$", seg_name):
         return Response(status_code=400)
 
     seg_dir = _ffmpeg_manager.seg_dir(channel_id)
@@ -1304,7 +1431,11 @@ async def endpoint_stash_channel_segment(request: Request):
             while chunk := fh.read(65536):
                 yield chunk
 
-    return StreamingResponse(_iter(), media_type="video/mp2t")
+    return StreamingResponse(
+        _iter(),
+        media_type="video/mp2t",
+        headers={"Access-Control-Allow-Origin": "*"},
+    )
 
 
 # Public lookup API (used by metadata_routes and stream_routes)
@@ -1332,6 +1463,7 @@ def _is_stash_item(item_id: str) -> bool:
 
 
 async def get_channel_by_jellyfin_id(item_id: str) -> dict | None:
+    from core.jellyfin_mapper import decode_id
     if _is_stash_item(item_id):
         return None
     normalized = _normalize_id(item_id)
@@ -1342,23 +1474,89 @@ async def get_channel_by_jellyfin_id(item_id: str) -> dict | None:
     if getattr(config, "ENABLE_STASH_CHANNELS", False):
         await _get_stash_channels()
     ch = _channel_info_map.get(item_id) or _channel_info_map.get(normalized)
-    if not ch:
-        logger.debug(f"LiveTV: channel lookup MISS for {item_id} (map has {len(_channel_info_map)} entries)")
-    return ch
+    if ch is not None:
+        return ch
+    # Fallback: decode the ID — if it resolves to "ch-{tvg_id}", look up by tvg_id
+    # directly. Handles any edge case where the encoded ID isn't in the map yet.
+    decoded = decode_id(item_id)
+    if decoded.startswith("ch-"):
+        tvg_id = decoded[3:]
+        tunarr = _m3u_cache.get("data") or []
+        stash = _stash_channels_cache.get("data") or []
+        ch = next((c for c in tunarr + stash if c.get("tvg_id") == tvg_id), None)
+        if ch:
+            logger.debug(f"LiveTV: channel lookup via decoded tvg_id {tvg_id!r}")
+            return ch
+    # Ultimate fallback: registry lookup for MD5-hashed IDs (long tvg_ids that exceed the
+    # 32-char hex limit and can't be reversed through decode_id).
+    tvg_id = _channel_tvgid_map.get(normalized)
+    if tvg_id:
+        tunarr = _m3u_cache.get("data") or []
+        stash = _stash_channels_cache.get("data") or []
+        ch = next((c for c in tunarr + stash if c.get("tvg_id") == tvg_id), None)
+        if ch:
+            logger.debug(f"LiveTV: channel lookup via registry for {normalized!r} → tvg_id {tvg_id!r}")
+            return ch
+    logger.debug(f"LiveTV: channel lookup MISS for {item_id} (map has {len(_channel_info_map)} entries)")
+    return None
 
 
 async def get_program_by_jellyfin_id(item_id: str) -> dict | None:
     if _is_stash_item(item_id):
         return None
     normalized = _normalize_id(item_id)
+
+    # 1. Fast path: Stash-specific map (never cleared by XMLTV refreshes)
+    prog = _stash_program_map.get(normalized)
+    logger.debug(f"LiveTV: program lookup L1 for {normalized}: {'HIT' if prog is not None else f'MISS (map has {len(_stash_program_map)} entries)'}")
+    if prog is not None:
+        return prog
+
+    # 2. Shared map (Tunarr programs + any Stash entries not yet cleared)
     prog = _program_info_map.get(item_id) or _program_info_map.get(normalized)
     if prog is not None:
         return prog
+
+    # 3. Search _stash_schedule directly — handles cold-start where endpoint_programs
+    #    hasn't been called yet and _stash_program_map is empty.
+    if _stash_schedule:
+        from datetime import datetime as _dt, timezone as _tz
+        for tvg_id, schedule in _stash_schedule.items():
+            for entry in schedule:
+                start_str = _dt.fromtimestamp(entry["start_ts"], _tz.utc).strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
+                pid = encode_id("program", f"{tvg_id}|{start_str}").replace("-", "")
+                if pid == normalized:
+                    raw_prog = {
+                        "channel_id": tvg_id,
+                        "title": entry["title"],
+                        "start": start_str,
+                        "stop": _dt.fromtimestamp(entry["stop_ts"], _tz.utc).strftime("%Y-%m-%dT%H:%M:%S.0000000Z"),
+                        "start_ts": entry["start_ts"],
+                        "stop_ts": entry["stop_ts"],
+                        "run_time_ticks": int(entry["duration_sec"] * 10_000_000),
+                        "genre": entry.get("genre", ""), "desc": "",
+                        "scene_id": entry.get("scene_id"),
+                        "icon": _stash_screenshot_url(entry["scene_id"]) if entry.get("scene_id") else "",
+                    }
+                    _stash_program_map[normalized] = raw_prog  # cache for future lookups
+                    return raw_prog
+
+    # 4. Fall back to XMLTV/Tunarr refresh (does not affect _stash_program_map)
     await _get_programs()
     prog = _program_info_map.get(item_id) or _program_info_map.get(normalized)
-    if not prog:
-        logger.debug(f"LiveTV: program lookup MISS for {item_id} (map has {len(_program_info_map)} entries)")
-    return prog
+    if prog:
+        return prog
+    # 5. Registry lookup for MD5-hashed program IDs (long channel_id|start strings).
+    key = _program_tvgkey_map.get(normalized)
+    if key:
+        channel_id, start = key
+        programs = _xmltv_cache.get("data") or []
+        prog = next((p for p in programs if p.get("channel_id") == channel_id and p.get("start") == start), None)
+        if prog:
+            logger.debug(f"LiveTV: program lookup via registry for {normalized!r} → {channel_id}|{start}")
+            return prog
+    logger.debug(f"LiveTV: program lookup MISS for {item_id} (map has {len(_program_info_map)} entries)")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1379,7 +1577,7 @@ def _current_program_for(tvg_id: str, programs: list[dict],
 def _channel_to_jellyfin(ch: dict, server_id: str, item_id: str | None = None,
                           current_program: dict | None = None) -> dict:
     if item_id is None:
-        item_id = encode_id("channel", ch["tvg_id"])
+        item_id = encode_id("ch", ch["tvg_id"])
     # Id and ItemId must be non-hyphenated (Jellyfin normalizes on the way in but stores raw)
     item_id = item_id.replace("-", "")
     logo = ch.get("logo", "")
@@ -1478,7 +1676,7 @@ def _channel_to_jellyfin(ch: dict, server_id: str, item_id: str | None = None,
 def _program_to_jellyfin(prog: dict, server_id: str, channels_by_tvg_id: dict,
                           prog_id: str | None = None) -> dict:
     ch = channels_by_tvg_id.get(prog["channel_id"], {})
-    ch_encoded_id = encode_id("channel", prog["channel_id"])
+    ch_encoded_id = encode_id("ch", prog["channel_id"])
     if prog_id is None:
         prog_id = encode_id("program", f"{prog['channel_id']}|{prog['start']}")
 
@@ -1550,71 +1748,94 @@ def _program_to_jellyfin(prog: dict, server_id: str, channels_by_tvg_id: dict,
 
 
 def channel_playback_info(ch: dict, item_id: str, request=None) -> JSONResponse:
-    """PlaybackInfo for a TvChannel.
+    """PlaybackInfo for a Tunarr TvChannel.
 
-    Returns our own /livetv/channels/{id}/stream.m3u8 proxy URL so that
-    clients (especially ExoPlayer on Android) see a .m3u8 extension and
-    automatically select their HLS player.
+    Advertises an HLS TranscodingUrl (SubProtocol=hls) and disables direct
+    play, so the client uses hls.js / ExoPlayer HlsMediaSource pointed at our
+    proxied .m3u8 instead of requesting /Videos/{id}/stream?static=true.
     """
     item_id = item_id.replace("-", "")
+    play_session_id = f"live_{item_id}"
 
-    # Build an absolute proxy URL from the incoming request so the client can
-    # reach us.  Falls back to config values when request is unavailable.
-    if request is not None:
-        base_url = f"{request.url.scheme}://{request.url.netloc}"
-    else:
-        bind = getattr(config, "PROXY_BIND", "0.0.0.0")
-        port = getattr(config, "PROXY_PORT", 8096)
-        host = "127.0.0.1" if bind in ("0.0.0.0", "") else bind
-        base_url = f"http://{host}:{port}"
-
-    proxy_url = f"{base_url}/livetv/channels/{item_id}/stream.m3u8"
-    logger.info(f"LiveTV: channel_playback_info for {ch.get('name')} ({item_id}) -> {proxy_url}")
+    transcode_url = f"/livetv/channels/{item_id}/stream.m3u8"
+    logger.info(f"LiveTV: channel_playback_info for {ch.get('name')} ({item_id}) → {transcode_url}")
 
     source: dict = {
         "Protocol": "Http",
         "Id": item_id,
+        "Path": transcode_url,
         "Type": "Default",
         "Name": ch.get("name", "Live"),
-        "IsRemote": True,
-        "Path": proxy_url,
-        "Container": "ts",
+        "IsRemote": False,
         "ReadAtNativeFramerate": True,
         "IgnoreDts": False,
         "IgnoreIndex": False,
         "GenPtsInput": False,
-        "SupportsTranscoding": False,
-        "SupportsDirectStream": True,
-        "SupportsDirectPlay": True,
+        "SupportsTranscoding": True,
+        "SupportsDirectStream": False,
+        "SupportsDirectPlay": False,
         "IsInfiniteStream": True,
-        "UseMostCompatibleTranscodingProfile": False,
+        "IsLive": True,
+        "UseMostCompatibleTranscodingProfile": True,
         "RequiresOpening": False,
         "RequiresClosing": False,
         "RequiresLooping": False,
         "SupportsProbing": False,
+        "TranscodingUrl": transcode_url,
+        "TranscodingSubProtocol": "hls",
+        "TranscodingContainer": "ts",
         "MediaStreams": [
-            {"Type": "Video", "Index": 0, "Codec": "h264",
-             "IsDefault": True, "IsExternal": False,
-             "IsInterlaced": False, "IsForced": False, "IsHearingImpaired": False,
-             "IsTextSubtitleStream": False, "SupportsExternalStream": False},
-            {"Type": "Audio", "Index": 1, "Codec": "aac",
-             "IsDefault": True, "IsExternal": False, "Channels": 2,
-             "IsInterlaced": False, "IsForced": False, "IsHearingImpaired": False,
-             "IsTextSubtitleStream": False, "SupportsExternalStream": False},
+            {"VideoRange": "SDR", "VideoRangeType": "SDR", "AudioSpatialFormat": "None",
+             "DisplayTitle": "SDR", "IsInterlaced": False, "IsDefault": False,
+             "IsForced": False, "IsHearingImpaired": False, "Type": "Video", "Index": -1,
+             "IsExternal": False, "IsTextSubtitleStream": False, "SupportsExternalStream": False},
+            {"VideoRange": "Unknown", "VideoRangeType": "Unknown", "AudioSpatialFormat": "None",
+             "DisplayTitle": "", "IsInterlaced": False, "IsDefault": False,
+             "IsForced": False, "IsHearingImpaired": False, "Type": "Audio", "Index": -1,
+             "IsExternal": False, "IsTextSubtitleStream": False, "SupportsExternalStream": False},
         ],
         "MediaAttachments": [],
         "Formats": [],
         "RequiredHttpHeaders": {},
-        "TranscodingSubProtocol": "hls",
+        "DefaultAudioStreamIndex": -1,
         "HasSegments": False,
-        "RunTimeTicks": 0,
     }
 
     return JSONResponse({
         "MediaSources": [source],
-        "PlaySessionId": f"live_{item_id}",
-        "LiveStreamId": f"live_{item_id}",
+        "PlaySessionId": play_session_id,
     })
+
+
+async def endpoint_live_streams_open(request: Request):
+    """POST /LiveStreams/Open — stub.
+
+    PlaybackInfo uses RequiresOpening=False so no client calls this in normal
+    flow.  Registered to prevent 404s from clients with stale cached state.
+    """
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    open_token = (data.get("OpenToken") or request.query_params.get("OpenToken", "")).strip()
+    logger.info(f"LiveTV: POST /LiveStreams/Open (unexpected) token={open_token!r}")
+    return Response(status_code=204)
+
+
+async def endpoint_live_streams_close(request: Request):
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    live_stream_id = data.get("LiveStreamId") or request.query_params.get("LiveStreamId", "")
+    logger.info(f"LiveTV: POST /LiveStreams/Close id={live_stream_id!r}")
+    return Response(status_code=204)
+
+
+async def endpoint_live_streams_ping(request: Request):
+    live_stream_id = request.query_params.get("LiveStreamId", "")
+    logger.debug(f"LiveTV: POST /LiveStreams/Ping id={live_stream_id!r}")
+    return Response(status_code=204)
 
 
 async def endpoint_channel_m3u8(request: Request):
@@ -1640,7 +1861,7 @@ async def endpoint_channel_m3u8(request: Request):
         resp = await _live_client.get(stream_url, timeout=10.0)
         final_url = str(resp.url)
         if final_url != stream_url:
-            logger.info(f"LiveTV: Tunarr redirected {stream_url} -> {final_url}")
+            logger.debug(f"LiveTV: Tunarr redirected {stream_url} -> {final_url}")
         if resp.status_code != 200:
             logger.warning(f"LiveTV: Tunarr returned {resp.status_code} for {final_url}")
             return Response(status_code=resp.status_code)
@@ -1663,7 +1884,7 @@ async def endpoint_channel_m3u8(request: Request):
             else:
                 lines.append(line)
 
-        logger.info(f"LiveTV: proxied m3u8 for channel {channel_id}")
+        logger.debug(f"LiveTV: proxied m3u8 for channel {channel_id}")
         return Response(
             content="\n".join(lines),
             media_type="application/vnd.apple.mpegurl",
@@ -1680,7 +1901,7 @@ async def endpoint_channel_m3u8(request: Request):
 
 async def endpoint_program_detail(request: Request):
     program_id = request.path_params.get("program_id", "")
-    logger.info(f"LiveTV: GET /livetv/programs/{program_id}")
+    logger.notice(f"LiveTV: GET /livetv/programs/{program_id}")
     prog = await get_program_by_jellyfin_id(program_id)
     if prog is None:
         return Response(status_code=404)
@@ -1692,7 +1913,7 @@ async def endpoint_program_detail(request: Request):
 
 
 async def endpoint_timer_defaults(request: Request):
-    logger.info("LiveTV: GET /livetv/timers/defaults")
+    logger.debug("LiveTV: GET /livetv/timers/defaults")
     server_id = getattr(config, "SERVER_ID", "stash-proxy")
     return JSONResponse({
         "Type": "SeriesTimer",
@@ -1715,12 +1936,12 @@ async def endpoint_timer_defaults(request: Request):
 
 
 async def endpoint_recordings_folders(request: Request):
-    logger.info("LiveTV: GET /livetv/recordings/folders")
+    logger.debug("LiveTV: GET /livetv/recordings/folders")
     return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": 0})
 
 
 async def endpoint_live_tv_info(request: Request):
-    logger.info("LiveTV: GET /livetv/info")
+    logger.debug("LiveTV: GET /livetv/info")
     m3u_url = getattr(config, "TUNER_M3U_URL", "")
     stash_enabled = getattr(config, "ENABLE_STASH_CHANNELS", False)
     services = []
@@ -1761,13 +1982,13 @@ async def endpoint_live_tv_info(request: Request):
 
 
 async def endpoint_channels(request: Request):
-    logger.info(f"LiveTV: GET /livetv/channels params={dict(request.query_params)}")
+    logger.notice(f"LiveTV: GET /livetv/channels params={dict(request.query_params)}")
     server_id = getattr(config, "SERVER_ID", "stash-proxy")
 
     tunarr_channels = await _get_channels() if getattr(config, "ENABLE_TUNARR", False) else []
     stash_channels = await _get_stash_channels() if getattr(config, "ENABLE_STASH_CHANNELS", False) else []
     all_channels = tunarr_channels + stash_channels
-    logger.info(f"LiveTV: returning {len(all_channels)} channels ({len(tunarr_channels)} Tunarr, {len(stash_channels)} Stash)")
+    logger.notice(f"LiveTV: returning {len(all_channels)} channels ({len(tunarr_channels)} Tunarr, {len(stash_channels)} Stash)")
 
     add_current = request.query_params.get("addCurrentProgram", "").lower() == "true"
     tunarr_programs: list[dict] = []
@@ -1777,7 +1998,7 @@ async def endpoint_channels(request: Request):
 
     items = []
     for ch in all_channels:
-        eid = encode_id("channel", ch["tvg_id"])
+        eid = encode_id("ch", ch["tvg_id"])
         current = None
         if add_current:
             if ch.get("stash_type"):
@@ -1790,6 +2011,9 @@ async def endpoint_channels(request: Request):
                            "stop": datetime.fromtimestamp(entry["stop_ts"], timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.0000000Z"),
                            "start_ts": entry["start_ts"], "stop_ts": entry["stop_ts"],
                            "run_time_ticks": int(entry["duration_sec"] * 10_000_000), "genre": "", "desc": ""}
+                    prog_id = encode_id("program", f"{ch['tvg_id']}|{raw['start']}").replace("-", "")
+                    _stash_program_map[prog_id] = raw
+                    logger.debug(f"LiveTV: addCurrentProgram stored key={prog_id} for ch={ch['tvg_id']} start={raw['start']}")
                     current = _program_to_jellyfin(raw, server_id, channels_by_tvg_id)
             else:
                 current = _current_program_for(ch["tvg_id"], tunarr_programs, server_id, channels_by_tvg_id)
@@ -1798,8 +2022,104 @@ async def endpoint_channels(request: Request):
     return JSONResponse({"Items": items, "TotalRecordCount": len(items), "StartIndex": 0})
 
 
+async def endpoint_channel_single(request: Request):
+    """Return a single TvChannel object by encoded ID.
+
+    Jellyfin Android calls GET /LiveTv/Channels/{Id} for individual channel
+    lookups.  Without this route the request falls to the blackhole which
+    returns Items:[] — Jellyfin Android throws InvalidContentException and
+    crashes the guide view.
+    """
+    channel_id = request.path_params.get("channel_id", "").replace("-", "")
+    server_id = getattr(config, "SERVER_ID", "stash-proxy")
+
+    tunarr_channels = await _get_channels() if getattr(config, "ENABLE_TUNARR", False) else []
+    stash_channels = await _get_stash_channels() if getattr(config, "ENABLE_STASH_CHANNELS", False) else []
+
+    for ch in tunarr_channels + stash_channels:
+        eid = encode_id("ch", ch["tvg_id"]).replace("-", "")
+        if eid == channel_id:
+            return JSONResponse(_channel_to_jellyfin(ch, server_id, eid))
+
+    return Response(status_code=404)
+
+
+async def endpoint_channel_now_playing(request: Request):
+    """Return the currently playing scene for an active Stash channel's FFmpeg stream.
+
+    Query params:
+        tvg_id: channel tvg_id (e.g. "shorts")
+    """
+    tvg_id = request.query_params.get("tvg_id", "")
+    if not tvg_id:
+        return JSONResponse({"active": False, "error": "tvg_id required"}, status_code=400)
+
+    enc = encode_id("ch", tvg_id).replace("-", "")
+    if not _ffmpeg_manager.is_alive(enc):
+        return JSONResponse({"active": False})
+
+    scene_info = _ffmpeg_manager.get_scene_at(enc)
+    if not scene_info:
+        return JSONResponse({"active": True})
+
+    return JSONResponse({"active": True, **scene_info})
+
+
+async def endpoint_shorts_block_preview(request: Request):
+    """Return a deterministic scene list for a Shorts 30-minute block.
+
+    Query params:
+        ts:     block start Unix timestamp (used as random seed for reproducibility)
+        tvg_id: (optional) channel tvg_id; defaults to first shorts channel found
+    """
+    ts_str = request.query_params.get("ts", "")
+    tvg_id = request.query_params.get("tvg_id", "")
+    try:
+        block_start = int(float(ts_str))
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "invalid ts"}, status_code=400)
+
+    stash_channels = await _get_stash_channels()
+    if tvg_id:
+        ch = next((c for c in stash_channels if c["tvg_id"] == tvg_id), None)
+    else:
+        ch = next((c for c in stash_channels if c.get("stash_type") == "shorts"), None)
+
+    if not ch:
+        return JSONResponse({"scenes": []})
+
+    scenes = await _fetch_scenes_for_stash_channel(ch)
+    if not scenes:
+        return JSONResponse({"scenes": []})
+
+    rng = random.Random(block_start)
+    pool = list(scenes)
+    rng.shuffle(pool)
+
+    BLOCK_SECS = 1800
+    block_end = block_start + BLOCK_SECS
+    result = []
+    cursor = float(block_start)
+    for s in pool:
+        if cursor >= block_end:
+            break
+        dur = float(s.get("duration_sec") or 0)
+        if dur < 1:
+            continue
+        result.append({
+            "id": s["id"],
+            "title": s.get("title") or f"Scene #{s['id']}",
+            "start_ts": cursor,
+            "stop_ts": min(cursor + dur, block_end),
+            "duration_sec": dur,
+        })
+        cursor += dur
+
+    return JSONResponse({"block_start": block_start, "block_end": block_end, "scenes": result})
+
+
 async def endpoint_programs(request: Request):
-    logger.info(f"LiveTV: {request.method} /livetv/programs params={dict(request.query_params)}")
+    logger.notice(f"LiveTV: {request.method} /livetv/programs params={dict(request.query_params)}")
     server_id = getattr(config, "SERVER_ID", "stash-proxy")
 
     tunarr_channels = await _get_channels() if getattr(config, "ENABLE_TUNARR", False) else []
@@ -1829,8 +2149,12 @@ async def endpoint_programs(request: Request):
                 "icon": _stash_screenshot_url(entry["scene_id"]) if entry.get("scene_id") else "",
             }
             prog_id = encode_id("program", f"{tvg_id}|{raw_prog['start']}")
-            # Register for single-item lookup (endpoint_program_detail)
-            _program_info_map[prog_id.replace("-", "")] = raw_prog
+            pid_norm = prog_id.replace("-", "")
+            # Register for single-item lookup in both maps.
+            # _stash_program_map is never cleared by XMLTV refreshes so the entry
+            # survives concurrent/subsequent _get_programs() calls.
+            _program_info_map[pid_norm] = raw_prog
+            _stash_program_map[pid_norm] = raw_prog
             programs.append(raw_prog)
 
     # POST body may carry filters as JSON (Wholphin sends POST instead of GET)
@@ -1848,24 +2172,32 @@ async def endpoint_programs(request: Request):
             return val
         return str(body.get(key, body.get(key.lower(), default)))
 
-    # Channel filter — ChannelIds may be a comma-sep query param or a JSON array in the POST body
+    # Channel filter — ChannelIds may be:
+    #   • repeated query params:  ?channelIds=a&channelIds=b  (Jellyfin Android TV)
+    #   • a single comma-sep value: ?channelIds=a,b
+    #   • a JSON array in a POST body (Wholphin)
+    # Starlette's query_params.items() deduplicates keys (last value wins), so we
+    # use multi_items() to capture every occurrence of channelIds.
     requested: set[str] = set()
-    qs_channel_ids = next((v for k, v in request.query_params.items() if k.lower() == "channelids"), None)
-    if qs_channel_ids:
-        requested = set(qs_channel_ids.split(","))
+    all_qs_channel_ids = [v for k, v in request.query_params.multi_items() if k.lower() == "channelids"]
+    if all_qs_channel_ids:
+        for val in all_qs_channel_ids:
+            requested.update(val.split(","))
     else:
         body_ids = body.get("ChannelIds", body.get("channelIds", body.get("channelids")))
         if isinstance(body_ids, list):
-            requested = set(body_ids)
+            requested = set(str(x) for x in body_ids)
         elif isinstance(body_ids, str) and body_ids:
             requested = set(body_ids.split(","))
-    # Normalize to unhyphenated hex so hyphenated UUID IDs from clients still match
-    requested = {r.replace("-", "") for r in requested}
-    logger.info(f"LiveTV: programs channel filter requested={requested or 'ALL'}")
+    # Normalize to unhyphenated hex so hyphenated UUID IDs from clients still match.
+    # Drop sentinel values that clients send when they mean "no filter" (e.g. "null").
+    _SENTINEL_IDS = {"null", "undefined", "", "0"}
+    requested = {r.replace("-", "") for r in requested if r.lower() not in _SENTINEL_IDS}
+    logger.debug(f"LiveTV: programs channel filter requested={requested or 'ALL'}")
     if requested:
         wanted = {tvg for tvg in channels_by_tvg_id
-                  if encode_id("channel", tvg).replace("-", "") in requested}
-        logger.info(f"LiveTV: programs channel filter matched tvg_ids={wanted}")
+                  if encode_id("ch", tvg).replace("-", "") in requested}
+        logger.debug(f"LiveTV: programs channel filter matched tvg_ids={wanted}")
         programs = [p for p in programs if p["channel_id"] in wanted]
 
     # Time filters
@@ -1967,7 +2299,7 @@ async def endpoint_programs(request: Request):
         programs = programs[:limit]
 
     items = [_program_to_jellyfin(p, server_id, channels_by_tvg_id) for p in programs]
-    logger.info(f"LiveTV: programs returning {len(items)}/{total} items")
+    logger.notice(f"LiveTV: programs returning {len(items)}/{total} items")
     return JSONResponse({"Items": items, "TotalRecordCount": total, "StartIndex": start_index})
 
 
@@ -2404,6 +2736,7 @@ async def endpoint_guide_data(request: Request):
                 "number": ch.get("number", ""),
                 "logo_url": logo_url,
                 "programs": programs,
+                "stash_type": ch.get("stash_type", ""),
             })
 
     return JSONResponse({"date": date_label, "day_start": day_start, "day_end": day_end, "channels": result})

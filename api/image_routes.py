@@ -46,7 +46,7 @@ async def endpoint_item_image(request: Request):
                 return await _proxy_image(prog["icon"])
             from core.jellyfin_mapper import encode_id
             ch = await live_tv_routes.get_channel_by_jellyfin_id(
-                encode_id("channel", prog["channel_id"])
+                encode_id("ch", prog["channel_id"])
             )
             if ch is not None and ch.get("logo"):
                 return await _proxy_image(ch["logo"])

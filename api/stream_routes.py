@@ -13,6 +13,7 @@ stream_client = httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", Fal
 
 async def endpoint_playback_info(request: Request):
     raw_item_id = request.path_params.get("item_id", "")
+    logger.info(f"PlaybackInfo: {request.method} item={raw_item_id!r}")
 
     # Live TV channels have their own playback path
     from api import live_tv_routes
@@ -23,6 +24,11 @@ async def endpoint_playback_info(request: Request):
         return live_tv_routes.channel_playback_info(ch, raw_item_id, request)
 
     item_id = decode_id(raw_item_id)
+    # If decode returned the ID unchanged or decoded to a non-scene prefix,
+    # this isn't a playable library item — the channel lookup already failed.
+    if item_id == raw_item_id or item_id.startswith("ch-") or item_id.startswith("channel-"):
+        logger.warning(f"PlaybackInfo: unrecognized item ID {raw_item_id!r}, returning 404")
+        return JSONResponse({"error": "Item not found"}, status_code=404)
     raw_id = item_id.replace("scene-", "")
     scene = await stash_client.get_scene(raw_id)
 
@@ -148,7 +154,27 @@ async def endpoint_subtitle(request: Request):
     return Response(status_code=404)
 
 async def endpoint_stream(request: Request):
-    item_id = decode_id(request.path_params.get("item_id", ""))
+    raw_item_id = request.path_params.get("item_id", "")
+
+    # Live TV channels: clients may build a standard /Videos/{id}/stream or
+    # /master.m3u8 transcode URL from the channel ID instead of using the
+    # PlaybackInfo Path.  Redirect to the channel's live stream rather than
+    # falling through to get_scene() with a channel ID.
+    from api import live_tv_routes
+    ch = await live_tv_routes.get_channel_by_jellyfin_id(raw_item_id)
+    if ch is not None:
+        cid = raw_item_id.replace("-", "")
+        if ch.get("stash_type"):
+            target = f"/livetv/channels/{cid}/stash-stream.m3u8"
+        else:
+            target = f"/livetv/channels/{cid}/stream.m3u8"
+        logger.info(
+            f"Stream: Live TV channel {cid} ({ch.get('name')!r}) "
+            f"req={request.url.path}?{request.url.query} → redirect {target}"
+        )
+        return RedirectResponse(url=target, status_code=302)
+
+    item_id = decode_id(raw_item_id)
     raw_id = item_id.replace("scene-", "")
     stash_base = config.get_stash_base()
     apikey = getattr(config, "STASH_API_KEY", "")
@@ -194,7 +220,16 @@ async def endpoint_stream(request: Request):
     )
     
 async def endpoint_hls_segment(request: Request):
-    item_id = decode_id(request.path_params.get("item_id", ""))
+    raw_item_id = request.path_params.get("item_id", "")
+
+    # Live TV channels serve their HLS segments from the live TV endpoints, not
+    # here.  Guard so a channel ID never reaches get_scene() / Stash.
+    from api import live_tv_routes
+    if await live_tv_routes.get_channel_by_jellyfin_id(raw_item_id) is not None:
+        logger.warning(f"HLS segment requested for Live TV channel {raw_item_id!r} — not served here")
+        return Response(status_code=404)
+
+    item_id = decode_id(raw_item_id)
     raw_id = item_id.replace("scene-", "")
     segment = request.path_params.get("segment", "")
     

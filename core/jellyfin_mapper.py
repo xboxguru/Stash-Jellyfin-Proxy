@@ -54,10 +54,10 @@ def encode_id(prefix: str, raw_id: str) -> str:
 
 def decode_id(encoded_id: str) -> str:
     clean_id = encoded_id.replace("-", "")
-    if clean_id.startswith("scene") or clean_id.startswith("person") or clean_id.startswith("studio"): return encoded_id 
+    if clean_id.startswith("scene") or clean_id.startswith("person") or clean_id.startswith("studio"): return encoded_id
     try:
         decoded_str = bytes.fromhex(clean_id).decode('utf-8').replace("\x00", "").strip()
-        if any(prefix in decoded_str for prefix in ["scene-", "person-", "studio-", "tag-", "root-", "filter-", "year-"]):
+        if any(prefix in decoded_str for prefix in ["scene-", "person-", "studio-", "tag-", "root-", "filter-", "year-", "ch-", "channel-"]):
             return decoded_str
     except Exception: pass
     return encoded_id

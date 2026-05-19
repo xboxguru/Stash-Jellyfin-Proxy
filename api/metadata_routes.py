@@ -212,8 +212,10 @@ async def endpoint_item_details(request: Request):
         return JSONResponse(live_tv_routes._channel_to_jellyfin(ch, server_id, item_id))
     prog = await live_tv_routes.get_program_by_jellyfin_id(item_id)
     if prog is not None:
-        channels = await live_tv_routes._get_channels()
-        channels_by_tvg_id = {c["tvg_id"]: c for c in channels}
+        import config as _config
+        tunarr_chs = await live_tv_routes._get_channels() if getattr(_config, "ENABLE_TUNARR", False) else []
+        stash_chs = await live_tv_routes._get_stash_channels() if getattr(_config, "ENABLE_STASH_CHANNELS", False) else []
+        channels_by_tvg_id = {c["tvg_id"]: c for c in tunarr_chs + stash_chs}
         return JSONResponse(live_tv_routes._program_to_jellyfin(prog, server_id, channels_by_tvg_id, item_id))
 
     if "root-" in decoded_id or "tag-" in decoded_id or "filter-" in decoded_id:
@@ -222,6 +224,16 @@ async def endpoint_item_details(request: Request):
         return await _handle_studio_details(decoded_id, server_id, cache_version)
     if decoded_id.startswith("person-"):
         return await _handle_performer_details(decoded_id, item_id, server_id)
+
+    # If decode_id returned the ID unchanged it means the encoded bytes were not
+    # a valid UTF-8 string with a known prefix (e.g. an MD5 hash used for long
+    # program/channel IDs).  Falling through to _handle_scene_details would
+    # extract random digits from the hash and return a real Stash scene — a
+    # scene item has no StartDate, which crashes Jellyfin Android TV's guide.
+    if decoded_id == item_id:
+        logger.debug(f"Metadata Request -> Opaque ID not found anywhere, returning 404: {item_id}")
+        return Response(status_code=404)
+
     return await _handle_scene_details(decoded_id)
 
 

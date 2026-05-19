@@ -157,25 +157,25 @@ def log_security_posture():
     ui_allow_ips = getattr(config, "UI_ALLOWED_IPS", [])
     cors_origins = getattr(config, "CORS_ALLOWED_ORIGINS", [])
     trusted_proxies = getattr(config, "TRUSTED_PROXY_IPS", [])
-    logger.notice("-" * 50)
-    logger.notice("Security Posture")
-    logger.notice(f"Require UI Auth: {bool(getattr(config, 'REQUIRE_AUTH_FOR_CONFIG', True))}")
-    logger.notice(f"Public /api/status: {bool(getattr(config, 'UI_PUBLIC_STATUS_ENDPOINT', False))}")
-    logger.notice(f"CSRF Protection: {bool(getattr(config, 'UI_CSRF_PROTECTION', True))}")
-    logger.notice(f"UI IP Allowlist Enabled: {bool(ui_allow_ips)}")
+    logger.info("-" * 50)
+    logger.info("Security Posture")
+    logger.info(f"Require UI Auth: {bool(getattr(config, 'REQUIRE_AUTH_FOR_CONFIG', True))}")
+    logger.info(f"Public /api/status: {bool(getattr(config, 'UI_PUBLIC_STATUS_ENDPOINT', False))}")
+    logger.info(f"CSRF Protection: {bool(getattr(config, 'UI_CSRF_PROTECTION', True))}")
+    logger.info(f"UI IP Allowlist Enabled: {bool(ui_allow_ips)}")
     if ui_allow_ips:
-        logger.notice(f"UI Allowed IPs: {', '.join(ui_allow_ips)}")
-    logger.notice(
+        logger.info(f"UI Allowed IPs: {', '.join(ui_allow_ips)}")
+    logger.info(
         f"Auth Rate Limit: {getattr(config, 'AUTH_RATE_LIMIT_MAX_ATTEMPTS', 10)} attempts / "
         f"{getattr(config, 'AUTH_RATE_LIMIT_WINDOW_MINUTES', 15)} min"
     )
-    logger.notice(f"Trust Proxy Headers: {bool(getattr(config, 'TRUST_PROXY_HEADERS', False))}")
+    logger.info(f"Trust Proxy Headers: {bool(getattr(config, 'TRUST_PROXY_HEADERS', False))}")
     if trusted_proxies:
-        logger.notice(f"Trusted Proxy IPs: {', '.join(trusted_proxies)}")
-    logger.notice(f"CORS Allowlist Configured: {bool(cors_origins)}")
+        logger.info(f"Trusted Proxy IPs: {', '.join(trusted_proxies)}")
+    logger.info(f"CORS Allowlist Configured: {bool(cors_origins)}")
     if cors_origins:
-        logger.notice(f"CORS Allowed Origins: {', '.join(cors_origins)}")
-    logger.notice("-" * 50)
+        logger.info(f"CORS Allowed Origins: {', '.join(cors_origins)}")
+    logger.info("-" * 50)
 
 def _get_local_ip():
     local_ip = getattr(config, "HOST_IP", "").strip()
@@ -194,11 +194,34 @@ def _get_local_ip():
 CACHED_LOCAL_IP = _get_local_ip()
 
 async def dummy_websocket(websocket: WebSocket):
+    import json as _json
+    import uuid as _uuid
     await websocket.accept()
-    logger.debug("WebSocket connection opened to prevent strict client panic.")
+    logger.debug("WebSocket connection opened")
+
+    async def _keepalive():
+        # Send ForceKeepAlive every 25 s.  MessageId is required by the Jellyfin
+        # SDK's Kotlin serializer — omitting it crashes the client app.
+        while True:
+            try:
+                await websocket.send_text(_json.dumps({
+                    "MessageType": "ForceKeepAlive",
+                    "MessageId": str(_uuid.uuid4()),
+                    "Data": 30,
+                }))
+            except Exception:
+                break
+            await asyncio.sleep(25)
+
+    ka_task = asyncio.create_task(_keepalive())
     try:
-        while True: await websocket.receive_text()
-    except Exception: pass
+        while True:
+            msg = await websocket.receive_text()
+            logger.debug(f"WebSocket recv: {msg[:120]}")
+    except Exception:
+        pass
+    finally:
+        ka_task.cancel()
 
 async def root_router(request: Request):
     ui_port = getattr(config, "UI_PORT", 8097)
@@ -233,6 +256,8 @@ routes = [
     Route("/api/sysinfo", ui_routes.api_get_sysinfo, methods=["GET"]),
     Route("/api/livetv/rebuild-schedule", live_tv_routes.endpoint_rebuild_schedule, methods=["POST"]),
     Route("/api/livetv/guide", live_tv_routes.endpoint_guide_data, methods=["GET"]),
+    Route("/api/livetv/channel-now", live_tv_routes.endpoint_channel_now_playing, methods=["GET"]),
+    Route("/api/livetv/shorts-block-preview", live_tv_routes.endpoint_shorts_block_preview, methods=["GET"]),
     # Channel config CRUD
     Route("/api/livetv/channels-config", live_tv_routes.endpoint_channels_config_list, methods=["GET"]),
     Route("/api/livetv/channels-config", live_tv_routes.endpoint_channels_config_create, methods=["POST"]),
@@ -369,6 +394,7 @@ routes = [
     Route("/livetv/info", live_tv_routes.endpoint_live_tv_info, methods=["GET"]),
     Route("/livetv/guideinfo", live_tv_routes.endpoint_guide_info, methods=["GET"]),
     Route("/livetv/channels", live_tv_routes.endpoint_channels, methods=["GET"]),
+    Route("/livetv/channels/{channel_id}", live_tv_routes.endpoint_channel_single, methods=["GET"]),
     Route("/livetv/programs/recommended", live_tv_routes.endpoint_programs, methods=["GET", "POST"]),
     Route("/livetv/programs/{program_id}", live_tv_routes.endpoint_program_detail, methods=["GET"]),
     Route("/livetv/programs", live_tv_routes.endpoint_programs, methods=["GET", "POST"]),
@@ -382,6 +408,10 @@ routes = [
     Route("/livetv/channels/{channel_id}/seg/{seg_name}", live_tv_routes.endpoint_stash_channel_segment, methods=["GET"]),
     Route("/livetv/channels/{channel_id}/stream.m3u8", live_tv_routes.endpoint_channel_m3u8, methods=["GET"]),
     Route("/livetv/channels/{channel_id}/stream", live_tv_routes.endpoint_channel_stream, methods=["GET"]),
+
+    Route("/livestreams/open", live_tv_routes.endpoint_live_streams_open, methods=["POST"]),
+    Route("/livestreams/close", live_tv_routes.endpoint_live_streams_close, methods=["POST"]),
+    Route("/livestreams/ping", live_tv_routes.endpoint_live_streams_ping, methods=["POST"]),
 
     Route("/clientlog/document", auth_routes.endpoint_client_log, methods=["POST"]),
 
@@ -450,7 +480,7 @@ async def background_pruner():
 async def continuous_preheater():
     import json
     from core import stash_client
-    logger.notice("Starting continuous cache pre-heater for primary libraries (5-minute interval).")
+    logger.debug("Starting continuous cache pre-heater for primary libraries (5-minute interval).")
     
     # We must formulate the EXACT dictionaries that library_routes generates to match the cache keys
     filter_str = json.dumps({"direction": "ASC", "sort": "title"}, sort_keys=True)
@@ -482,18 +512,18 @@ async def run_server():
     if hasattr(config, "UI_PORT") and config.UI_PORT != config.PROXY_PORT:
         hypercorn_config.bind.append(f"{config.PROXY_BIND}:{config.UI_PORT}")
     
-    logger.notice("=" * 50)
-    logger.notice(f"Stash-Jellyfin Proxy v2")
-    logger.notice(f"Proxy API: {config.PROXY_BIND}:{config.PROXY_PORT}")
-    if config.PROXY_API_KEY: logger.notice(f"Proxy API Key Loaded")
-    logger.notice("=" * 50)
+    logger.info("=" * 50)
+    logger.info(f"Stash-Jellyfin Proxy v2")
+    logger.info(f"Proxy API: {config.PROXY_BIND}:{config.PROXY_PORT}")
+    if config.PROXY_API_KEY: logger.info(f"Proxy API Key Loaded")
+    logger.info("=" * 50)
     log_security_posture()
 
     stash_online = await stash_client.test_stash_connection()
     if not stash_online:
         logger.warning("Stash is unreachable! Proxy will start, but clients will fail to load data.")
     else:
-        logger.notice("Connected to Stash successfully.")
+        logger.info("Connected to Stash successfully.")
     
     loop = asyncio.get_running_loop()
     try:

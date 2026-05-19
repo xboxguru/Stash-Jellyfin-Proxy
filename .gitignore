@@ -6,6 +6,7 @@ authenticated_IPs.json
 display_preferences.json
 test.ps1
 .venv*
+channel_logos/
 
 # Python artifacts
 __pycache__/

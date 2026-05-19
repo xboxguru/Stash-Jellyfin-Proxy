@@ -26,7 +26,7 @@
             ENABLE_STASH_CHANNELS: false,
             STASH_SCHEDULE_DAYS: 7, STASH_KEEP_DAYS: 2, STASH_CHANNEL_START_NUMBER: 5001,
             ENABLE_SHORTS_CHANNEL: false, SHORTS_MAX_MINUTES: 5,
-            FFMPEG_PATH: 'ffmpeg', LIVE_TV_IDLE_TIMEOUT: 60
+            FFMPEG_PATH: 'ffmpeg', LIVE_TV_IDLE_TIMEOUT: 300
         };
 
         let topPlayedData = [];
@@ -767,9 +767,11 @@
                     // Use data-* so titles are never embedded in JS string literals:
                     // the browser decodes HTML entities (&#39; → ') before JS sees them.
                     const clickAttrs = prog.scene_id
-                        ? ` data-scene="${prog.scene_id}" data-title="${escapeHTML(prog.title)}" onclick="openSceneModal(this)"`
+                        ? ` data-scene="${prog.scene_id}" data-title="${escapeHTML(prog.title)}" data-start-ts="${prog.start_ts}" data-stop-ts="${prog.stop_ts}" onclick="openSceneModal(this)"`
                         : ch.readonly
                         ? ` data-epg-tvgid="${escapeHTML(ch.tvg_id)}" data-epg-start="${prog.start_ts}" onclick="openEpgModal(this)"`
+                        : (ch.stash_type === 'shorts')
+                        ? ` data-shorts-tvgid="${escapeHTML(ch.tvg_id)}" data-block-start="${prog.start_ts}" data-block-stop="${prog.stop_ts}" onclick="openShortsBlockModal(this)"`
                         : '';
                     const genreClass = GENRE_CLASS[prog.genre] || '';
                     const hasDrag = !ch.readonly && !!(prog.scene_id && prog.eid) && !isPast;
@@ -1648,18 +1650,18 @@
         // ── Scene detail modal ────────────────────────────────────────────────
 
         async function openSceneModal(el) {
-            const sceneId = el.dataset.scene;
+            const sceneId  = el.dataset.scene;
             // dataset.title is the HTML-decoded value — browser converts &#39; → '
             // before we see it here, so apostrophes are already correct.
-            const title = el.dataset.title || el.getAttribute('title') || '';
+            const title    = el.dataset.title || el.getAttribute('title') || '';
+            const startTs  = parseFloat(el.dataset.startTs  || 0);
+            const stopTs   = parseFloat(el.dataset.stopTs   || 0);
 
             const overlay = document.getElementById('scene-modal-overlay');
             overlay.style.display = 'flex';
 
-            // Reset to loading state
             document.getElementById('scene-modal-title-el').textContent = title;
             document.getElementById('scene-modal-studio').textContent = '';
-            document.getElementById('scene-modal-meta').textContent = 'Loading…';
             document.getElementById('scene-modal-stats').innerHTML = '';
             document.getElementById('scene-modal-desc').textContent = '';
             document.getElementById('scene-modal-performers').innerHTML = '';
@@ -1667,6 +1669,20 @@
             document.getElementById('scene-modal-performers-section').style.display = 'none';
             document.getElementById('scene-modal-tags-section').style.display = 'none';
             document.getElementById('scene-modal-desc-section').style.display = 'none';
+
+            // Show scene ID and scheduled time range immediately while the fetch loads
+            const _fmtTime = ts => new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            const _schedMeta = () => {
+                const parts = [{ icon: '🎬', text: `Scene #${sceneId}` }];
+                if (startTs && stopTs) {
+                    const dur = Math.round(stopTs - startTs);
+                    parts.push({ icon: '🕐', text: `${_fmtTime(startTs)} – ${_fmtTime(stopTs)} (${formatDuration(dur)})` });
+                }
+                return parts;
+            };
+            document.getElementById('scene-modal-meta').innerHTML = _schedMeta()
+                .map(p => `<span class="scene-modal-meta-item"><span>${p.icon}</span><span>${escapeHTML(String(p.text))}</span></span>`)
+                .join('');
 
             const poster = document.getElementById('scene-modal-poster');
             poster.style.display = 'block';
@@ -1680,8 +1696,8 @@
                 document.getElementById('scene-modal-title-el').textContent = scene.title || title;
                 document.getElementById('scene-modal-studio').textContent = scene.studio || '';
 
-                // Meta row: date · runtime · rating · code
-                const metaParts = [];
+                // Meta row: scene ID · scheduled slot · date · runtime · rating · code
+                const metaParts = [..._schedMeta()];
                 if (scene.date) metaParts.push({ icon: '📅', text: scene.date });
                 if (scene.duration) metaParts.push({ icon: '⏱', text: formatDuration(scene.duration) });
                 if (scene.rating !== null && scene.rating !== undefined && scene.rating > 0) {
@@ -1720,12 +1736,134 @@
                 }
 
             } catch (e) {
-                document.getElementById('scene-modal-meta').textContent = 'Failed to load scene details.';
+                // Keep the scene ID / time row; just note that details failed
+                const errParts = [..._schedMeta(), { icon: '⚠', text: 'Could not load scene details' }];
+                document.getElementById('scene-modal-meta').innerHTML = errParts
+                    .map(p => `<span class="scene-modal-meta-item"><span>${p.icon}</span><span>${escapeHTML(String(p.text))}</span></span>`)
+                    .join('');
             }
         }
 
         function closeSceneModal() {
             document.getElementById('scene-modal-overlay').style.display = 'none';
+            if (window._shortsModalInterval) {
+                clearInterval(window._shortsModalInterval);
+                window._shortsModalInterval = null;
+            }
+        }
+
+        async function openShortsBlockModal(el) {
+            const tvgId     = el.dataset.shortsTvgid;
+            const blockStart = parseFloat(el.dataset.blockStart);
+            const blockStop  = parseFloat(el.dataset.blockStop);
+            const now        = Date.now() / 1000;
+            const isLive     = now >= blockStart && now < blockStop;
+
+            const overlay  = document.getElementById('scene-modal-overlay');
+            const titleEl  = document.getElementById('scene-modal-title-el');
+            const studioEl = document.getElementById('scene-modal-studio');
+            const metaEl   = document.getElementById('scene-modal-meta');
+            const posterEl = document.getElementById('scene-modal-poster');
+            const statsEl  = document.getElementById('scene-modal-stats');
+            const descSec  = document.getElementById('scene-modal-desc-section');
+            const descEl   = document.getElementById('scene-modal-desc');
+            const perfSec  = document.getElementById('scene-modal-performers-section');
+            const tagsSec  = document.getElementById('scene-modal-tags-section');
+
+            // Reset modal to a clean state
+            posterEl.src = '';
+            posterEl.style.display = 'none';
+            studioEl.textContent = '';
+            metaEl.textContent = '';
+            statsEl.textContent = '';
+            perfSec.style.display = 'none';
+            tagsSec.style.display = 'none';
+            descSec.style.display = '';
+
+            const _ft = ts => new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            const _fd = s  => { const m = Math.floor(s / 60), sec = Math.round(s % 60); return `${m}:${sec.toString().padStart(2, '0')}`; };
+
+            titleEl.textContent = 'Shorts';
+            studioEl.textContent = `${_ft(blockStart)} – ${_ft(blockStop)}`;
+            descEl.innerHTML = '<em>Loading&hellip;</em>';
+            overlay.style.display = 'flex';
+
+            // Stop any previous polling
+            if (window._shortsModalInterval) {
+                clearInterval(window._shortsModalInterval);
+                window._shortsModalInterval = null;
+            }
+
+            // Fetch the deterministic block scene list (based on block_start as seed)
+            let scenes = null;
+            try {
+                const r = await fetch(`/api/livetv/shorts-block-preview?ts=${blockStart}&tvg_id=${encodeURIComponent(tvgId)}`);
+                const d = await r.json();
+                scenes = d.scenes || [];
+            } catch (e) {
+                scenes = [];
+            }
+
+            const renderList = (scenes, highlightId) => {
+                if (!scenes || !scenes.length) return '<em>No scenes found.</em>';
+                const nowTs = Date.now() / 1000;
+                let html = '<div style="font-size:13px; line-height:1.7;">';
+                for (const s of scenes) {
+                    const isCur  = highlightId && String(s.id) === String(highlightId);
+                    const isPast = s.stop_ts < nowTs && !isLive;
+                    const timeStr = `${_ft(s.start_ts)}–${_ft(s.stop_ts)}`;
+                    let style = 'padding:3px 8px; margin:1px 0; border-radius:3px;';
+                    if (isCur)       style += ' background:#1e3a1e; border-left:3px solid #4caf50;';
+                    else if (isPast) style += ' opacity:0.55;';
+                    html += `<div style="${style}">${isCur ? '▶ ' : ''}<strong>#${escapeHTML(String(s.id))}</strong> ${escapeHTML(s.title)} <span style="color:#888; font-size:11px;">${timeStr} (${_fd(s.duration_sec)})</span></div>`;
+                }
+                html += '</div>';
+                return html;
+            };
+
+            const refresh = async () => {
+                let nowPlaying = null;
+                let highlightId = null;
+                if (isLive) {
+                    try {
+                        const r = await fetch(`/api/livetv/channel-now?tvg_id=${encodeURIComponent(tvgId)}`);
+                        const d = await r.json();
+                        if (d.active && d.scene_id) {
+                            nowPlaying  = d;
+                            highlightId = String(d.scene_id);
+                        }
+                    } catch (e) { /* ignore */ }
+                }
+
+                let html = '';
+                if (isLive) {
+                    if (nowPlaying) {
+                        const elapsed = nowPlaying.elapsed_sec || 0;
+                        const dur     = nowPlaying.duration_sec || 0;
+                        const pct     = dur > 0 ? Math.min(100, Math.round(elapsed / dur * 100)) : 0;
+                        html += `<div style="margin-bottom:12px; padding:8px 10px; background:#1a2e1a; border:1px solid #4caf50; border-radius:6px;">`;
+                        html += `<div style="font-size:11px; color:#4caf50; font-weight:bold; margin-bottom:4px;">&#9654; NOW PLAYING</div>`;
+                        html += `<div style="font-weight:bold;">#${escapeHTML(String(nowPlaying.scene_id))} ${escapeHTML(nowPlaying.title || '')}</div>`;
+                        html += `<div style="font-size:12px; color:#aaa; margin-top:2px;">${_fd(elapsed)} / ${_fd(dur)} &nbsp;(${pct}%)</div>`;
+                        if (nowPlaying.upcoming && nowPlaying.upcoming.length) {
+                            html += `<div style="font-size:11px; color:#666; margin-top:4px;">Up next: `;
+                            html += nowPlaying.upcoming.slice(0,3).map(u => `#${escapeHTML(String(u.scene_id))} ${escapeHTML(u.title || '')}`).join(' → ');
+                            html += '</div>';
+                        }
+                        html += '</div>';
+                    } else {
+                        html += '<div style="color:#888; font-size:12px; margin-bottom:10px;">Channel not currently streaming.</div>';
+                    }
+                }
+                html += renderList(scenes, highlightId);
+                descEl.innerHTML = html;
+            };
+
+            await refresh();
+
+            if (isLive) {
+                window._shortsModalInterval = setInterval(refresh, 10000);
+            }
         }
 
         async function openEpgModal(el) {
