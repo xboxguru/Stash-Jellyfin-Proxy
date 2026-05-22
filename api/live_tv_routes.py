@@ -51,20 +51,52 @@ _channels_config: list[dict] = []         # ordered list of channel config dicts
 class _FFmpegChannelManager:
     """One FFmpeg HLS process per active channel, started on first play request.
 
-    FFmpeg reads a ffconcat playlist of raw Stash scene URLs (no Stash-side
-    transcode) and writes HLS segments to a per-channel temp directory.
-    An idle watchdog shuts down the process and deletes the temp dir after
-    LIVE_TV_IDLE_TIMEOUT seconds of no manifest/segment requests.
+    FFmpeg reads each scene as its own input with its own decoder, normalizes
+    everything to a uniform format via the concat filter (so there are no
+    decoder/filter-graph reconfigures at scene transitions), and writes HLS
+    segments to a per-channel temp directory.  An idle watchdog shuts down
+    the process and deletes the temp dir after LIVE_TV_IDLE_TIMEOUT seconds
+    of no manifest/segment requests.
     """
 
     def __init__(self):
         self._procs:  dict[str, asyncio.subprocess.Process] = {}
         self._dirs:   dict[str, str]        = {}
         self._last:   dict[str, float]      = {}   # channel_id → last request timestamp
-        self._stderr: dict[str, list[str]]  = {}   # channel_id → rolling stderr lines
+        self._stderr: dict[str, list[str]]  = {}   # channel_id → rolling stderr lines (last 60)
         self._launch_info: dict[str, dict]  = {}   # channel_id → {start_ts, seek, playlist}
         self._lock    = asyncio.Lock()
         self._watchdog: asyncio.Task | None = None
+
+    # ── log file management ────────────────────────────────────────────────
+
+    @staticmethod
+    def _ffmpeg_log_path(cid: str) -> str:
+        log_dir = getattr(config, "LOG_DIR", "/config")
+        d = os.path.join(log_dir, "livetv_ffmpeg")
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, f"{cid}.log")
+
+    def _open_stderr_file(self, cid: str):
+        """Open the per-channel FFmpeg log file in append mode.
+
+        Rotates to {cid}.log.old once the active log exceeds 10 MB so a single
+        long-running channel can't fill the disk.  Returns None on failure.
+        """
+        try:
+            path = self._ffmpeg_log_path(cid)
+            try:
+                if os.path.exists(path) and os.path.getsize(path) > 10 * 1024 * 1024:
+                    old = path + ".old"
+                    if os.path.exists(old):
+                        os.remove(old)
+                    os.rename(path, old)
+            except OSError:
+                pass
+            return open(path, "a", encoding="utf-8", errors="replace")
+        except Exception as exc:
+            logger.warning(f"LiveTV FFmpeg: could not open log file for {cid!r}: {exc}")
+            return None
 
     # ── public API ─────────────────────────────────────────────────────────
 
@@ -146,77 +178,97 @@ class _FFmpegChannelManager:
         stash_base = config.get_stash_base()
         api_key    = getattr(config, "STASH_API_KEY", "")
 
-        # Build ffconcat playlist — raw Stash stream URLs, no Stash transcode.
-        # inpoint on the first entry tells FFmpeg to seek before outputting,
-        # handled via HTTP byte-range so Stash never re-encodes.
-        concat_path = os.path.join(d, "concat.txt")
-        with open(concat_path, "w", encoding="utf-8") as f:
-            f.write("ffconcat version 1.0\n")
-            for i, entry in enumerate(entries):
-                url = f"{stash_base}/scene/{entry['scene_id']}/stream"
-                if api_key:
-                    url += f"?apikey={api_key}"
-                f.write(f"file '{url}'\n")
-                if i == 0 and seek > 1.0:
-                    f.write(f"inpoint {seek:.3f}\n")
-
         ffmpeg_bin = getattr(config, "FFMPEG_PATH", "ffmpeg")
-        # FFmpeg on Windows: use forward slashes to avoid backslash escaping issues
+        # FFmpeg on Windows: use forward slashes to avoid backslash escaping
         seg_tmpl = os.path.join(d, "seg%05d.ts").replace("\\", "/")
         manifest = os.path.join(d, "stream.m3u8").replace("\\", "/")
-        concat_fwd = concat_path.replace("\\", "/")
+
+        # ─── concat FILTER (not demuxer) ──────────────────────────────────
+        # Each scene is opened as its own input with its own decoder, then
+        # normalized to a uniform 1920x1080 yuv420p 30fps / 48kHz stereo
+        # format BEFORE being joined.  The encoder downstream sees one
+        # continuous stream with constant parameters, so it never has to
+        # reconfigure the filter graph or decoder at scene transitions.
+        #
+        # The concat demuxer we previously used glued files at the container
+        # level: a single decoder served every scene, and each new MP4 forced
+        # a "Reconfiguring filter graph because video parameters changed"
+        # rebuild that stalled the encoder for 1–3 seconds, dropped hundreds
+        # of input frames, and caused the client-side video freeze (audio
+        # kept playing because its filter chain is independent) and the
+        # pink/blue fog at startup from half-initialised SPS/PPS.
+        input_args: list[str] = []
+        video_parts: list[str] = []
+        audio_parts: list[str] = []
+        common_in_flags = [
+            # Survive transient Stash disconnects mid-playlist.
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_at_eof", "1",
+            "-reconnect_delay_max", "5",
+        ]
+        for i, entry in enumerate(entries):
+            url = f"{stash_base}/scene/{entry['scene_id']}/stream"
+            if api_key:
+                url += f"?apikey={api_key}"
+            input_args.extend(common_in_flags)
+            if i == 0 and seek > 1.0:
+                # Fast input-side seek on the first scene via HTTP byte range
+                # so Stash never re-encodes.
+                input_args.extend(["-ss", f"{seek:.3f}"])
+            input_args.extend(["-i", url])
+            # Per-input video normalization → uniform 1920x1080 yuv420p 30fps,
+            # SAR=1, letterboxed/pillarboxed.  setpts=PTS-STARTPTS rebases
+            # timestamps so the concat node sees monotonically-increasing PTS.
+            video_parts.append(
+                f"[{i}:v]format=yuv420p,setsar=1,"
+                f"scale=1920:1080:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+                f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,"
+                f"setsar=1,fps=30,setpts=PTS-STARTPTS[v{i}]"
+            )
+            # Per-input audio normalization → uniform 48 kHz stereo so the AAC
+            # encoder never reconfigures (the prior cause of MPV/Wholphin's
+            # audio-EOF cycling).
+            audio_parts.append(
+                f"[{i}:a]aresample=async=1000:first_pts=0,"
+                f"aformat=sample_rates=48000:channel_layouts=stereo,"
+                f"asetpts=PTS-STARTPTS[a{i}]"
+            )
+
+        n = len(entries)
+        concat_pads = "".join(f"[v{i}][a{i}]" for i in range(n))
+        filter_complex = ";".join(video_parts + audio_parts) + (
+            f";{concat_pads}concat=n={n}:v=1:a=1[outv][outa]"
+        )
+
+        # Write the filter graph to a file — the inline form would exceed the
+        # Windows 32 KB command-line limit on longer playlists.
+        fc_path = os.path.join(d, "filter_complex.txt").replace("\\", "/")
+        with open(fc_path, "w", encoding="utf-8") as fc:
+            fc.write(filter_complex)
 
         cmd = [
             ffmpeg_bin, "-y",
-            # Allow http/https in the ffconcat file entries.
-            # Without this FFmpeg rejects non-file:// URLs (exits rc=-22).
             "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
-            "-f", "concat", "-safe", "0",
-            "-i", concat_fwd,
-            # Single transcode to consistent H.264+AAC — works regardless of
-            # source codec/container.  veryfast keeps CPU usage low.
+            *input_args,
+            "-filter_complex_script", fc_path,
+            "-map", "[outv]", "-map", "[outa]",
+            # H.264 + AAC.  veryfast keeps CPU usage low for 60+ concurrent
+            # decoder contexts (one per scene under the concat filter).
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-            # Normalize all scenes to 1080p30 so resolution/framerate changes between
-            # scenes don't produce EXT-X-DISCONTINUITY codec mismatches that crash
-            # ExoPlayer on Android.  Letterbox/pillarbox with black padding.
-            # setsar=1 first: portrait phone videos often carry a non-1:1 SAR which
-            # causes force_original_aspect_ratio to compute against the wrong DAR and
-            # stretch instead of pillarbox.  Resetting SAR before scale fixes this.
-            # force_divisible_by=2 avoids odd-dimension errors in libx264.
-            # fps=30 after pad: resamples frames to exactly 30fps with monotonically
-            # increasing timestamps, closing any DTS gaps at ffconcat file boundaries.
-            # This prevents the HLS muxer from re-inserting EXT-X-DISCONTINUITY due
-            # to timestamp jumps even after we strip it from the rewritten manifest.
-            "-vf", ("setsar=1,"
-                    "scale=w=1920:h=1080:force_original_aspect_ratio=decrease"
-                    ":force_divisible_by=2,"
-                    "pad=w=1920:h=1080:x=(ow-iw)/2:y=(oh-ih)/2:color=black,"
-                    "setsar=1,"
-                    "fps=30"),
-            # aresample=async=1: smooths audio timestamp gaps at scene boundaries
-            # so the audio track stays in sync without hard cuts in the DTS stream.
-            "-af", "aresample=async=1",
             "-force_key_frames", "expr:gte(t,n_forced*4)",
             "-c:a", "aac", "-b:a", "192k",
             "-hls_time", "4",
             "-hls_list_size", "450",  # 30 min of segments (450 × 4 s)
-            # program_date_time: emit #EXT-X-PROGRAM-DATE-TIME on every segment.
-            # This is how ExoPlayer (Jellyfin Android TV) anchors the live edge
-            # to a wall clock and computes playback position.  Without it,
-            # ExoPlayer falls back to segment-index position, Jellyfin Android
-            # reports PlaybackPositionTicks=0, treats the stream as stalled, and
-            # restarts in a loop.  Real Jellyfin/Tunarr include this tag; it is
-            # THE fix for the long-standing restart loop.
-            # independent_segments: matches real Jellyfin/Tunarr output and tells
-            # the player every segment is independently decodable.
+            # program_date_time: emit #EXT-X-PROGRAM-DATE-TIME on every
+            # segment so ExoPlayer (Jellyfin Android TV) can anchor the live
+            # edge to a wall clock.  Without it ExoPlayer reports
+            # PlaybackPositionTicks=0 and restart-loops.
+            # independent_segments matches real Jellyfin/Tunarr output.
             "-hls_flags",
             "delete_segments+append_list+omit_endlist+program_date_time+independent_segments",
-            # Start the HLS media sequence at the seek offset divided by the
-            # segment duration.  ExoPlayer calculates its live playback
-            # position as (mediaSequence × targetDuration) – liveOffset, so a
-            # sequence of 0 always puts the live edge at ~0 s, causing
-            # Jellyfin Android to report PlaybackPositionTicks=0 and restart.
-            # A non-zero starting sequence keeps the reported position above 0.
+            # Non-zero starting media sequence keeps ExoPlayer's
+            # (mediaSequence × targetDuration) live-position calc above zero.
             "-start_number", str(max(1, int(seek) // 4)),
             "-hls_segment_filename", seg_tmpl,
             manifest,
@@ -242,9 +294,27 @@ class _FFmpegChannelManager:
         self._procs[cid] = proc
         self._stderr[cid] = []
         self._launch_info[cid] = {"start_ts": time.time(), "seek": seek, "playlist": entries}
-        # Continuously drain stderr so the pipe buffer never fills and
-        # blocks FFmpeg.  The last 60 lines are kept for error reporting.
-        asyncio.create_task(self._drain_stderr(proc, cid))
+
+        # Open the per-channel FFmpeg log file and write a session header so
+        # later analysis can correlate stderr lines with a specific launch.
+        fh = self._open_stderr_file(cid)
+        if fh is not None:
+            try:
+                ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                fh.write(
+                    f"\n===== FFmpeg session start {ts} | channel={cid} "
+                    f"scenes={len(entries)} seek={seek:.1f}s =====\n"
+                )
+                fh.write(f"cmd: {' '.join(cmd)}\n")
+                fh.flush()
+            except Exception:
+                pass
+
+        # Continuously drain stderr so the pipe buffer never fills and blocks
+        # FFmpeg.  The last 60 lines are kept in memory for error reporting;
+        # every line is also written to the per-channel log file for analysis.
+        # Pass the file handle directly so a restart can't race-close it.
+        asyncio.create_task(self._drain_stderr(proc, cid, fh))
 
         # Wait up to 30 s for the manifest to contain at least
         # _MIN_READY_SEGMENTS complete segments.  FFmpeg creates the .m3u8
@@ -283,19 +353,37 @@ class _FFmpegChannelManager:
         logger.error("LiveTV FFmpeg: timed out waiting for segments")
         return False
 
-    async def _drain_stderr(self, proc: asyncio.subprocess.Process, cid: str) -> None:
-        """Read FFmpeg stderr continuously to prevent the pipe buffer from filling."""
+    async def _drain_stderr(self, proc: asyncio.subprocess.Process, cid: str, fh) -> None:
+        """Read FFmpeg stderr continuously to prevent the pipe buffer from filling.
+
+        Each line is appended to the rolling in-memory buffer (last 60) and
+        also written to the per-channel log file (fh) passed in by _launch.
+        """
         buf = self._stderr.setdefault(cid, [])
         try:
             while True:
                 line = await proc.stderr.readline()
                 if not line:
                     break
-                buf.append(line.decode(errors="replace").rstrip())
+                text = line.decode(errors="replace").rstrip()
+                buf.append(text)
                 if len(buf) > 60:
                     buf.pop(0)
+                if fh is not None:
+                    try:
+                        fh.write(text + "\n")
+                        fh.flush()
+                    except Exception:
+                        pass
         except Exception:
             pass
+        finally:
+            if fh is not None:
+                try:
+                    fh.write("===== FFmpeg session end =====\n")
+                    fh.close()
+                except Exception:
+                    pass
 
     async def _stop_locked(self, cid: str) -> None:
         proc = self._procs.pop(cid, None)
@@ -414,6 +502,13 @@ def _load_schedule():
             payload = json.load(f)
         _stash_schedule_built_at = float(payload.get("built_at", 0))
         _stash_schedule = payload.get("schedule", {})
+        # Migration: drop legacy Shorts blocks that lack a `segments` field
+        # (older format used synthetic "Shorts" placeholders).  Dropping them
+        # forces _ensure_stash_schedules to rebuild with the new structure.
+        for tvg_id, entries in list(_stash_schedule.items()):
+            if entries and any(e.get("title") == "Shorts" and "segments" not in e for e in entries):
+                logger.info(f"LiveTV: dropping legacy Shorts schedule for '{tvg_id}' — will rebuild")
+                _stash_schedule.pop(tvg_id, None)
         age_h = (time.time() - _stash_schedule_built_at) / 3600
         logger.notice(f"LiveTV: loaded schedule from disk ({len(_stash_schedule)} channels, {age_h:.1f}h old)")
     except Exception as e:
@@ -840,37 +935,96 @@ def _build_random_schedule(scenes: list[dict]) -> list[dict]:
     return entries
 
 
-def _build_shorts_block_schedule() -> list[dict]:
-    """Build synthetic 30-minute EPG blocks for the Shorts channel.
+_HALF_HOUR = 1800  # seconds per Shorts block
+_SHORTS_WIGGLE = 60  # max over/undershoot of block boundary, in seconds
 
-    Individual scenes are too short (< 5 min) to render as visible cells in
-    most TV guide UIs.  Instead we emit 30-minute blocks labelled "Shorts" so
-    the guide looks normal.  The actual scene playlist is assembled on-demand
-    when a user plays the channel (see endpoint_stash_channel_stream).
+
+def _half_hour_ceil(ts: float) -> float:
+    return float(((int(ts) + _HALF_HOUR - 1) // _HALF_HOUR) * _HALF_HOUR)
+
+
+def _half_hour_floor(ts: float) -> float:
+    return float((int(ts) // _HALF_HOUR) * _HALF_HOUR)
+
+
+def _shorts_blocks_in_range(scenes: list[dict], range_start: float, range_end: float) -> list[dict]:
+    """Produce half-hour-aligned 30-minute Shorts blocks between range_start..range_end.
+
+    Each block contains a `segments` list with the actual scenes that play in
+    that block.  Block start times are aligned to UTC half-hour boundaries.
+    Within a block, segments are sequential starting at block_start and ending
+    at or near block_end with up to _SHORTS_WIGGLE seconds of slop on either
+    side so a full scene can fit.  Scenes never span a block boundary.
+    Partial blocks (less than a full 30 min available in the range) are
+    omitted — the last block may end up to _HALF_HOUR seconds before
+    range_end.
     """
-    BLOCK_SECS = 1800  # 30 minutes per guide cell
+    if not scenes:
+        return []
 
-    keep_days = max(1, int(getattr(config, "STASH_KEEP_DAYS", 2)))
+    start_b = _half_hour_ceil(range_start)
+    end_b   = _half_hour_floor(range_end)
+    if start_b + _HALF_HOUR > end_b:
+        return []
+
+    pool = list(scenes)
+    random.shuffle(pool)
+    pool_idx = 0
+
+    blocks: list[dict] = []
+    block_start = start_b
+    while block_start + _HALF_HOUR <= end_b:
+        block_end = block_start + _HALF_HOUR
+        segments: list[dict] = []
+        cursor = block_start
+        # Pack scenes greedily; rotate past ones that don't fit.  Stop once we
+        # come within _SHORTS_WIGGLE of block_end, or after a full pool sweep
+        # without progress.
+        attempts = 0
+        while attempts < len(pool):
+            s = pool[pool_idx % len(pool)]
+            pool_idx += 1
+            attempts += 1
+            if cursor + s["duration_sec"] > block_end + _SHORTS_WIGGLE:
+                continue
+            segments.append({
+                "scene_id":     s["id"],
+                "title":        s["title"],
+                "start_ts":     cursor,
+                "stop_ts":      cursor + s["duration_sec"],
+                "duration_sec": s["duration_sec"],
+                "genre":        _scene_genre(s),
+                "rating":       s.get("rating") or 0,
+                "o_counter":    s.get("o_counter") or 0,
+            })
+            cursor += s["duration_sec"]
+            attempts = 0
+            if cursor >= block_end - _SHORTS_WIGGLE:
+                break
+
+        if segments:
+            block_stop = segments[-1]["stop_ts"]
+            blocks.append({
+                "eid":          _new_eid(),
+                "start_ts":     block_start,
+                "stop_ts":      block_stop,
+                "title":        "Shorts",
+                "duration_sec": block_stop - block_start,
+                "segments":     segments,
+            })
+        block_start += _HALF_HOUR
+
+    return blocks
+
+
+def _build_shorts_block_schedule(scenes: list[dict]) -> list[dict]:
+    """Build the full Shorts schedule across the keep/sched window."""
+    if not scenes:
+        return []
+    keep_days  = max(1, int(getattr(config, "STASH_KEEP_DAYS", 2)))
     sched_days = max(1, int(getattr(config, "STASH_SCHEDULE_DAYS", 7)))
-
     now = time.time()
-    window_start = now - keep_days * 86400
-    window_end   = now + sched_days * 86400
-
-    entries: list[dict] = []
-    cursor = window_start
-    while cursor < window_end:
-        entries.append({
-            "eid": _new_eid(),
-            "start_ts":    cursor,
-            "stop_ts":     cursor + BLOCK_SECS,
-            "scene_id":    None,
-            "title":       "Shorts",
-            "duration_sec": BLOCK_SECS,
-        })
-        cursor += BLOCK_SECS
-
-    return entries
+    return _shorts_blocks_in_range(scenes, now - keep_days * 86400, now + sched_days * 86400)
 
 
 def _maintenance_extend_channel(
@@ -936,36 +1090,28 @@ def _maintenance_extend_channel(
 
 def _maintenance_extend_shorts(
     existing: list[dict],
+    scenes: list[dict],
     keep_days: int,
     sched_days: int,
 ) -> tuple[list[dict], int, int]:
     """Prune stale Shorts blocks and append new ones to fill the window."""
-    BLOCK_SECS = 1800
     now        = time.time()
     cutoff     = now - keep_days * 86400
     target_end = now + sched_days * 86400
 
-    retained = [e for e in existing if e.get("stop_ts", 0) > cutoff]
+    retained = [b for b in existing if b.get("stop_ts", 0) > cutoff]
     pruned   = len(existing) - len(retained)
-    frontier = max((e["stop_ts"] for e in retained), default=cutoff)
 
-    if frontier >= target_end:
-        return retained, pruned, 0
+    # Last retained block was aligned to a half-hour boundary; the next block
+    # starts one half-hour after it.
+    if retained:
+        last_start = max(b["start_ts"] for b in retained)
+        frontier   = last_start + _HALF_HOUR
+    else:
+        frontier = cutoff
 
-    new_entries: list[dict] = []
-    cursor = frontier
-    while cursor < target_end:
-        new_entries.append({
-            "eid":          _new_eid(),
-            "start_ts":     cursor,
-            "stop_ts":      cursor + BLOCK_SECS,
-            "scene_id":     None,
-            "title":        "Shorts",
-            "duration_sec": BLOCK_SECS,
-        })
-        cursor += BLOCK_SECS
-
-    return retained + new_entries, pruned, len(new_entries)
+    new_blocks = _shorts_blocks_in_range(scenes, frontier, target_end)
+    return retained + new_blocks, pruned, len(new_blocks)
 
 
 async def _get_stash_channels() -> list[dict]:
@@ -1047,15 +1193,14 @@ async def _rebuild_stash_schedules():
             tvg_id = ch["tvg_id"]
             try:
                 if ch.get("stash_type") == "shorts":
-                    # Verify scenes exist, but build synthetic 30-min EPG blocks
-                    # (individual clips are too short to render in guide UIs).
                     scenes = await _fetch_scenes_for_stash_channel(ch)
                     if not scenes:
                         logger.warning(f"LiveTV: no scenes for channel '{ch['name']}' — EPG will be empty")
                         continue
-                    slots = _build_shorts_block_schedule()
+                    slots = _build_shorts_block_schedule(scenes)
                     new_schedule[tvg_id] = slots
-                    logger.notice(f"LiveTV: schedule built for '{ch['name']}' — {len(scenes)} scenes, {len(slots)} 30-min EPG blocks")
+                    seg_total = sum(len(b.get("segments", [])) for b in slots)
+                    logger.notice(f"LiveTV: schedule built for '{ch['name']}' — {len(scenes)} scenes, {len(slots)} 30-min blocks, {seg_total} segments")
                 else:
                     scenes = await _fetch_scenes_for_stash_channel(ch)
                     if not scenes:
@@ -1094,10 +1239,12 @@ async def _run_maintenance_update():
             tvg_id   = ch["tvg_id"]
             existing = _stash_schedule.get(tvg_id, [])
             try:
+                scenes = await _fetch_scenes_for_stash_channel(ch)
                 if ch.get("stash_type") == "shorts":
-                    updated, pruned, added = _maintenance_extend_shorts(existing, keep_days, sched_days)
+                    # Shorts still prunes past blocks even when scenes is empty
+                    # (channel temporarily without content); extend is just a no-op.
+                    updated, pruned, added = _maintenance_extend_shorts(existing, scenes, keep_days, sched_days)
                 else:
-                    scenes = await _fetch_scenes_for_stash_channel(ch)
                     if not scenes:
                         continue
                     updated, pruned, added = _maintenance_extend_channel(existing, scenes, keep_days, sched_days)
@@ -1217,19 +1364,31 @@ async def _build_stash_channel_playlist(ch: dict) -> tuple[list[dict], float] | 
     now = time.time()
 
     if ch.get("stash_type") == "shorts":
-        scenes = await _fetch_scenes_for_stash_channel(ch)
-        if not scenes:
+        # Flatten the segments stored in each block into a single schedule and
+        # play it the same way as a regular channel — seek into the segment
+        # currently airing, then queue everything after it.  If we land in a
+        # small wiggle gap between two blocks the first upcoming segment may
+        # start slightly in the future; play it from its beginning rather than
+        # failing so the user doesn't see a stall.
+        blocks = _stash_schedule.get(tvg_id, [])
+        all_segments: list[dict] = []
+        for block in blocks:
+            all_segments.extend(block.get("segments") or [])
+        upcoming = [s for s in all_segments if s["stop_ts"] > now - 5]
+        if not upcoming:
             return None
-        pool = list(scenes)
-        random.shuffle(pool)
         playlist: list[dict] = []
-        total_secs = 0.0
-        for s in pool:
-            if total_secs >= 3600:
+        total = 0.0
+        for s in upcoming:
+            if total >= 3600:
                 break
-            playlist.append({"scene_id": s["id"], "title": s.get("title", ""), "duration_sec": s["duration_sec"]})
-            total_secs += s["duration_sec"]
-        return playlist, 0.0
+            playlist.append({
+                "scene_id":     s["scene_id"],
+                "title":        s.get("title", ""),
+                "duration_sec": s["duration_sec"],
+            })
+            total += s["duration_sec"]
+        return playlist, max(0.0, now - upcoming[0]["start_ts"])
     else:
         schedule = _stash_schedule.get(tvg_id, [])
         upcoming = [e for e in schedule if e["stop_ts"] > now - 5]
@@ -1316,8 +1475,12 @@ async def endpoint_stash_channel_stream(request: Request):
     """FFmpeg-based live HLS stream for a Stash channel.
 
     On first play request, spawns an FFmpeg process that:
-      • reads a ffconcat playlist of raw Stash scene HTTP streams
-        (no Stash-side transcode — byte-range seeking via inpoint)
+      • opens each scene as its own input via raw Stash HTTP streams (no
+        Stash-side transcode — byte-range seeking via -ss on the first input)
+      • uses the concat filter (not demuxer) with per-input normalization to
+        feed the encoder a uniform 1920x1080 yuv420p 30fps / 48 kHz stereo
+        stream so no decoder/filter-graph reconfigure happens at scene
+        transitions
       • transcodes once to H.264+AAC
       • writes live HLS segments to a per-channel temp directory
 
@@ -2066,56 +2229,43 @@ async def endpoint_channel_now_playing(request: Request):
 
 
 async def endpoint_shorts_block_preview(request: Request):
-    """Return a deterministic scene list for a Shorts 30-minute block.
+    """Return the scene list for a Shorts EPG block, read from the stored schedule.
 
     Query params:
-        ts:     block start Unix timestamp (used as random seed for reproducibility)
+        ts:     block start Unix timestamp (matched against stored block start_ts)
         tvg_id: (optional) channel tvg_id; defaults to first shorts channel found
     """
     ts_str = request.query_params.get("ts", "")
     tvg_id = request.query_params.get("tvg_id", "")
     try:
-        block_start = int(float(ts_str))
+        block_start = float(ts_str)
     except (ValueError, TypeError):
         return JSONResponse({"error": "invalid ts"}, status_code=400)
 
-    stash_channels = await _get_stash_channels()
-    if tvg_id:
-        ch = next((c for c in stash_channels if c["tvg_id"] == tvg_id), None)
-    else:
-        ch = next((c for c in stash_channels if c.get("stash_type") == "shorts"), None)
+    if not tvg_id:
+        stash_channels = await _get_stash_channels()
+        sch = next((c for c in stash_channels if c.get("stash_type") == "shorts"), None)
+        if sch:
+            tvg_id = sch["tvg_id"]
 
-    if not ch:
+    schedule = _stash_schedule.get(tvg_id, []) if tvg_id else []
+    block = next((b for b in schedule if abs(b.get("start_ts", 0) - block_start) < 5), None)
+    if not block:
         return JSONResponse({"scenes": []})
 
-    scenes = await _fetch_scenes_for_stash_channel(ch)
-    if not scenes:
-        return JSONResponse({"scenes": []})
+    scenes = [{
+        "id":           seg["scene_id"],
+        "title":        seg.get("title", ""),
+        "start_ts":     seg["start_ts"],
+        "stop_ts":      seg["stop_ts"],
+        "duration_sec": seg["duration_sec"],
+    } for seg in (block.get("segments") or [])]
 
-    rng = random.Random(block_start)
-    pool = list(scenes)
-    rng.shuffle(pool)
-
-    BLOCK_SECS = 1800
-    block_end = block_start + BLOCK_SECS
-    result = []
-    cursor = float(block_start)
-    for s in pool:
-        if cursor >= block_end:
-            break
-        dur = float(s.get("duration_sec") or 0)
-        if dur < 1:
-            continue
-        result.append({
-            "id": s["id"],
-            "title": s.get("title") or f"Scene #{s['id']}",
-            "start_ts": cursor,
-            "stop_ts": min(cursor + dur, block_end),
-            "duration_sec": dur,
-        })
-        cursor += dur
-
-    return JSONResponse({"block_start": block_start, "block_end": block_end, "scenes": result})
+    return JSONResponse({
+        "block_start": block["start_ts"],
+        "block_end":   block["stop_ts"],
+        "scenes":      scenes,
+    })
 
 
 async def endpoint_programs(request: Request):
@@ -2349,7 +2499,7 @@ async def _rebuild_single_channel(tvg_id: str):
                 logger.warning(f"LiveTV: no scenes for '{ch['name']}' — schedule will be empty")
                 return
             if ch.get("stash_type") == "shorts":
-                _stash_schedule[tvg_id] = _build_shorts_block_schedule()
+                _stash_schedule[tvg_id] = _build_shorts_block_schedule(scenes)
             else:
                 _stash_schedule[tvg_id] = _build_random_schedule(scenes)
             logger.info(f"LiveTV: rebuilt schedule for '{ch['name']}' — {len(scenes)} scenes")
