@@ -451,7 +451,10 @@
                 } else data[key] = value.trim() === '' ? DEFAULTS[key] : value;
             });
 
-            document.querySelectorAll('input[type="checkbox"]').forEach(cb => data[cb.name] = cb.checked);
+            // Scope to the config form — a global query also catches unnamed checkboxes
+            // rendered by other UI components (channel-source pickers, guide filters)
+            // and would post them as data[""] = false, which ui_routes rejects.
+            e.target.querySelectorAll('input[type="checkbox"]').forEach(cb => data[cb.name] = cb.checked);
 
             try {
                 const res = await fetch('/api/config', {
