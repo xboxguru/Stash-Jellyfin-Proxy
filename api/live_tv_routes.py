@@ -11,6 +11,10 @@ import shutil
 import tempfile
 import time
 import xml.etree.ElementTree as ET
+try:
+    import fcntl  # Linux only — used to bump FIFO buffer size in playout
+except ImportError:
+    fcntl = None  # type: ignore
 from datetime import date as _date_cls
 from datetime import datetime, timedelta, timezone
 
@@ -65,6 +69,10 @@ class _FFmpegChannelManager:
         self._last:   dict[str, float]      = {}   # channel_id → last request timestamp
         self._stderr: dict[str, list[str]]  = {}   # channel_id → rolling stderr lines (last 60)
         self._launch_info: dict[str, dict]  = {}   # channel_id → {start_ts, seek, playlist}
+        self._feeders: dict[str, asyncio.Task] = {}  # channel_id → feeder task
+        self._fifo_wfds: dict[str, tuple[int, int]] = {}  # channel_id → (video_wfd, audio_wfd)
+        self._consumed_until: dict[str, float] = {}  # channel_id → wall-clock fed up to
+        self._current_scene: dict[str, dict] = {}    # channel_id → live "what's being fed now"
         self._lock    = asyncio.Lock()
         self._watchdog: asyncio.Task | None = None
 
@@ -120,45 +128,40 @@ class _FFmpegChannelManager:
         p = self._procs.get(cid)
         return p is not None and p.returncode is None
 
-    def get_scene_at(self, cid: str) -> dict:
-        """Return the currently playing scene and context based on elapsed wall-clock time."""
-        info = self._launch_info.get(cid)
-        if not info:
+    def get_scene_at(self, cid: str, ch: dict | None = None) -> dict:
+        """Return the segment currently being fed into the master encoder, plus
+        a small lookahead from the schedule.  Source of truth is the feeder's
+        `_current_scene` entry (set when it spawns each sub-FFmpeg).
+        """
+        cur = self._current_scene.get(cid)
+        if not cur:
             return {}
-        elapsed = time.time() - info["start_ts"] + info["seek"]
-        playlist = info["playlist"]
-        cursor = 0.0
-        for i, entry in enumerate(playlist):
-            dur = float(entry.get("duration_sec") or 0)
-            if cursor + dur > elapsed or i == len(playlist) - 1:
-                scene_elapsed = max(0.0, elapsed - cursor)
-                return {
-                    "scene_id": entry.get("scene_id") or entry.get("id"),
-                    "title": entry.get("title", ""),
-                    "duration_sec": dur,
-                    "elapsed_sec": scene_elapsed,
-                    "remaining_sec": max(0.0, dur - scene_elapsed),
-                    "scene_index": i,
-                    "total_scenes": len(playlist),
-                    "upcoming": [
-                        {
-                            "scene_id": e.get("scene_id") or e.get("id"),
-                            "title": e.get("title", ""),
-                            "duration_sec": float(e.get("duration_sec") or 0),
-                        }
-                        for e in playlist[i + 1 : i + 6]
-                    ],
-                }
-            cursor += dur
-        return {}
+        elapsed_since_start = max(0.0, time.time() - cur["started_at"])
+        elapsed_in_scene = float(cur.get("scene_seek") or 0) + elapsed_since_start
+        dur = float(cur.get("duration_sec") or 0)
+        result: dict = {
+            "scene_id":     cur["scene_id"],
+            "title":        cur.get("title", ""),
+            "duration_sec": dur,
+            "elapsed_sec":  min(elapsed_in_scene, dur) if dur else elapsed_in_scene,
+            "remaining_sec": max(0.0, dur - elapsed_in_scene) if dur else 0.0,
+        }
+        if ch is not None:
+            consumed = self._consumed_until.get(cid, time.time())
+            up = _upcoming_scheduled_segments(ch, consumed, count=5)
+            result["upcoming"] = up
+        return result
 
-    async def ensure(self, cid: str, entries: list[dict], seek: float) -> bool:
-        """Start FFmpeg for the channel if it isn't already running."""
+    async def ensure(self, cid: str, ch: dict, seek: float) -> bool:
+        """Start the pipe-based playout pipeline for the channel if it isn't
+        already running.  The feeder task takes it from there and keeps the
+        master encoder fed indefinitely from the live schedule.
+        """
         async with self._lock:
             if self.is_alive(cid) and self.manifest_path(cid):
                 return True
             await self._stop_locked(cid)
-            return await self._launch(cid, entries, seek)
+            return await self._launch(cid, ch, seek)
 
     async def stop(self, cid: str) -> None:
         async with self._lock:
@@ -170,158 +173,172 @@ class _FFmpegChannelManager:
 
     # ── internals ──────────────────────────────────────────────────────────
 
-    async def _launch(self, cid: str, entries: list[dict], seek: float) -> bool:
+    async def _launch(self, cid: str, ch: dict, seek: float) -> bool:
+        """Set up the pipe-based playout pipeline.
+
+        Architecture
+        ─────────────
+            ┌────────────────────┐   raw YUV    ┌─────────────────┐
+            │ per-scene sub-     │── /tmp/v.fifo ─▶│                 │
+            │ FFmpeg (decode +   │   raw PCM   │  master FFmpeg  │── HLS segments
+            │ normalize)         │── /tmp/a.fifo ─▶│  (-c copy-style │
+            └────────┬───────────┘              │   encode loop)  │
+                     │                          └─────────────────┘
+                     │ spawned + waited by the                ▲
+                     │ feeder task, one at a time            │
+                     ▼                                       │
+                  Feeder task (loops through live schedule)──┘
+
+        The parent process holds writer FDs on both FIFOs for the entire
+        session, so the master never sees EOF when an individual sub exits
+        between scenes.  Sub-FFmpegs write raw frames directly to the FIFOs
+        (a sub's writer end closes when it exits; the parent's writer end
+        keeps the FIFO alive; the next sub opens its own writer and the
+        stream continues).  The master, reading raw input with implicit
+        timestamps, has no decoder or filter graph to reconfigure at scene
+        boundaries — it just encodes the contiguous raw stream and segments
+        it into HLS.  That's what makes the playout truly seamless.
+        """
+        if not hasattr(os, "mkfifo"):
+            logger.error(
+                "LiveTV FFmpeg: pipe-based playout requires os.mkfifo "
+                "(Linux/macOS).  Channel cannot start on this platform."
+            )
+            return False
+
         hls_base = getattr(config, "HLS_TEMP_DIR", None) or None
         d = tempfile.mkdtemp(prefix=f"sjp_{cid[:8]}_", dir=hls_base)
         self._dirs[cid] = d
 
-        stash_base = config.get_stash_base()
-        api_key    = getattr(config, "STASH_API_KEY", "")
+        fifo_v = os.path.join(d, "v.fifo")
+        fifo_a = os.path.join(d, "a.fifo")
+        try:
+            os.mkfifo(fifo_v, 0o600)
+            os.mkfifo(fifo_a, 0o600)
+        except OSError as exc:
+            logger.error(f"LiveTV FFmpeg: mkfifo failed — {exc}")
+            shutil.rmtree(d, ignore_errors=True)
+            self._dirs.pop(cid, None)
+            return False
+
+        # Open writer FDs in the parent BEFORE spawning the master.  O_RDWR
+        # avoids the "blocks until reader" semantics of O_WRONLY — these
+        # opens return immediately and they satisfy the master's
+        # subsequent O_RDONLY open.  We never read from these FDs; their
+        # only job is to keep the FIFO alive across per-scene sub-FFmpeg
+        # restarts (sub closes its writer end on exit; parent's stays open;
+        # master never sees EOF).
+        try:
+            wfd_v = os.open(fifo_v, os.O_RDWR | os.O_NONBLOCK)
+            wfd_a = os.open(fifo_a, os.O_RDWR | os.O_NONBLOCK)
+        except OSError as exc:
+            logger.error(f"LiveTV FFmpeg: could not open FIFOs — {exc}")
+            shutil.rmtree(d, ignore_errors=True)
+            self._dirs.pop(cid, None)
+            return False
+        self._fifo_wfds[cid] = (wfd_v, wfd_a)
+
+        # Bump pipe buffer to 1 MB so sub-FFmpeg spawn latency between
+        # scenes can't starve the master mid-frame.  Linux default is 64 KB
+        # (~700 µs at 93 MB/s rawvideo bitrate) which is too tight; 1 MB
+        # gives ~10 ms of headroom.
+        if fcntl is not None and hasattr(fcntl, "F_SETPIPE_SZ"):
+            for fd in (wfd_v, wfd_a):
+                try:
+                    fcntl.fcntl(fd, fcntl.F_SETPIPE_SZ, 1024 * 1024)
+                except OSError:
+                    pass
 
         ffmpeg_bin = getattr(config, "FFMPEG_PATH", "ffmpeg")
-        # FFmpeg on Windows: use forward slashes to avoid backslash escaping
-        seg_tmpl = os.path.join(d, "seg%05d.ts").replace("\\", "/")
-        manifest = os.path.join(d, "stream.m3u8").replace("\\", "/")
+        seg_tmpl = os.path.join(d, "seg%05d.ts")
+        manifest = os.path.join(d, "stream.m3u8")
 
-        # ─── concat FILTER (not demuxer) ──────────────────────────────────
-        # Each scene is opened as its own input with its own decoder, then
-        # normalized to a uniform 1920x1080 yuv420p 30fps / 48kHz stereo
-        # format BEFORE being joined.  The encoder downstream sees one
-        # continuous stream with constant parameters, so it never has to
-        # reconfigure the filter graph or decoder at scene transitions.
-        #
-        # The concat demuxer we previously used glued files at the container
-        # level: a single decoder served every scene, and each new MP4 forced
-        # a "Reconfiguring filter graph because video parameters changed"
-        # rebuild that stalled the encoder for 1–3 seconds, dropped hundreds
-        # of input frames, and caused the client-side video freeze (audio
-        # kept playing because its filter chain is independent) and the
-        # pink/blue fog at startup from half-initialised SPS/PPS.
-        input_args: list[str] = []
-        video_parts: list[str] = []
-        audio_parts: list[str] = []
-        common_in_flags = [
-            # Survive transient Stash disconnects mid-playlist.
-            "-reconnect", "1",
-            "-reconnect_streamed", "1",
-            "-reconnect_at_eof", "1",
-            "-reconnect_delay_max", "5",
-        ]
-        for i, entry in enumerate(entries):
-            url = f"{stash_base}/scene/{entry['scene_id']}/stream"
-            if api_key:
-                url += f"?apikey={api_key}"
-            input_args.extend(common_in_flags)
-            if i == 0 and seek > 1.0:
-                # Fast input-side seek on the first scene via HTTP byte range
-                # so Stash never re-encodes.
-                input_args.extend(["-ss", f"{seek:.3f}"])
-            input_args.extend(["-i", url])
-            # Per-input video normalization → uniform 1920x1080 yuv420p 30fps,
-            # SAR=1, letterboxed/pillarboxed.  setpts=PTS-STARTPTS rebases
-            # timestamps so the concat node sees monotonically-increasing PTS.
-            video_parts.append(
-                f"[{i}:v]format=yuv420p,setsar=1,"
-                f"scale=1920:1080:force_original_aspect_ratio=decrease:force_divisible_by=2,"
-                f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,"
-                f"setsar=1,fps=30,setpts=PTS-STARTPTS[v{i}]"
-            )
-            # Per-input audio normalization → uniform 48 kHz stereo so the AAC
-            # encoder never reconfigures (the prior cause of MPV/Wholphin's
-            # audio-EOF cycling).
-            audio_parts.append(
-                f"[{i}:a]aresample=async=1000:first_pts=0,"
-                f"aformat=sample_rates=48000:channel_layouts=stereo,"
-                f"asetpts=PTS-STARTPTS[a{i}]"
-            )
-
-        n = len(entries)
-        concat_pads = "".join(f"[v{i}][a{i}]" for i in range(n))
-        filter_complex = ";".join(video_parts + audio_parts) + (
-            f";{concat_pads}concat=n={n}:v=1:a=1[outv][outa]"
-        )
-
-        # Write the filter graph to a file — the inline form would exceed the
-        # Windows 32 KB command-line limit on longer playlists.
-        fc_path = os.path.join(d, "filter_complex.txt").replace("\\", "/")
-        with open(fc_path, "w", encoding="utf-8") as fc:
-            fc.write(filter_complex)
-
-        cmd = [
-            ffmpeg_bin, "-y",
-            "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
-            *input_args,
-            "-filter_complex_script", fc_path,
-            "-map", "[outv]", "-map", "[outa]",
-            # H.264 + AAC.  veryfast keeps CPU usage low for 60+ concurrent
-            # decoder contexts (one per scene under the concat filter).
+        master_cmd = [
+            ffmpeg_bin, "-y", "-hide_banner",
+            # Raw video input via FIFO — implicit 30 fps timing
+            "-f", "rawvideo",
+            "-pix_fmt", "yuv420p",
+            "-s", "1920x1080",
+            "-r", "30",
+            "-thread_queue_size", "1024",
+            "-i", fifo_v,
+            # Raw audio input via FIFO — implicit 48 kHz / stereo timing
+            "-f", "s16le",
+            "-ar", "48000",
+            "-ac", "2",
+            "-thread_queue_size", "1024",
+            "-i", fifo_a,
+            # Encode once and forever — uniform input means no reconfigures
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
             "-force_key_frames", "expr:gte(t,n_forced*4)",
             "-c:a", "aac", "-b:a", "192k",
+            # HLS
             "-hls_time", "4",
-            "-hls_list_size", "450",  # 30 min of segments (450 × 4 s)
-            # program_date_time: emit #EXT-X-PROGRAM-DATE-TIME on every
-            # segment so ExoPlayer (Jellyfin Android TV) can anchor the live
-            # edge to a wall clock.  Without it ExoPlayer reports
-            # PlaybackPositionTicks=0 and restart-loops.
-            # independent_segments matches real Jellyfin/Tunarr output.
+            "-hls_list_size", "450",
             "-hls_flags",
             "delete_segments+append_list+omit_endlist+program_date_time+independent_segments",
-            # Non-zero starting media sequence keeps ExoPlayer's
-            # (mediaSequence × targetDuration) live-position calc above zero.
+            # Non-zero starting media-sequence keeps ExoPlayer's live-edge
+            # calc above zero (see prior commit for context).
             "-start_number", str(max(1, int(seek) // 4)),
             "-hls_segment_filename", seg_tmpl,
             manifest,
         ]
 
         logger.info(
-            f"LiveTV FFmpeg: launching channel {cid!r} — "
-            f"{len(entries)} scenes, seek={seek:.1f}s"
+            f"LiveTV FFmpeg: launching channel {cid!r} — pipe-based playout, "
+            f"initial seek={seek:.1f}s"
         )
-        logger.debug(f"LiveTV FFmpeg cmd: {' '.join(cmd)}")
+        logger.debug(f"LiveTV FFmpeg master cmd: {' '.join(master_cmd)}")
         try:
             proc = await asyncio.create_subprocess_exec(
-                *cmd,
+                *master_cmd,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
             )
         except Exception as exc:
             logger.error(f"LiveTV FFmpeg: launch failed — {exc}")
+            for fd in (wfd_v, wfd_a):
+                try: os.close(fd)
+                except OSError: pass
+            self._fifo_wfds.pop(cid, None)
             shutil.rmtree(d, ignore_errors=True)
             self._dirs.pop(cid, None)
             return False
 
         self._procs[cid] = proc
         self._stderr[cid] = []
-        self._launch_info[cid] = {"start_ts": time.time(), "seek": seek, "playlist": entries}
+        self._launch_info[cid] = {"start_ts": time.time(), "seek": seek}
+        # The feeder advances this pointer as it consumes each scene; it
+        # starts at "now + initial seek" so the very first sub-FFmpeg seeks
+        # the right amount into its source.
+        self._consumed_until[cid] = time.time()
 
-        # Open the per-channel FFmpeg log file and write a session header so
-        # later analysis can correlate stderr lines with a specific launch.
+        # Per-channel session log
         fh = self._open_stderr_file(cid)
         if fh is not None:
             try:
                 ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                 fh.write(
                     f"\n===== FFmpeg session start {ts} | channel={cid} "
-                    f"scenes={len(entries)} seek={seek:.1f}s =====\n"
+                    f"pipe-based-playout seek={seek:.1f}s =====\n"
                 )
-                fh.write(f"cmd: {' '.join(cmd)}\n")
+                fh.write(f"master cmd: {' '.join(master_cmd)}\n")
                 fh.flush()
             except Exception:
                 pass
-
-        # Continuously drain stderr so the pipe buffer never fills and blocks
-        # FFmpeg.  The last 60 lines are kept in memory for error reporting;
-        # every line is also written to the per-channel log file for analysis.
-        # Pass the file handle directly so a restart can't race-close it.
         asyncio.create_task(self._drain_stderr(proc, cid, fh))
 
-        # Wait up to 30 s for the manifest to contain at least
-        # _MIN_READY_SEGMENTS complete segments.  FFmpeg creates the .m3u8
-        # file immediately but lists no segments until each hls_time (4 s)
-        # chunk is fully written.  ExoPlayer rejects a segment-less live
-        # playlist instantly ("Error streaming live tv" with zero segment
-        # requests), so we must not report ready until segments exist.
+        # Spawn the feeder.  It iterates the live schedule and pipes each
+        # scene's decoded frames into the master via fresh sub-FFmpegs,
+        # advancing _consumed_until after each scene.  Runs until cancelled
+        # by _stop_locked.
+        feeder = asyncio.create_task(self._feeder(cid, ch, fifo_v, fifo_a, seek))
+        self._feeders[cid] = feeder
+
+        # Readiness gate — wait for ≥3 segments in the manifest before
+        # returning success.  Same logic as before; the master's pipeline
+        # still needs the feeder to actually be writing for segments to
+        # appear, but that happens immediately after the feeder task starts.
         _MIN_READY_SEGMENTS = 3
         for _ in range(60):
             if proc.returncode is not None:
@@ -335,9 +352,9 @@ class _FFmpegChannelManager:
                 return False
             if os.path.exists(manifest):
                 try:
-                    with open(manifest, "r", encoding="utf-8") as fh:
+                    with open(manifest, "r", encoding="utf-8") as mh:
                         seg_count = sum(
-                            1 for ln in fh
+                            1 for ln in mh
                             if ln.strip() and not ln.startswith("#")
                         )
                 except OSError:
@@ -352,6 +369,150 @@ class _FFmpegChannelManager:
 
         logger.error("LiveTV FFmpeg: timed out waiting for segments")
         return False
+
+    async def _feeder(self, cid: str, ch: dict, fifo_v: str, fifo_a: str,
+                       initial_seek: float) -> None:
+        """Iterate the channel's live schedule, decoding one scene at a time
+        into the master's two FIFOs.  Persists until the master process is
+        stopped (this task is cancelled by _stop_locked).
+        """
+        stash_base = config.get_stash_base()
+        api_key    = getattr(config, "STASH_API_KEY", "")
+        ffmpeg_bin = getattr(config, "FFMPEG_PATH", "ffmpeg")
+
+        # consumed_until tracks how far into the wall-clock schedule we've
+        # already fed.  Start at "now" so the very first iteration picks the
+        # segment currently airing and computes scene_seek = now - seg.start_ts
+        # (which equals the `initial_seek` the caller derived from the same
+        # arithmetic).  Note: `initial_seek` isn't used directly here — it's
+        # rederived from the schedule on the first lookup so the math stays
+        # consistent if the schedule has been rebuilt since the caller
+        # snapshot.
+        consumed_until = time.time()
+        self._consumed_until[cid] = consumed_until
+        _ = initial_seek  # parameter retained for future use / parity
+
+        try:
+            while True:
+                # Re-read the live schedule on every iteration so a maintenance
+                # rebuild or a user-initiated edit takes effect immediately.
+                seg = _next_scheduled_segment_after(ch, consumed_until)
+                if seg is None:
+                    # No scheduled content for now — sleep briefly and re-check.
+                    await asyncio.sleep(2)
+                    continue
+                scene_id = seg.get("scene_id") or seg.get("id")
+                if not scene_id:
+                    logger.warning(f"LiveTV feeder: scheduled segment missing scene_id, skipping")
+                    consumed_until = float(seg.get("stop_ts", consumed_until + 1))
+                    self._consumed_until[cid] = consumed_until
+                    continue
+                scene_dur = float(seg.get("duration_sec") or 0)
+                scene_seek = max(0.0, consumed_until - float(seg.get("start_ts", consumed_until)))
+                if scene_dur <= 0 or scene_seek >= scene_dur - 0.5:
+                    # Already past end of this segment — advance pointer.
+                    consumed_until = float(seg.get("stop_ts", consumed_until + max(0.0, scene_dur)))
+                    self._consumed_until[cid] = consumed_until
+                    continue
+
+                self._current_scene[cid] = {
+                    "scene_id":     scene_id,
+                    "title":        seg.get("title", ""),
+                    "start_ts":     seg.get("start_ts"),
+                    "stop_ts":      seg.get("stop_ts"),
+                    "duration_sec": scene_dur,
+                    "scene_seek":   scene_seek,
+                    "started_at":   time.time(),
+                }
+                await self._feed_one_scene(
+                    cid, scene_id, fifo_v, fifo_a,
+                    stash_base, api_key, ffmpeg_bin, scene_seek,
+                )
+                # Advance the pointer regardless of success — a failed sub
+                # shouldn't lock us into an infinite retry on the same scene.
+                consumed_until = float(seg.get("stop_ts", consumed_until + scene_dur))
+                self._consumed_until[cid] = consumed_until
+        except asyncio.CancelledError:
+            logger.debug(f"LiveTV feeder: cancelled for {cid!r}")
+            raise
+        except Exception:
+            logger.error(f"LiveTV feeder: crashed for {cid!r}", exc_info=True)
+
+    async def _feed_one_scene(self, cid: str, scene_id: str,
+                               fifo_v: str, fifo_a: str,
+                               stash_base: str, api_key: str,
+                               ffmpeg_bin: str, scene_seek: float) -> bool:
+        """Spawn a sub-FFmpeg that decodes one Stash scene, normalises it,
+        and writes raw yuv420p video + raw s16le audio directly to the
+        channel's two FIFOs.  Wait for the sub to complete.
+        """
+        url = f"{stash_base}/scene/{scene_id}/stream"
+        if api_key:
+            url += f"?apikey={api_key}"
+        cmd = [
+            ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "warning",
+            "-reconnect", "1", "-reconnect_streamed", "1",
+            "-reconnect_at_eof", "1", "-reconnect_delay_max", "5",
+        ]
+        if scene_seek > 0.1:
+            cmd += ["-ss", f"{scene_seek:.3f}"]
+        cmd += [
+            "-i", url,
+            # Video → fifo_v as raw 1080p30 yuv420p
+            "-map", "0:v:0",
+            "-vf",
+            "format=yuv420p,setsar=1,"
+            "scale=1920:1080:force_original_aspect_ratio=decrease:force_divisible_by=2,"
+            "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,"
+            "setsar=1,fps=30",
+            "-pix_fmt", "yuv420p",
+            "-f", "rawvideo",
+            fifo_v,
+            # Audio → fifo_a as raw s16le 48 kHz stereo.  '?' on the map
+            # makes the audio stream optional so a silent video doesn't fail.
+            "-map", "0:a:0?",
+            "-af",
+            "aresample=async=1000:first_pts=0,"
+            "aformat=sample_rates=48000:channel_layouts=stereo",
+            "-ar", "48000",
+            "-ac", "2",
+            "-c:a", "pcm_s16le",
+            "-f", "s16le",
+            fifo_a,
+        ]
+        try:
+            sub = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except Exception as exc:
+            logger.error(f"LiveTV feeder: could not spawn sub for scene {scene_id}: {exc}")
+            return False
+        # Drain stderr so a chatty sub doesn't block on a full pipe; keep
+        # the last few lines in the channel's rolling buffer for diagnosis.
+        asyncio.create_task(self._drain_sub_stderr(sub, cid, scene_id))
+        rc = await sub.wait()
+        if rc != 0:
+            logger.warning(f"LiveTV feeder: sub for scene {scene_id} exited rc={rc}")
+            return False
+        return True
+
+    async def _drain_sub_stderr(self, sub: asyncio.subprocess.Process,
+                                 cid: str, scene_id: str) -> None:
+        buf = self._stderr.get(cid)
+        try:
+            while True:
+                line = await sub.stderr.readline()
+                if not line:
+                    break
+                text = line.decode(errors="replace").rstrip()
+                if buf is not None:
+                    buf.append(f"[scene {scene_id}] {text}")
+                    if len(buf) > 60:
+                        buf.pop(0)
+        except Exception:
+            pass
 
     async def _drain_stderr(self, proc: asyncio.subprocess.Process, cid: str, fh) -> None:
         """Read FFmpeg stderr continuously to prevent the pipe buffer from filling.
@@ -386,6 +547,26 @@ class _FFmpegChannelManager:
                     pass
 
     async def _stop_locked(self, cid: str) -> None:
+        # Cancel the feeder first so it stops spawning new sub-FFmpegs.
+        # Sub-FFmpegs already running are not killed here; they'll exit on
+        # their own (and the closure of parent's FIFO writer FDs below
+        # ensures the master will then see EOF and shut down cleanly).
+        feeder = self._feeders.pop(cid, None)
+        if feeder and not feeder.done():
+            feeder.cancel()
+            try:
+                await asyncio.wait_for(feeder, timeout=2.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+
+        # Close the parent's FIFO writer FDs.  This signals EOF to the
+        # master once any remaining buffered data drains.
+        fds = self._fifo_wfds.pop(cid, None)
+        if fds:
+            for fd in fds:
+                try: os.close(fd)
+                except OSError: pass
+
         proc = self._procs.pop(cid, None)
         if proc and proc.returncode is None:
             proc.terminate()
@@ -398,6 +579,8 @@ class _FFmpegChannelManager:
             shutil.rmtree(d, ignore_errors=True)
         self._stderr.pop(cid, None)
         self._launch_info.pop(cid, None)
+        self._current_scene.pop(cid, None)
+        self._consumed_until.pop(cid, None)
 
     async def _idle_loop(self) -> None:
         idle_secs = float(getattr(config, "LIVE_TV_IDLE_TIMEOUT", 300))
@@ -418,6 +601,51 @@ class _FFmpegChannelManager:
 
 
 _ffmpeg_manager = _FFmpegChannelManager()
+
+
+def _next_scheduled_segment_after(ch: dict, t: float) -> dict | None:
+    """Return the first scheduled segment whose stop_ts > t (i.e. the next
+    segment the feeder should play given a wall-clock pointer)."""
+    tvg_id = ch["tvg_id"]
+    if ch.get("stash_type") == "shorts":
+        for block in _stash_schedule.get(tvg_id, []):
+            for seg in block.get("segments") or []:
+                if float(seg.get("stop_ts", 0)) > t:
+                    return seg
+    else:
+        for e in _stash_schedule.get(tvg_id, []):
+            if float(e.get("stop_ts", 0)) > t:
+                return e
+    return None
+
+
+def _upcoming_scheduled_segments(ch: dict, after_t: float, count: int = 5) -> list[dict]:
+    """Return up to `count` upcoming segments after the given wall-clock
+    pointer.  Used by the now-playing modal to show what's queued."""
+    tvg_id = ch["tvg_id"]
+    out: list[dict] = []
+    if ch.get("stash_type") == "shorts":
+        for block in _stash_schedule.get(tvg_id, []):
+            for seg in block.get("segments") or []:
+                if float(seg.get("stop_ts", 0)) > after_t:
+                    out.append({
+                        "scene_id":     seg.get("scene_id"),
+                        "title":        seg.get("title", ""),
+                        "duration_sec": float(seg.get("duration_sec") or 0),
+                    })
+                    if len(out) >= count:
+                        return out
+    else:
+        for e in _stash_schedule.get(tvg_id, []):
+            if float(e.get("stop_ts", 0)) > after_t:
+                out.append({
+                    "scene_id":     e.get("scene_id"),
+                    "title":        e.get("title", ""),
+                    "duration_sec": float(e.get("duration_sec") or 0),
+                })
+                if len(out) >= count:
+                    return out
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1420,8 +1648,8 @@ async def stash_channel_playback_info(ch: dict, item_id: str, request=None) -> J
     await _ensure_stash_schedules()
     playlist_result = await _build_stash_channel_playlist(ch)
     if playlist_result is not None:
-        entries, seek = playlist_result
-        await _ffmpeg_manager.ensure(item_id, entries, seek)
+        _entries, seek = playlist_result
+        await _ffmpeg_manager.ensure(item_id, ch, seek)
 
     source: dict = {
         "Protocol": "Http",
@@ -1522,9 +1750,9 @@ async def endpoint_stash_channel_stream(request: Request):
     if playlist_result is None:
         logger.warning(f"LiveTV: stash-stream — no current program for {ch['tvg_id']}")
         return Response(status_code=404)
-    entries, seek = playlist_result
+    _entries, seek = playlist_result
 
-    ok = await _ffmpeg_manager.ensure(channel_id_clean, entries, seek)
+    ok = await _ffmpeg_manager.ensure(channel_id_clean, ch, seek)
     if not ok:
         return Response(status_code=502, content="FFmpeg failed to start")
 
@@ -2221,7 +2449,9 @@ async def endpoint_channel_now_playing(request: Request):
     if not _ffmpeg_manager.is_alive(enc):
         return JSONResponse({"active": False})
 
-    scene_info = _ffmpeg_manager.get_scene_at(enc)
+    stash_channels = await _get_stash_channels()
+    ch = next((c for c in stash_channels if c["tvg_id"] == tvg_id), None)
+    scene_info = _ffmpeg_manager.get_scene_at(enc, ch)
     if not scene_info:
         return JSONResponse({"active": True})
 
