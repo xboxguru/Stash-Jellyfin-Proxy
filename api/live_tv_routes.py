@@ -5,9 +5,11 @@ import json
 import logging
 import mimetypes
 import os
+import platform
 import random
 import re
 import shutil
+import socket
 import tempfile
 import time
 import xml.etree.ElementTree as ET
@@ -15,6 +17,9 @@ try:
     import fcntl  # Linux only — used to bump FIFO buffer size in playout
 except ImportError:
     fcntl = None  # type: ignore
+
+_IS_WINDOWS = platform.system().lower().startswith("win")
+_HAS_MKFIFO = hasattr(os, "mkfifo")
 from datetime import date as _date_cls
 from datetime import datetime, timedelta, timezone
 
@@ -68,9 +73,10 @@ class _FFmpegChannelManager:
         self._dirs:   dict[str, str]        = {}
         self._last:   dict[str, float]      = {}   # channel_id → last request timestamp
         self._stderr: dict[str, list[str]]  = {}   # channel_id → rolling stderr lines (last 60)
+        self._stderr_fh: dict[str, object]  = {}   # channel_id → per-channel session log file handle
         self._launch_info: dict[str, dict]  = {}   # channel_id → {start_ts, seek, playlist}
         self._feeders: dict[str, asyncio.Task] = {}  # channel_id → feeder task
-        self._fifo_wfds: dict[str, tuple[int, int]] = {}  # channel_id → (video_wfd, audio_wfd)
+        self._backends: dict[str, "_PipeBackend"] = {}  # channel_id → pipe backend (FIFO on Linux, TCP on Windows)
         self._consumed_until: dict[str, float] = {}  # channel_id → wall-clock fed up to
         self._current_scene: dict[str, dict] = {}    # channel_id → live "what's being fed now"
         self._lock    = asyncio.Lock()
@@ -199,10 +205,11 @@ class _FFmpegChannelManager:
         boundaries — it just encodes the contiguous raw stream and segments
         it into HLS.  That's what makes the playout truly seamless.
         """
-        if not hasattr(os, "mkfifo"):
+        if not _HAS_MKFIFO and not _IS_WINDOWS:
             logger.error(
-                "LiveTV FFmpeg: pipe-based playout requires os.mkfifo "
-                "(Linux/macOS).  Channel cannot start on this platform."
+                "LiveTV FFmpeg: pipe-based playout requires either os.mkfifo "
+                "(Linux/macOS) or Windows TCP-relay fallback.  Channel cannot "
+                "start on this platform."
             )
             return False
 
@@ -210,44 +217,25 @@ class _FFmpegChannelManager:
         d = tempfile.mkdtemp(prefix=f"sjp_{cid[:8]}_", dir=hls_base)
         self._dirs[cid] = d
 
-        fifo_v = os.path.join(d, "v.fifo")
-        fifo_a = os.path.join(d, "a.fifo")
+        # Pick the backend.  FIFO is preferred wherever supported (kernel does
+        # the byte forwarding); Windows falls back to a Python TCP relay.
+        if _HAS_MKFIFO:
+            backend: _PipeBackend = _FifoPipeBackend(d)
+        else:
+            backend = _TcpRelayPipeBackend(d)
         try:
-            os.mkfifo(fifo_v, 0o600)
-            os.mkfifo(fifo_a, 0o600)
-        except OSError as exc:
-            logger.error(f"LiveTV FFmpeg: mkfifo failed — {exc}")
+            await backend.start()
+        except Exception as exc:
+            logger.error(f"LiveTV FFmpeg: pipe backend setup failed ({backend.kind}) — {exc}")
             shutil.rmtree(d, ignore_errors=True)
             self._dirs.pop(cid, None)
             return False
-
-        # Open writer FDs in the parent BEFORE spawning the master.  O_RDWR
-        # avoids the "blocks until reader" semantics of O_WRONLY — these
-        # opens return immediately and they satisfy the master's
-        # subsequent O_RDONLY open.  We never read from these FDs; their
-        # only job is to keep the FIFO alive across per-scene sub-FFmpeg
-        # restarts (sub closes its writer end on exit; parent's stays open;
-        # master never sees EOF).
-        try:
-            wfd_v = os.open(fifo_v, os.O_RDWR | os.O_NONBLOCK)
-            wfd_a = os.open(fifo_a, os.O_RDWR | os.O_NONBLOCK)
-        except OSError as exc:
-            logger.error(f"LiveTV FFmpeg: could not open FIFOs — {exc}")
-            shutil.rmtree(d, ignore_errors=True)
-            self._dirs.pop(cid, None)
-            return False
-        self._fifo_wfds[cid] = (wfd_v, wfd_a)
-
-        # Bump pipe buffer to 1 MB so sub-FFmpeg spawn latency between
-        # scenes can't starve the master mid-frame.  Linux default is 64 KB
-        # (~700 µs at 93 MB/s rawvideo bitrate) which is too tight; 1 MB
-        # gives ~10 ms of headroom.
-        if fcntl is not None and hasattr(fcntl, "F_SETPIPE_SZ"):
-            for fd in (wfd_v, wfd_a):
-                try:
-                    fcntl.fcntl(fd, fcntl.F_SETPIPE_SZ, 1024 * 1024)
-                except OSError:
-                    pass
+        self._backends[cid] = backend
+        master_in_v, master_in_a = backend.master_inputs()
+        logger.info(
+            f"LiveTV FFmpeg: channel {cid!r} pipe backend={backend.kind} "
+            f"video={master_in_v} audio={master_in_a}"
+        )
 
         ffmpeg_bin = getattr(config, "FFMPEG_PATH", "ffmpeg")
         seg_tmpl = os.path.join(d, "seg%05d.ts")
@@ -255,19 +243,35 @@ class _FFmpegChannelManager:
 
         master_cmd = [
             ffmpeg_bin, "-y", "-hide_banner",
-            # Raw video input via FIFO — implicit 30 fps timing
+            # Raw video input — implicit 30 fps timing.
+            # -probesize 32 / -analyzeduration 0: every codec param is
+            # already specified on the cmdline, so we skip avformat's
+            # stream-info probe.  This is critical for the two-input pipe
+            # design: probing on input #0 reads from ONLY the video socket
+            # while the sub-FFmpeg is producing interleaved video + audio.
+            # With probing on, the audio side-buffer fills, sub blocks
+            # writing audio, sub (one process) can't write more video,
+            # master probe stalls forever — deadlock.
             "-f", "rawvideo",
             "-pix_fmt", "yuv420p",
             "-s", "1920x1080",
             "-r", "30",
+            "-probesize", "32",
+            "-analyzeduration", "0",
             "-thread_queue_size", "1024",
-            "-i", fifo_v,
-            # Raw audio input via FIFO — implicit 48 kHz / stereo timing
+            "-i", master_in_v,
+            # Raw audio input — implicit 48 kHz / stereo timing.  Same
+            # probesize/analyzeduration treatment as the video input.
             "-f", "s16le",
             "-ar", "48000",
             "-ac", "2",
+            "-probesize", "32",
+            "-analyzeduration", "0",
             "-thread_queue_size", "1024",
-            "-i", fifo_a,
+            "-i", master_in_a,
+            # Explicit mapping so the master never silently drops a stream
+            "-map", "0:v:0",
+            "-map", "1:a:0",
             # Encode once and forever — uniform input means no reconfigures
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
             "-force_key_frames", "expr:gte(t,n_forced*4)",
@@ -289,6 +293,24 @@ class _FFmpegChannelManager:
             f"initial seek={seek:.1f}s"
         )
         logger.debug(f"LiveTV FFmpeg master cmd: {' '.join(master_cmd)}")
+
+        # Per-channel session log.  Opened BEFORE the master so we can also
+        # route sub-FFmpeg stderr through the same file (sub stderr lines get
+        # a "[scene NNNN] " prefix).
+        fh = self._open_stderr_file(cid)
+        self._stderr_fh[cid] = fh
+        if fh is not None:
+            try:
+                ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                fh.write(
+                    f"\n===== FFmpeg session start {ts} | channel={cid} "
+                    f"backend={backend.kind} seek={seek:.1f}s =====\n"
+                )
+                fh.write(f"master cmd: {' '.join(master_cmd)}\n")
+                fh.flush()
+            except Exception:
+                pass
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 *master_cmd,
@@ -297,42 +319,47 @@ class _FFmpegChannelManager:
             )
         except Exception as exc:
             logger.error(f"LiveTV FFmpeg: launch failed — {exc}")
-            for fd in (wfd_v, wfd_a):
-                try: os.close(fd)
-                except OSError: pass
-            self._fifo_wfds.pop(cid, None)
+            await backend.close()
+            self._backends.pop(cid, None)
+            if fh is not None:
+                try: fh.close()
+                except Exception: pass
+            self._stderr_fh.pop(cid, None)
             shutil.rmtree(d, ignore_errors=True)
             self._dirs.pop(cid, None)
             return False
 
         self._procs[cid] = proc
         self._stderr[cid] = []
-        self._launch_info[cid] = {"start_ts": time.time(), "seek": seek}
-        # The feeder advances this pointer as it consumes each scene; it
-        # starts at "now + initial seek" so the very first sub-FFmpeg seeks
-        # the right amount into its source.
+        self._launch_info[cid] = {"start_ts": time.time(), "seek": seek, "pid": proc.pid}
         self._consumed_until[cid] = time.time()
+        logger.info(f"LiveTV FFmpeg: channel {cid!r} master pid={proc.pid}")
 
-        # Per-channel session log
-        fh = self._open_stderr_file(cid)
-        if fh is not None:
-            try:
-                ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                fh.write(
-                    f"\n===== FFmpeg session start {ts} | channel={cid} "
-                    f"pipe-based-playout seek={seek:.1f}s =====\n"
-                )
-                fh.write(f"master cmd: {' '.join(master_cmd)}\n")
-                fh.flush()
-            except Exception:
-                pass
-        asyncio.create_task(self._drain_stderr(proc, cid, fh))
+        asyncio.create_task(self._drain_stderr(proc, cid))
+
+        # CRITICAL ordering on TCP backend: master must claim the
+        # "first connection = consumer" slot on the video relay port BEFORE
+        # sub_v connects, or the relay will mis-route data.  We only wait
+        # for the video side here because master can only connect to the
+        # audio port AFTER its avformat_find_stream_info() on input #0
+        # finishes — and that requires sub_v to be writing data, which we
+        # haven't started yet.  The audio-side handshake happens inside
+        # _feed_one_scene between spawning sub_v and sub_a.  No-op on FIFO.
+        v_ready = await backend.wait_master_video_attached(timeout=10.0)
+        if not v_ready:
+            logger.error(
+                f"LiveTV FFmpeg: master never connected to video endpoint "
+                f"for channel {cid!r} — aborting launch"
+            )
+            await self._stop_locked(cid)
+            return False
+        logger.info(f"LiveTV FFmpeg: channel {cid!r} master attached to video endpoint")
 
         # Spawn the feeder.  It iterates the live schedule and pipes each
         # scene's decoded frames into the master via fresh sub-FFmpegs,
         # advancing _consumed_until after each scene.  Runs until cancelled
         # by _stop_locked.
-        feeder = asyncio.create_task(self._feeder(cid, ch, fifo_v, fifo_a, seek))
+        feeder = asyncio.create_task(self._feeder(cid, ch, backend, seek))
         self._feeders[cid] = feeder
 
         # Readiness gate — wait for ≥3 segments in the manifest before
@@ -370,11 +397,12 @@ class _FFmpegChannelManager:
         logger.error("LiveTV FFmpeg: timed out waiting for segments")
         return False
 
-    async def _feeder(self, cid: str, ch: dict, fifo_v: str, fifo_a: str,
+    async def _feeder(self, cid: str, ch: dict, backend: "_PipeBackend",
                        initial_seek: float) -> None:
         """Iterate the channel's live schedule, decoding one scene at a time
-        into the master's two FIFOs.  Persists until the master process is
-        stopped (this task is cancelled by _stop_locked).
+        into the master via the backend's sub-output endpoints.  Persists
+        until the master process is stopped (this task is cancelled by
+        _stop_locked).
         """
         stash_base = config.get_stash_base()
         api_key    = getattr(config, "STASH_API_KEY", "")
@@ -384,21 +412,25 @@ class _FFmpegChannelManager:
         # already fed.  Start at "now" so the very first iteration picks the
         # segment currently airing and computes scene_seek = now - seg.start_ts
         # (which equals the `initial_seek` the caller derived from the same
-        # arithmetic).  Note: `initial_seek` isn't used directly here — it's
-        # rederived from the schedule on the first lookup so the math stays
-        # consistent if the schedule has been rebuilt since the caller
-        # snapshot.
+        # arithmetic).
         consumed_until = time.time()
         self._consumed_until[cid] = consumed_until
-        _ = initial_seek  # parameter retained for future use / parity
+        logger.info(
+            f"LiveTV feeder: started for channel {cid!r} "
+            f"(initial_seek={initial_seek:.1f}s)"
+        )
 
+        scenes_played = 0
         try:
             while True:
                 # Re-read the live schedule on every iteration so a maintenance
                 # rebuild or a user-initiated edit takes effect immediately.
                 seg = _next_scheduled_segment_after(ch, consumed_until)
                 if seg is None:
-                    # No scheduled content for now — sleep briefly and re-check.
+                    logger.warning(
+                        f"LiveTV feeder: no scheduled segment after "
+                        f"{consumed_until:.0f} for channel {cid!r}; sleeping 2s"
+                    )
                     await asyncio.sleep(2)
                     continue
                 scene_id = seg.get("scene_id") or seg.get("id")
@@ -424,42 +456,84 @@ class _FFmpegChannelManager:
                     "scene_seek":   scene_seek,
                     "started_at":   time.time(),
                 }
-                await self._feed_one_scene(
-                    cid, scene_id, fifo_v, fifo_a,
+                t0 = time.time()
+                logger.info(
+                    f"LiveTV feeder: channel {cid!r} scene #{scenes_played+1} "
+                    f"id={scene_id} title={seg.get('title','')!r} "
+                    f"seek={scene_seek:.1f}s dur={scene_dur:.1f}s"
+                )
+                ok = await self._feed_one_scene(
+                    cid, scene_id, backend,
                     stash_base, api_key, ffmpeg_bin, scene_seek,
                 )
+                logger.info(
+                    f"LiveTV feeder: channel {cid!r} scene id={scene_id} "
+                    f"finished ok={ok} elapsed={time.time()-t0:.1f}s"
+                )
+                scenes_played += 1
                 # Advance the pointer regardless of success — a failed sub
                 # shouldn't lock us into an infinite retry on the same scene.
                 consumed_until = float(seg.get("stop_ts", consumed_until + scene_dur))
                 self._consumed_until[cid] = consumed_until
         except asyncio.CancelledError:
-            logger.debug(f"LiveTV feeder: cancelled for {cid!r}")
+            logger.info(f"LiveTV feeder: cancelled for {cid!r} after {scenes_played} scene(s)")
             raise
         except Exception:
             logger.error(f"LiveTV feeder: crashed for {cid!r}", exc_info=True)
 
     async def _feed_one_scene(self, cid: str, scene_id: str,
-                               fifo_v: str, fifo_a: str,
+                               backend: "_PipeBackend",
                                stash_base: str, api_key: str,
                                ffmpeg_bin: str, scene_seek: float) -> bool:
-        """Spawn a sub-FFmpeg that decodes one Stash scene, normalises it,
-        and writes raw yuv420p video + raw s16le audio directly to the
-        channel's two FIFOs.  Wait for the sub to complete.
+        """Spawn TWO sub-FFmpegs per scene — one for raw video, one for raw
+        audio — each writing to its own endpoint on the backend.
+
+        We deliberately do NOT use a single sub with two outputs.  Raw video
+        (~746 Mbps for 1080p30) and raw PCM (~1.5 Mbps) have a 500× bandwidth
+        gap.  A single-process sub interleaves both outputs; the moment the
+        master's video TCP buffer fills, that one process blocks on the
+        video write and can no longer write the next audio packet either,
+        starving the master's AAC encoder and creating a permanent deadlock
+        (verified empirically — master shows "Press [q]" + libx264 init but
+        never produces a single frame).  Splitting into two processes gives
+        each output an independent backpressure path, so the audio side
+        keeps flowing even when video temporarily blocks.
+
+        Sub processes both read the same Stash HTTP source (small extra
+        bandwidth cost on a LAN; Stash itself serves seekable mp4).  Both
+        sub processes are waited on; the function returns when both exit.
         """
         url = f"{stash_base}/scene/{scene_id}/stream"
         if api_key:
             url += f"?apikey={api_key}"
-        cmd = [
-            ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "warning",
+        sub_out_v, sub_out_a = backend.sub_outputs()
+
+        common_pre = [
+            ffmpeg_bin, "-y", "-hide_banner",
+            # info logs the input/output summary and (with -stats) the
+            # periodic frame=… progress line — invaluable for diagnosing
+            # pipe stalls.  -stats is forced so it shows even when stderr
+            # isn't a TTY (ffmpeg suppresses progress by default on pipes).
+            "-loglevel", "info", "-stats",
             "-reconnect", "1", "-reconnect_streamed", "1",
             "-reconnect_at_eof", "1", "-reconnect_delay_max", "5",
         ]
+        seek_args: list[str] = []
         if scene_seek > 0.1:
-            cmd += ["-ss", f"{scene_seek:.3f}"]
-        cmd += [
+            seek_args = ["-ss", f"{scene_seek:.3f}"]
+
+        video_cmd = common_pre + seek_args + [
             "-i", url,
-            # Video → fifo_v as raw 1080p30 yuv420p
             "-map", "0:v:0",
+            "-vn", "-sn",  # drop audio+subs at demux level for this process
+            "-an",  # belt and braces — no audio output stream
+            # ↑ -an conflicts with -vn semantically; remove -vn here.
+        ]
+        # Build the video sub cleanly to avoid the silly flag combo above.
+        video_cmd = common_pre + seek_args + [
+            "-i", url,
+            "-map", "0:v:0",
+            "-an", "-sn",
             "-vf",
             "format=yuv420p,setsar=1,"
             "scale=1920:1080:force_original_aspect_ratio=decrease:force_divisible_by=2,"
@@ -467,10 +541,17 @@ class _FFmpegChannelManager:
             "setsar=1,fps=30",
             "-pix_fmt", "yuv420p",
             "-f", "rawvideo",
-            fifo_v,
-            # Audio → fifo_a as raw s16le 48 kHz stereo.  '?' on the map
-            # makes the audio stream optional so a silent video doesn't fail.
+            sub_out_v,
+        ]
+        audio_cmd = common_pre + seek_args + [
+            "-i", url,
+            # '?' makes audio optional so a silent source doesn't fail —
+            # if there's no audio stream this sub will exit immediately
+            # and the master's audio input will simply see nothing this
+            # scene (the master keeps reading; next scene's audio sub will
+            # resume).
             "-map", "0:a:0?",
+            "-vn", "-sn",
             "-af",
             "aresample=async=1000:first_pts=0,"
             "aformat=sample_rates=48000:channel_layouts=stereo",
@@ -478,49 +559,103 @@ class _FFmpegChannelManager:
             "-ac", "2",
             "-c:a", "pcm_s16le",
             "-f", "s16le",
-            fifo_a,
+            sub_out_a,
         ]
+
+        logger.debug(f"LiveTV feeder: video sub cmd for scene {scene_id}: {' '.join(video_cmd)}")
+        logger.debug(f"LiveTV feeder: audio sub cmd for scene {scene_id}: {' '.join(audio_cmd)}")
+
+        # ── 1. Spawn the video sub first ──
+        # By this point in _launch we've already waited for the master to
+        # attach to the video endpoint, so sub_v will arrive at the relay
+        # second and be correctly classified as the producer.
         try:
-            sub = await asyncio.create_subprocess_exec(
-                *cmd,
+            sub_v = await asyncio.create_subprocess_exec(
+                *video_cmd,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
             )
         except Exception as exc:
-            logger.error(f"LiveTV feeder: could not spawn sub for scene {scene_id}: {exc}")
+            logger.error(f"LiveTV feeder: could not spawn video sub for scene {scene_id}: {exc}")
             return False
-        # Drain stderr so a chatty sub doesn't block on a full pipe; keep
-        # the last few lines in the channel's rolling buffer for diagnosis.
-        asyncio.create_task(self._drain_sub_stderr(sub, cid, scene_id))
-        rc = await sub.wait()
-        if rc != 0:
-            logger.warning(f"LiveTV feeder: sub for scene {scene_id} exited rc={rc}")
+        logger.info(f"LiveTV feeder: scene {scene_id} video pid={sub_v.pid}")
+        asyncio.create_task(self._drain_sub_stderr(sub_v, cid, f"{scene_id}/v"))
+
+        # ── 2. Wait for master to attach to the audio endpoint ──
+        # Master can only do this AFTER its find_stream_info() on input #0
+        # finishes, which requires sub_v to have written enough video data
+        # for the rawvideo demuxer to satisfy a packet read.  This step is
+        # a no-op on the FIFO backend (no race), and on the TCP backend
+        # after the first scene (master is already attached and the event
+        # stays set).
+        a_ready = await backend.wait_master_audio_attached(timeout=15.0)
+        if not a_ready:
+            logger.error(
+                f"LiveTV feeder: master never attached to audio endpoint "
+                f"for scene {scene_id} — killing video sub and skipping"
+            )
+            try: sub_v.terminate()
+            except Exception: pass
+            await sub_v.wait()
             return False
-        return True
+
+        # ── 3. Now safe to spawn the audio sub ──
+        try:
+            sub_a = await asyncio.create_subprocess_exec(
+                *audio_cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except Exception as exc:
+            logger.error(f"LiveTV feeder: could not spawn audio sub for scene {scene_id}: {exc}")
+            try: sub_v.terminate()
+            except Exception: pass
+            await sub_v.wait()
+            return False
+        logger.info(f"LiveTV feeder: scene {scene_id} audio pid={sub_a.pid}")
+        asyncio.create_task(self._drain_sub_stderr(sub_a, cid, f"{scene_id}/a"))
+
+        rc_v, rc_a = await asyncio.gather(sub_v.wait(), sub_a.wait())
+        if rc_v != 0:
+            logger.warning(f"LiveTV feeder: video sub for scene {scene_id} exited rc={rc_v}")
+        if rc_a != 0:
+            # rc != 0 from the audio side is common (no audio stream → exit 1);
+            # log at debug only.
+            logger.debug(f"LiveTV feeder: audio sub for scene {scene_id} exited rc={rc_a}")
+        return rc_v == 0
 
     async def _drain_sub_stderr(self, sub: asyncio.subprocess.Process,
                                  cid: str, scene_id: str) -> None:
         buf = self._stderr.get(cid)
+        fh = self._stderr_fh.get(cid)
         try:
             while True:
                 line = await sub.stderr.readline()
                 if not line:
                     break
                 text = line.decode(errors="replace").rstrip()
+                tagged = f"[scene {scene_id}] {text}"
                 if buf is not None:
-                    buf.append(f"[scene {scene_id}] {text}")
+                    buf.append(tagged)
                     if len(buf) > 60:
                         buf.pop(0)
+                if fh is not None:
+                    try:
+                        fh.write(tagged + "\n")
+                        fh.flush()
+                    except Exception:
+                        pass
         except Exception:
             pass
 
-    async def _drain_stderr(self, proc: asyncio.subprocess.Process, cid: str, fh) -> None:
-        """Read FFmpeg stderr continuously to prevent the pipe buffer from filling.
+    async def _drain_stderr(self, proc: asyncio.subprocess.Process, cid: str) -> None:
+        """Read master FFmpeg stderr continuously so the pipe buffer can't fill.
 
         Each line is appended to the rolling in-memory buffer (last 60) and
-        also written to the per-channel log file (fh) passed in by _launch.
+        tee'd to the per-channel session log file (self._stderr_fh[cid]).
         """
         buf = self._stderr.setdefault(cid, [])
+        fh = self._stderr_fh.get(cid)
         try:
             while True:
                 line = await proc.stderr.readline()
@@ -538,18 +673,11 @@ class _FFmpegChannelManager:
                         pass
         except Exception:
             pass
-        finally:
-            if fh is not None:
-                try:
-                    fh.write("===== FFmpeg session end =====\n")
-                    fh.close()
-                except Exception:
-                    pass
 
     async def _stop_locked(self, cid: str) -> None:
         # Cancel the feeder first so it stops spawning new sub-FFmpegs.
         # Sub-FFmpegs already running are not killed here; they'll exit on
-        # their own (and the closure of parent's FIFO writer FDs below
+        # their own (and the closure of the backend's writer endpoints below
         # ensures the master will then see EOF and shut down cleanly).
         feeder = self._feeders.pop(cid, None)
         if feeder and not feeder.done():
@@ -559,13 +687,14 @@ class _FFmpegChannelManager:
             except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
 
-        # Close the parent's FIFO writer FDs.  This signals EOF to the
-        # master once any remaining buffered data drains.
-        fds = self._fifo_wfds.pop(cid, None)
-        if fds:
-            for fd in fds:
-                try: os.close(fd)
-                except OSError: pass
+        # Tear down the pipe backend (closes FIFO writer FDs or TCP relay
+        # listeners + master connection).  Signals EOF to the master.
+        backend = self._backends.pop(cid, None)
+        if backend is not None:
+            try:
+                await backend.close()
+            except Exception:
+                pass
 
         proc = self._procs.pop(cid, None)
         if proc and proc.returncode is None:
@@ -574,6 +703,17 @@ class _FFmpegChannelManager:
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
             except asyncio.TimeoutError:
                 proc.kill()
+
+        # Close the per-channel session log file (held open across the whole
+        # channel session so master + sub stderr all go to the same file).
+        fh = self._stderr_fh.pop(cid, None)
+        if fh is not None:
+            try:
+                fh.write("===== FFmpeg session end =====\n")
+                fh.close()
+            except Exception:
+                pass
+
         d = self._dirs.pop(cid, None)
         if d:
             shutil.rmtree(d, ignore_errors=True)
@@ -601,6 +741,243 @@ class _FFmpegChannelManager:
 
 
 _ffmpeg_manager = _FFmpegChannelManager()
+
+
+# ─── Pipe backends ──────────────────────────────────────────────────────────
+#
+# Bridges sub-FFmpeg (per-scene producer) and master FFmpeg (long-running
+# consumer).  Two endpoints — one for raw video, one for raw PCM audio.
+#
+# Linux/macOS use named pipes via os.mkfifo with the kernel doing the byte
+# forwarding (near-zero overhead).  Windows uses TCP loopback with a Python
+# relay (slower but lets you iterate locally in the IDE without WSL/Docker).
+
+class _PipeBackend:
+    """Abstract base.  Subclasses must implement start, master_inputs,
+    sub_outputs, and close."""
+    kind: str = "abstract"
+
+    async def start(self) -> None:
+        raise NotImplementedError
+
+    def master_inputs(self) -> tuple[str, str]:
+        """URL or path the master FFmpeg should `-i` for video and audio."""
+        raise NotImplementedError
+
+    def sub_outputs(self) -> tuple[str, str]:
+        """URL or path each sub-FFmpeg writes its raw video/audio output to."""
+        raise NotImplementedError
+
+    async def wait_master_video_attached(self, timeout: float = 10.0) -> bool:
+        """Block until master has connected to the video endpoint.
+        Default no-op (FIFO backend has no race).  Returns True on success,
+        False on timeout.
+        """
+        return True
+
+    async def wait_master_audio_attached(self, timeout: float = 10.0) -> bool:
+        """Block until master has connected to the audio endpoint.
+        Default no-op (FIFO backend has no race).  Returns True on success,
+        False on timeout.
+        """
+        return True
+
+    async def close(self) -> None:
+        raise NotImplementedError
+
+
+class _FifoPipeBackend(_PipeBackend):
+    """Linux/macOS — mkfifo + O_RDWR keepalive FDs.
+
+    Master and sub both open the same path; master O_RDONLY, sub O_WRONLY.
+    Parent process keeps an O_RDWR handle to each so the master never sees
+    EOF when a sub exits between scenes.
+    """
+    kind = "fifo"
+
+    def __init__(self, tmpdir: str):
+        self.dir = tmpdir
+        self.fifo_v = os.path.join(tmpdir, "v.fifo")
+        self.fifo_a = os.path.join(tmpdir, "a.fifo")
+        self.wfd_v: int | None = None
+        self.wfd_a: int | None = None
+
+    async def start(self) -> None:
+        os.mkfifo(self.fifo_v, 0o600)
+        os.mkfifo(self.fifo_a, 0o600)
+        # O_RDWR avoids the "blocks until reader" semantics of O_WRONLY —
+        # these opens return immediately and they satisfy the master's
+        # subsequent O_RDONLY open.  We never read from these FDs; their
+        # job is to keep the FIFO alive across per-scene sub restarts.
+        self.wfd_v = os.open(self.fifo_v, os.O_RDWR | os.O_NONBLOCK)
+        self.wfd_a = os.open(self.fifo_a, os.O_RDWR | os.O_NONBLOCK)
+        # Bump pipe buffer to 1 MB so sub-FFmpeg spawn latency between
+        # scenes can't starve the master mid-frame.  Linux default is 64 KB;
+        # 1 MB ≈ 11 ms of raw 1080p30 video, enough to ride out a spawn.
+        if fcntl is not None and hasattr(fcntl, "F_SETPIPE_SZ"):
+            for fd in (self.wfd_v, self.wfd_a):
+                try:
+                    fcntl.fcntl(fd, fcntl.F_SETPIPE_SZ, 1024 * 1024)
+                except OSError:
+                    pass
+
+    def master_inputs(self) -> tuple[str, str]:
+        return self.fifo_v, self.fifo_a
+
+    def sub_outputs(self) -> tuple[str, str]:
+        return self.fifo_v, self.fifo_a
+
+    async def close(self) -> None:
+        for fd in (self.wfd_v, self.wfd_a):
+            if fd is not None:
+                try: os.close(fd)
+                except OSError: pass
+        self.wfd_v = None
+        self.wfd_a = None
+
+
+class _TcpRelayPipeBackend(_PipeBackend):
+    """Windows fallback — TCP loopback relay.
+
+    Two TCP server sockets per channel (video + audio).  Each socket accepts
+    one master connection (first to connect) and a series of sub connections
+    (one per scene).  Bytes from the current sub are forwarded to the master;
+    master stays connected across sub restarts, so it never sees EOF.
+
+    The relay does NOT match the FIFO backend's kernel-side throughput — it
+    is suitable for IDE iteration but not heavy production load.  Plan for
+    Linux/macOS deployment for real channels.
+    """
+    kind = "tcp"
+
+    def __init__(self, tmpdir: str):
+        self.dir = tmpdir
+        self.v_server: asyncio.base_events.Server | None = None
+        self.a_server: asyncio.base_events.Server | None = None
+        self.v_port: int = 0
+        self.a_port: int = 0
+        self._v_state: dict = {
+            "master_w": None,
+            "master_ready": asyncio.Event(),
+            "running": True,
+            "label": "video",
+        }
+        self._a_state: dict = {
+            "master_w": None,
+            "master_ready": asyncio.Event(),
+            "running": True,
+            "label": "audio",
+        }
+
+    async def _handler(self, state: dict, reader: asyncio.StreamReader,
+                        writer: asyncio.StreamWriter) -> None:
+        # First connection on this socket = master (consumer).  We keep
+        # the writer reference and hold the connection open; we never read
+        # from this side (master only reads).
+        if state["master_w"] is None:
+            state["master_w"] = writer
+            state["master_ready"].set()
+            peer = writer.get_extra_info("peername")
+            logger.info(f"LiveTV TCP relay [{state['label']}]: master connected from {peer}")
+            try:
+                # Spin while the consumer is alive.  Closing happens via close().
+                while state["running"] and not writer.is_closing():
+                    await asyncio.sleep(0.5)
+            finally:
+                logger.info(f"LiveTV TCP relay [{state['label']}]: master connection closed")
+            return
+
+        # Subsequent connection = sub producer.  Forward bytes to master.
+        await state["master_ready"].wait()
+        master_w = state["master_w"]
+        if master_w is None or master_w.is_closing():
+            try: writer.close()
+            except Exception: pass
+            return
+        peer = writer.get_extra_info("peername")
+        logger.debug(f"LiveTV TCP relay [{state['label']}]: sub connected from {peer}")
+        total = 0
+        try:
+            while state["running"]:
+                data = await reader.read(65536)
+                if not data:
+                    break
+                total += len(data)
+                master_w.write(data)
+                await master_w.drain()
+        except (ConnectionError, asyncio.CancelledError, OSError) as exc:
+            logger.debug(f"LiveTV TCP relay [{state['label']}]: sub forward ended ({exc})")
+        finally:
+            logger.debug(
+                f"LiveTV TCP relay [{state['label']}]: sub forwarded {total} bytes"
+            )
+            try: writer.close()
+            except Exception: pass
+
+    async def start(self) -> None:
+        # Bind to 127.0.0.1:0 so the kernel picks a free port.
+        self.v_server = await asyncio.start_server(
+            lambda r, w: self._handler(self._v_state, r, w),
+            host="127.0.0.1", port=0, family=socket.AF_INET,
+        )
+        self.a_server = await asyncio.start_server(
+            lambda r, w: self._handler(self._a_state, r, w),
+            host="127.0.0.1", port=0, family=socket.AF_INET,
+        )
+        self.v_port = self.v_server.sockets[0].getsockname()[1]
+        self.a_port = self.a_server.sockets[0].getsockname()[1]
+
+    def master_inputs(self) -> tuple[str, str]:
+        # Master is a TCP client (no ?listen=1); it connects out to our
+        # listening relay.
+        return (
+            f"tcp://127.0.0.1:{self.v_port}",
+            f"tcp://127.0.0.1:{self.a_port}",
+        )
+
+    def sub_outputs(self) -> tuple[str, str]:
+        # Sub is also a TCP client, connecting to the same listening relay
+        # after the master has already taken its slot.
+        return (
+            f"tcp://127.0.0.1:{self.v_port}",
+            f"tcp://127.0.0.1:{self.a_port}",
+        )
+
+    async def wait_master_video_attached(self, timeout: float = 10.0) -> bool:
+        try:
+            await asyncio.wait_for(
+                self._v_state["master_ready"].wait(), timeout=timeout
+            )
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+    async def wait_master_audio_attached(self, timeout: float = 10.0) -> bool:
+        try:
+            await asyncio.wait_for(
+                self._a_state["master_ready"].wait(), timeout=timeout
+            )
+            return True
+        except asyncio.TimeoutError:
+            return False
+
+    async def close(self) -> None:
+        self._v_state["running"] = False
+        self._a_state["running"] = False
+        for state in (self._v_state, self._a_state):
+            w = state.get("master_w")
+            if w is not None:
+                try:
+                    w.close()
+                except Exception:
+                    pass
+        for srv in (self.v_server, self.a_server):
+            if srv is not None:
+                try:
+                    srv.close()
+                    await srv.wait_closed()
+                except Exception:
+                    pass
 
 
 def _next_scheduled_segment_after(ch: dict, t: float) -> dict | None:
@@ -1790,7 +2167,7 @@ async def endpoint_stash_channel_stream(request: Request):
 
     logger.trace(
         f"LiveTV FFmpeg: served manifest for '{ch['name']}' "
-        f"channel={channel_id_clean} seek={seek:.1f}s entries={len(entries)}"
+        f"channel={channel_id_clean} seek={seek:.1f}s entries={len(_entries)}"
     )
     return Response(
         "\n".join(out_lines),
