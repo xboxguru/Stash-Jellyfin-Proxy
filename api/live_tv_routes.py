@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import glob
 import hashlib
 import json
@@ -464,7 +464,7 @@ class _FFmpegChannelManager:
                 )
                 ok = await self._feed_one_scene(
                     cid, scene_id, backend,
-                    stash_base, api_key, ffmpeg_bin, scene_seek,
+                    stash_base, api_key, ffmpeg_bin, scene_seek, scene_dur,
                 )
                 logger.info(
                     f"LiveTV feeder: channel {cid!r} scene id={scene_id} "
@@ -484,7 +484,8 @@ class _FFmpegChannelManager:
     async def _feed_one_scene(self, cid: str, scene_id: str,
                                backend: "_PipeBackend",
                                stash_base: str, api_key: str,
-                               ffmpeg_bin: str, scene_seek: float) -> bool:
+                               ffmpeg_bin: str, scene_seek: float,
+                               scene_dur: float = 0.0) -> bool:
         """Spawn TWO sub-FFmpegs per scene — one for raw video, one for raw
         audio — each writing to its own endpoint on the backend.
 
@@ -614,6 +615,35 @@ class _FFmpegChannelManager:
             return False
         logger.info(f"LiveTV feeder: scene {scene_id} audio pid={sub_a.pid}")
         asyncio.create_task(self._drain_sub_stderr(sub_a, cid, f"{scene_id}/a"))
+
+        # Detect fast failure of audio sub (scene has no audio stream).
+        # When sub_a fails before connecting to the relay, master's audio
+        # input waits indefinitely, stalling HLS output long enough for
+        # ExoPlayer to throw PlaylistStuckException.  If sub_a exits within
+        # 2 s with a non-zero rc, replace it with a lavfi silence filler so
+        # the relay audio port receives a connection and master can continue.
+        try:
+            rc_a_fast = await asyncio.wait_for(asyncio.shield(sub_a.wait()), timeout=2.0)
+            if rc_a_fast != 0:
+                silence_dur = max(1.0, scene_dur - max(0.0, scene_seek))
+                silence_cmd = [
+                    ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "warning",
+                    "-f", "lavfi", "-i", "aevalsrc=0:c=stereo:s=48000",
+                    "-t", f"{silence_dur:.3f}",
+                    "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le",
+                    "-f", "s16le", sub_out_a,
+                ]
+                sub_a = await asyncio.create_subprocess_exec(
+                    *silence_cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                logger.info(
+                    f"LiveTV feeder: scene {scene_id} has no audio — "
+                    f"spawned {silence_dur:.1f}s silence filler pid={sub_a.pid}"
+                )
+        except asyncio.TimeoutError:
+            pass  # sub_a still running after 2 s — has audio, proceed normally
 
         rc_v, rc_a = await asyncio.gather(sub_v.wait(), sub_a.wait())
         if rc_v != 0:
@@ -1541,7 +1571,7 @@ def _build_random_schedule(scenes: list[dict]) -> list[dict]:
 
 
 _HALF_HOUR = 1800  # seconds per Shorts block
-_SHORTS_WIGGLE = 60  # max over/undershoot of block boundary, in seconds
+_SHORTS_WIGGLE = 120  # max over/undershoot of block boundary, in seconds
 
 
 def _half_hour_ceil(ts: float) -> float:
@@ -1553,23 +1583,16 @@ def _half_hour_floor(ts: float) -> float:
 
 
 def _shorts_blocks_in_range(scenes: list[dict], range_start: float, range_end: float) -> list[dict]:
-    """Produce half-hour-aligned 30-minute Shorts blocks between range_start..range_end.
+    """Produce contiguous ~30-minute Shorts blocks between range_start and range_end.
 
-    Each block contains a `segments` list with the actual scenes that play in
-    that block.  Block start times are aligned to UTC half-hour boundaries.
-    Within a block, segments are sequential starting at block_start and ending
-    at or near block_end with up to _SHORTS_WIGGLE seconds of slop on either
-    side so a full scene can fit.  Scenes never span a block boundary.
-    Partial blocks (less than a full 30 min available in the range) are
-    omitted — the last block may end up to _HALF_HOUR seconds before
-    range_end.
+    The first block's start is aligned to the nearest UTC half-hour boundary at or
+    after range_start.  Each subsequent block starts exactly where the previous one
+    ended — there are no gaps between blocks.  Blocks target _HALF_HOUR in duration
+    but may run up to _SHORTS_WIGGLE seconds shorter or longer so that scenes never
+    span a block boundary.  If no scene fits within the overshoot budget the block
+    closes early and the next block picks up immediately.
     """
     if not scenes:
-        return []
-
-    start_b = _half_hour_ceil(range_start)
-    end_b   = _half_hour_floor(range_end)
-    if start_b + _HALF_HOUR > end_b:
         return []
 
     pool = list(scenes)
@@ -1577,8 +1600,10 @@ def _shorts_blocks_in_range(scenes: list[dict], range_start: float, range_end: f
     pool_idx = 0
 
     blocks: list[dict] = []
-    block_start = start_b
-    while block_start + _HALF_HOUR <= end_b:
+    # First block aligns to the next half-hour boundary; subsequent blocks chain
+    # from the actual stop_ts of the preceding block — no gaps.
+    block_start = _half_hour_ceil(range_start)
+    while block_start < range_end:
         block_end = block_start + _HALF_HOUR
         segments: list[dict] = []
         cursor = block_start
@@ -1617,7 +1642,12 @@ def _shorts_blocks_in_range(scenes: list[dict], range_start: float, range_end: f
                 "duration_sec": block_stop - block_start,
                 "segments":     segments,
             })
-        block_start += _HALF_HOUR
+            # Next block starts exactly where this one ended — no gap.
+            block_start = block_stop
+        else:
+            # No scene could fit (pool too short or all scenes exceed wiggle budget).
+            # Advance to avoid an infinite loop.
+            block_start += _HALF_HOUR
 
     return blocks
 
@@ -1707,11 +1737,10 @@ def _maintenance_extend_shorts(
     retained = [b for b in existing if b.get("stop_ts", 0) > cutoff]
     pruned   = len(existing) - len(retained)
 
-    # Last retained block was aligned to a half-hour boundary; the next block
-    # starts one half-hour after it.
+    # Chain new blocks from the actual end of the last retained block so there
+    # is no gap between the retained schedule and the newly generated content.
     if retained:
-        last_start = max(b["start_ts"] for b in retained)
-        frontier   = last_start + _HALF_HOUR
+        frontier = max(b["stop_ts"] for b in retained)
     else:
         frontier = cutoff
 
