@@ -23,6 +23,7 @@ config/logos/
 .vscode/
 .idea/
 .DS_Store
+*.md
 
 # Jellyfin Web UI (Local Testing)
 jellyfin-web/
