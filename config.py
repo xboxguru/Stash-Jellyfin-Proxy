@@ -76,6 +76,8 @@ ENABLE_SHORTS_CHANNEL = False
 SHORTS_MAX_MINUTES = 5
 FFMPEG_PATH = "ffmpeg"
 LIVE_TV_IDLE_TIMEOUT = 60
+LIVE_TV_HLS_LIST_SIZE = 15
+LIVE_TV_SEG_RETENTION = 30
 
 config_defined_keys = set()
 env_overrides = []
@@ -111,6 +113,7 @@ def save_config():
         "STASH_SCHEDULE_DAYS", "STASH_KEEP_DAYS", "STASH_CHANNEL_START_NUMBER",
         "ENABLE_SHORTS_CHANNEL", "SHORTS_MAX_MINUTES",
         "FFMPEG_PATH", "LIVE_TV_IDLE_TIMEOUT",
+        "LIVE_TV_HLS_LIST_SIZE", "LIVE_TV_SEG_RETENTION",
     ]
 
     try:
@@ -137,7 +140,8 @@ def _coerce_config_value(key, val):
                 "AUTH_IP_TIMEOUT_MINUTES", "TOP_PLAYED_RETENTION_DAYS",
                 "AUTH_RATE_LIMIT_WINDOW_MINUTES", "AUTH_RATE_LIMIT_MAX_ATTEMPTS",
                 "STASH_SCHEDULE_DAYS", "STASH_KEEP_DAYS", "STASH_CHANNEL_START_NUMBER",
-                "SHORTS_MAX_MINUTES", "LIVE_TV_IDLE_TIMEOUT"]:
+                "SHORTS_MAX_MINUTES", "LIVE_TV_IDLE_TIMEOUT",
+                "LIVE_TV_HLS_LIST_SIZE", "LIVE_TV_SEG_RETENTION"]:
         try: return int(val)
         except ValueError: return None
     elif key in ["ENABLE_FILTERS", "ENABLE_TAG_FILTERS", "ENABLE_ALL_TAGS", "REQUIRE_AUTH_FOR_CONFIG",
@@ -195,6 +199,7 @@ _supported_keys = [
     "STASH_SCHEDULE_DAYS", "STASH_KEEP_DAYS", "STASH_CHANNEL_START_NUMBER",
     "ENABLE_SHORTS_CHANNEL", "SHORTS_MAX_MINUTES",
     "FFMPEG_PATH", "LIVE_TV_IDLE_TIMEOUT",
+    "LIVE_TV_HLS_LIST_SIZE", "LIVE_TV_SEG_RETENTION",
 ]
 
 for k in _supported_keys:

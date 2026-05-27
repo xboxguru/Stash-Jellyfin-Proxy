@@ -76,9 +76,11 @@ class _FFmpegChannelManager:
         self._stderr_fh: dict[str, object]  = {}   # channel_id → per-channel session log file handle
         self._launch_info: dict[str, dict]  = {}   # channel_id → {start_ts, seek, playlist}
         self._feeders: dict[str, asyncio.Task] = {}  # channel_id → feeder task
+        self._cleaners: dict[str, asyncio.Task] = {}  # channel_id → segment cleanup task
         self._backends: dict[str, "_PipeBackend"] = {}  # channel_id → pipe backend (FIFO on Linux, TCP on Windows)
         self._consumed_until: dict[str, float] = {}  # channel_id → wall-clock fed up to
         self._current_scene: dict[str, dict] = {}    # channel_id → live "what's being fed now"
+        self._feeder_waiting: dict[str, bool] = {}   # channel_id → True while feeder sleeps for air time (reserved for future use)
         self._lock    = asyncio.Lock()
         self._watchdog: asyncio.Task | None = None
 
@@ -278,9 +280,13 @@ class _FFmpegChannelManager:
             "-c:a", "aac", "-b:a", "192k",
             # HLS
             "-hls_time", "4",
-            "-hls_list_size", "450",
+            # Small live window so the client only sees ~24 s of look-ahead
+            # and cannot fast-forward past the live edge.  Segments are NOT
+            # auto-deleted by FFmpeg; our _cleanup_loop() handles eviction
+            # once they are well past the live edge.
+            "-hls_list_size", str(int(getattr(config, "LIVE_TV_HLS_LIST_SIZE", 6))),
             "-hls_flags",
-            "delete_segments+append_list+omit_endlist+program_date_time+independent_segments",
+            "append_list+omit_endlist+program_date_time+independent_segments",
             # Non-zero starting media-sequence keeps ExoPlayer's live-edge
             # calc above zero (see prior commit for context).
             "-start_number", str(max(1, int(seek) // 4)),
@@ -361,6 +367,8 @@ class _FFmpegChannelManager:
         # by _stop_locked.
         feeder = asyncio.create_task(self._feeder(cid, ch, backend, seek))
         self._feeders[cid] = feeder
+        cleaner = asyncio.create_task(self._cleanup_loop(cid))
+        self._cleaners[cid] = cleaner
 
         # Readiness gate — wait for ≥3 segments in the manifest before
         # returning success.  Same logic as before; the master's pipeline
@@ -518,6 +526,11 @@ class _FFmpegChannelManager:
             "-loglevel", "info", "-stats",
             "-reconnect", "1", "-reconnect_streamed", "1",
             "-reconnect_at_eof", "1", "-reconnect_delay_max", "5",
+            # Read the Stash source at its native playback speed (1×).  This
+            # makes segment generation hardware-independent and prevents the
+            # client from fast-forwarding: the master can only produce HLS
+            # segments as fast as the sub delivers frames.
+            "-re",
         ]
         seek_args: list[str] = []
         if scene_seek > 0.1:
@@ -717,6 +730,14 @@ class _FFmpegChannelManager:
             except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
 
+        cleaner = self._cleaners.pop(cid, None)
+        if cleaner and not cleaner.done():
+            cleaner.cancel()
+            try:
+                await asyncio.wait_for(cleaner, timeout=2.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+
         # Tear down the pipe backend (closes FIFO writer FDs or TCP relay
         # listeners + master connection).  Signals EOF to the master.
         backend = self._backends.pop(cid, None)
@@ -751,6 +772,77 @@ class _FFmpegChannelManager:
         self._launch_info.pop(cid, None)
         self._current_scene.pop(cid, None)
         self._consumed_until.pop(cid, None)
+        self._feeder_waiting.pop(cid, None)
+
+    async def _cleanup_loop(self, cid: str) -> None:
+        """Delete segment files that have aged past the retention window.
+
+        Because we removed the ``delete_segments`` HLS flag, FFmpeg writes
+        segments to disk but never deletes them.  We evict them here once they
+        are older than RETENTION_SEGMENTS segments behind the playlist's current
+        minimum media-sequence number.  This keeps disk usage bounded while
+        giving clients time to fetch segments that have scrolled off the live
+        window but haven't been downloaded yet.
+        """
+        retention = int(getattr(config, "LIVE_TV_SEG_RETENTION", 30))  # extra segs to keep
+        seg_dir = self._dirs.get(cid)
+
+        try:
+            while True:
+                await asyncio.sleep(15)
+                seg_dir = self._dirs.get(cid)
+                if not seg_dir:
+                    break
+                manifest = os.path.join(seg_dir, "stream.m3u8")
+                if not os.path.exists(manifest):
+                    continue
+                try:
+                    with open(manifest, "r", encoding="utf-8") as fh:
+                        content = fh.read()
+                except OSError:
+                    continue
+
+                min_seq = None
+                for line in content.splitlines():
+                    if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+                        try:
+                            min_seq = int(line.split(":", 1)[1].strip())
+                        except (ValueError, IndexError):
+                            pass
+                        break
+
+                if min_seq is None:
+                    continue
+
+                cutoff = min_seq - retention
+                if cutoff <= 0:
+                    continue
+
+                try:
+                    entries = os.listdir(seg_dir)
+                except OSError:
+                    continue
+
+                for fname in entries:
+                    if not (fname.startswith("seg") and fname.endswith(".ts")):
+                        continue
+                    try:
+                        seq = int(fname[3:-3])
+                    except ValueError:
+                        continue
+                    if seq < cutoff:
+                        try:
+                            os.remove(os.path.join(seg_dir, fname))
+                            logger.debug(
+                                f"LiveTV cleanup: {cid!r} deleted {fname} "
+                                f"(seq {seq} < cutoff {cutoff})"
+                            )
+                        except OSError:
+                            pass
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning(f"LiveTV cleanup: loop crashed for {cid!r}: {exc}")
 
     async def _idle_loop(self) -> None:
         idle_secs = float(getattr(config, "LIVE_TV_IDLE_TIMEOUT", 300))
@@ -760,6 +852,10 @@ class _FFmpegChannelManager:
             idle = [
                 cid for cid, ts in list(self._last.items())
                 if now - ts > idle_secs
+                # Don't evict a channel whose feeder is sleeping for air-time
+                # — it looks "idle" because the client isn't requesting yet,
+                # but the channel is healthy and about to start encoding.
+                and not self._feeder_waiting.get(cid, False)
             ]
             for cid in idle:
                 logger.info(
