@@ -25,11 +25,11 @@ async def endpoint_item_image(request: Request):
     image_type = request.path_params.get("image_type", "Primary").lower()
 
     # Live TV channel / program — proxy artwork
-    from api import live_tv_routes
-    ch = await live_tv_routes.get_channel_by_jellyfin_id(raw_item_id)
+    from api import live_tv_data as _ltd
+    ch = await _ltd.get_channel_by_jellyfin_id(raw_item_id)
     if ch is not None:
         tvg_id = ch.get("tvg_id", "")
-        custom = live_tv_routes._custom_logo_path(tvg_id)
+        custom = _ltd._custom_logo_path(tvg_id)
         if custom:
             mt = os.path.splitext(custom)[1].lstrip(".")
             media_type = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
@@ -39,13 +39,13 @@ async def endpoint_item_image(request: Request):
             return await _proxy_image(ch["logo"])
 
     if ch is None:
-        prog = await live_tv_routes.get_program_by_jellyfin_id(raw_item_id)
+        prog = await _ltd.get_program_by_jellyfin_id(raw_item_id)
         if prog is not None:
             # Prefer the program's own icon; fall back to channel logo
             if prog.get("icon"):
                 return await _proxy_image(prog["icon"])
             from core.jellyfin_mapper import encode_id
-            ch = await live_tv_routes.get_channel_by_jellyfin_id(
+            ch = await _ltd.get_channel_by_jellyfin_id(
                 encode_id("ch", prog["channel_id"])
             )
             if ch is not None and ch.get("logo"):

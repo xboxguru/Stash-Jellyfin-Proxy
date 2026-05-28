@@ -16,12 +16,12 @@ async def endpoint_playback_info(request: Request):
     logger.info(f"PlaybackInfo: {request.method} item={raw_item_id!r}")
 
     # Live TV channels have their own playback path
-    from api import live_tv_routes
-    ch = await live_tv_routes.get_channel_by_jellyfin_id(raw_item_id)
+    from api import live_tv_routes, live_tv_data as _ltd
+    ch = await _ltd.get_channel_by_jellyfin_id(raw_item_id)
     if ch is not None:
         if ch.get("stash_type"):
             return await live_tv_routes.stash_channel_playback_info(ch, raw_item_id, request)
-        return live_tv_routes.channel_playback_info(ch, raw_item_id, request)
+        return await live_tv_routes.channel_playback_info(ch, raw_item_id, request)
 
     item_id = decode_id(raw_item_id)
     # If decode returned the ID unchanged or decoded to a non-scene prefix,
@@ -160,8 +160,8 @@ async def endpoint_stream(request: Request):
     # /master.m3u8 transcode URL from the channel ID instead of using the
     # PlaybackInfo Path.  Redirect to the channel's live stream rather than
     # falling through to get_scene() with a channel ID.
-    from api import live_tv_routes
-    ch = await live_tv_routes.get_channel_by_jellyfin_id(raw_item_id)
+    from api import live_tv_data as _ltd
+    ch = await _ltd.get_channel_by_jellyfin_id(raw_item_id)
     if ch is not None:
         cid = raw_item_id.replace("-", "")
         if ch.get("stash_type"):
@@ -224,8 +224,8 @@ async def endpoint_hls_segment(request: Request):
 
     # Live TV channels serve their HLS segments from the live TV endpoints, not
     # here.  Guard so a channel ID never reaches get_scene() / Stash.
-    from api import live_tv_routes
-    if await live_tv_routes.get_channel_by_jellyfin_id(raw_item_id) is not None:
+    from api import live_tv_data as _ltd
+    if await _ltd.get_channel_by_jellyfin_id(raw_item_id) is not None:
         logger.warning(f"HLS segment requested for Live TV channel {raw_item_id!r} — not served here")
         return Response(status_code=404)
 

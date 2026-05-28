@@ -206,17 +206,17 @@ async def endpoint_item_details(request: Request):
     logger.debug(f"Metadata Request -> Item Details for Decoded ID: {decoded_id}")
 
     # Live TV channels and programs are identified by their encoded IDs
-    from api import live_tv_routes
-    ch = await live_tv_routes.get_channel_by_jellyfin_id(item_id)
+    from api import live_tv_data as _ltd
+    ch = await _ltd.get_channel_by_jellyfin_id(item_id)
     if ch is not None:
-        return JSONResponse(live_tv_routes._channel_to_jellyfin(ch, server_id, item_id))
-    prog = await live_tv_routes.get_program_by_jellyfin_id(item_id)
+        return JSONResponse(_ltd._channel_to_jellyfin(ch, server_id, item_id))
+    prog = await _ltd.get_program_by_jellyfin_id(item_id)
     if prog is not None:
         import config as _config
-        tunarr_chs = await live_tv_routes._get_channels() if getattr(_config, "ENABLE_TUNARR", False) else []
-        stash_chs = await live_tv_routes._get_stash_channels() if getattr(_config, "ENABLE_STASH_CHANNELS", False) else []
+        tunarr_chs = await _ltd._get_channels() if getattr(_config, "ENABLE_TUNARR", False) else []
+        stash_chs = await _ltd._get_stash_channels() if getattr(_config, "ENABLE_STASH_CHANNELS", False) else []
         channels_by_tvg_id = {c["tvg_id"]: c for c in tunarr_chs + stash_chs}
-        return JSONResponse(live_tv_routes._program_to_jellyfin(prog, server_id, channels_by_tvg_id, item_id))
+        return JSONResponse(_ltd._program_to_jellyfin(prog, server_id, channels_by_tvg_id, item_id))
 
     if "root-" in decoded_id or "tag-" in decoded_id or "filter-" in decoded_id:
         return await _handle_nav_folder_details(decoded_id, item_id, server_id, cache_version)

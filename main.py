@@ -87,7 +87,8 @@ import state
 from core import stash_client
 from core.udp_discovery import JellyfinDiscoveryProtocol
 from api.middleware import AuthenticationMiddleware
-from api import ui_routes, auth_routes, library_routes, metadata_routes, stream_routes, userdata_routes, image_routes, live_tv_routes
+from api import ui_routes, auth_routes, library_routes, metadata_routes, stream_routes, userdata_routes, image_routes, live_tv_routes, live_tv_admin_routes
+from api import live_tv_data as _live_tv_data
 
 if not os.path.exists(config.LOG_DIR):
     try: os.makedirs(config.LOG_DIR, exist_ok=True)
@@ -254,32 +255,32 @@ routes = [
     Route("/api/stats/top_played/{item_id}", ui_routes.api_remove_top_played_item, methods=["DELETE"]),
     Route('/api/quickconnect/authorize', auth_routes.endpoint_quickconnect_authorize, methods=['POST']),
     Route("/api/sysinfo", ui_routes.api_get_sysinfo, methods=["GET"]),
-    Route("/api/livetv/rebuild-schedule", live_tv_routes.endpoint_rebuild_schedule, methods=["POST"]),
-    Route("/api/livetv/guide", live_tv_routes.endpoint_guide_data, methods=["GET"]),
+    Route("/api/livetv/rebuild-schedule", live_tv_admin_routes.endpoint_rebuild_schedule, methods=["POST"]),
+    Route("/api/livetv/guide", live_tv_admin_routes.endpoint_guide_data, methods=["GET"]),
     Route("/api/livetv/channel-now", live_tv_routes.endpoint_channel_now_playing, methods=["GET"]),
     Route("/api/livetv/shorts-block-preview", live_tv_routes.endpoint_shorts_block_preview, methods=["GET"]),
     # Channel config CRUD
-    Route("/api/livetv/channels-config", live_tv_routes.endpoint_channels_config_list, methods=["GET"]),
-    Route("/api/livetv/channels-config", live_tv_routes.endpoint_channels_config_create, methods=["POST"]),
-    Route("/api/livetv/channels-config/reorder", live_tv_routes.endpoint_channels_config_reorder, methods=["POST"]),
-    Route("/api/livetv/channels-config/{tvg_id}", live_tv_routes.endpoint_channels_config_update, methods=["PATCH"]),
-    Route("/api/livetv/channels-config/{tvg_id}", live_tv_routes.endpoint_channels_config_delete, methods=["DELETE"]),
-    Route("/api/livetv/channels-config/{tvg_id}/rebuild", live_tv_routes.endpoint_channel_rebuild, methods=["POST"]),
+    Route("/api/livetv/channels-config", live_tv_admin_routes.endpoint_channels_config_list, methods=["GET"]),
+    Route("/api/livetv/channels-config", live_tv_admin_routes.endpoint_channels_config_create, methods=["POST"]),
+    Route("/api/livetv/channels-config/reorder", live_tv_admin_routes.endpoint_channels_config_reorder, methods=["POST"]),
+    Route("/api/livetv/channels-config/{tvg_id}", live_tv_admin_routes.endpoint_channels_config_update, methods=["PATCH"]),
+    Route("/api/livetv/channels-config/{tvg_id}", live_tv_admin_routes.endpoint_channels_config_delete, methods=["DELETE"]),
+    Route("/api/livetv/channels-config/{tvg_id}/rebuild", live_tv_admin_routes.endpoint_channel_rebuild, methods=["POST"]),
     # Stash source lists
-    Route("/api/livetv/stash-tags", live_tv_routes.endpoint_stash_tags_list, methods=["GET"]),
-    Route("/api/livetv/stash-filters", live_tv_routes.endpoint_stash_filters_list, methods=["GET"]),
-    Route("/api/livetv/stash-tag-image/{tag_id}", live_tv_routes.endpoint_stash_tag_image, methods=["GET"]),
-    Route("/api/livetv/channel-logo/{tvg_id}/from-tag", live_tv_routes.endpoint_channel_logo_set_from_tag, methods=["POST"]),
-    Route("/api/livetv/channel-logo/{tvg_id}", live_tv_routes.endpoint_channel_logo_get, methods=["GET"]),
-    Route("/api/livetv/channel-logo/{tvg_id}", live_tv_routes.endpoint_channel_logo_upload, methods=["POST"]),
-    Route("/api/livetv/channel-logo/{tvg_id}", live_tv_routes.endpoint_channel_logo_delete, methods=["DELETE"]),
-    Route("/api/livetv/epg-scene-match", live_tv_routes.endpoint_epg_scene_match, methods=["GET"]),
-    Route("/api/livetv/scene/{scene_id}", live_tv_routes.endpoint_scene_detail, methods=["GET"]),
-    Route("/api/livetv/scene/{scene_id}/screenshot", live_tv_routes.endpoint_scene_screenshot, methods=["GET"]),
-    Route("/api/livetv/channel-scenes/{tvg_id}", live_tv_routes.endpoint_channel_scenes, methods=["GET"]),
-    Route("/api/livetv/schedule/{tvg_id}/{eid}", live_tv_routes.endpoint_schedule_delete, methods=["DELETE"]),
-    Route("/api/livetv/schedule/{tvg_id}/reorder", live_tv_routes.endpoint_schedule_reorder, methods=["POST"]),
-    Route("/api/livetv/schedule/{tvg_id}/insert", live_tv_routes.endpoint_schedule_insert, methods=["POST"]),
+    Route("/api/livetv/stash-tags", live_tv_admin_routes.endpoint_stash_tags_list, methods=["GET"]),
+    Route("/api/livetv/stash-filters", live_tv_admin_routes.endpoint_stash_filters_list, methods=["GET"]),
+    Route("/api/livetv/stash-tag-image/{tag_id}", live_tv_admin_routes.endpoint_stash_tag_image, methods=["GET"]),
+    Route("/api/livetv/channel-logo/{tvg_id}/from-tag", live_tv_admin_routes.endpoint_channel_logo_set_from_tag, methods=["POST"]),
+    Route("/api/livetv/channel-logo/{tvg_id}", live_tv_admin_routes.endpoint_channel_logo_get, methods=["GET"]),
+    Route("/api/livetv/channel-logo/{tvg_id}", live_tv_admin_routes.endpoint_channel_logo_upload, methods=["POST"]),
+    Route("/api/livetv/channel-logo/{tvg_id}", live_tv_admin_routes.endpoint_channel_logo_delete, methods=["DELETE"]),
+    Route("/api/livetv/epg-scene-match", live_tv_admin_routes.endpoint_epg_scene_match, methods=["GET"]),
+    Route("/api/livetv/scene/{scene_id}", live_tv_admin_routes.endpoint_scene_detail, methods=["GET"]),
+    Route("/api/livetv/scene/{scene_id}/screenshot", live_tv_admin_routes.endpoint_scene_screenshot, methods=["GET"]),
+    Route("/api/livetv/channel-scenes/{tvg_id}", live_tv_admin_routes.endpoint_channel_scenes, methods=["GET"]),
+    Route("/api/livetv/schedule/{tvg_id}/{eid}", live_tv_admin_routes.endpoint_schedule_delete, methods=["DELETE"]),
+    Route("/api/livetv/schedule/{tvg_id}/reorder", live_tv_admin_routes.endpoint_schedule_reorder, methods=["POST"]),
+    Route("/api/livetv/schedule/{tvg_id}/insert", live_tv_admin_routes.endpoint_schedule_insert, methods=["POST"]),
     
     Route("/system/info/public", auth_routes.endpoint_system_info_public, methods=["GET"]),
     Route("/public/system/info", auth_routes.endpoint_system_info_public, methods=["GET"]),
@@ -406,6 +407,7 @@ routes = [
     Route("/livetv/channels/{channel_id}/stash-stream", live_tv_routes.endpoint_stash_channel_stream, methods=["GET"]),
     Route("/livetv/channels/{channel_id}/stash-stream.m3u8", live_tv_routes.endpoint_stash_channel_stream, methods=["GET"]),
     Route("/livetv/channels/{channel_id}/seg/{seg_name}", live_tv_routes.endpoint_stash_channel_segment, methods=["GET"]),
+    Route("/livetv/channels/{channel_id}/tunarr-relay.m3u8", live_tv_routes.endpoint_tunarr_relay_stream, methods=["GET"]),
     Route("/livetv/channels/{channel_id}/stream.m3u8", live_tv_routes.endpoint_channel_m3u8, methods=["GET"]),
     Route("/livetv/channels/{channel_id}/stream", live_tv_routes.endpoint_channel_stream, methods=["GET"]),
 
@@ -423,17 +425,17 @@ routes = [
 
 @asynccontextmanager
 async def lifespan(app):
-    live_tv_routes._load_channels_config()
+    _live_tv_data._load_channels_config()
     if getattr(config, "ENABLE_STASH_CHANNELS", False):
-        live_tv_routes._load_schedule()
-        await live_tv_routes.start_maintenance_task()
+        _live_tv_data._load_schedule()
+        await _live_tv_data.start_maintenance_task()
     yield
-    await live_tv_routes.stop_maintenance_task()
+    await _live_tv_data.stop_maintenance_task()
     logger.info("Shutting down global HTTP connection pools...")
     await stash_client._manager.client.aclose()
     await stream_routes.stream_client.aclose()
     await image_routes.image_client.aclose()
-    await live_tv_routes._live_client.aclose()
+    await _live_tv_data._live_client.aclose()
 
 app = Starlette(debug=(config.LOG_LEVEL == "DEBUG"), routes=routes, lifespan=lifespan)
 
