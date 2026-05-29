@@ -6,6 +6,23 @@ import config
 from core import stash_client
 from core.jellyfin_mapper import decode_id
 
+_RESOLUTION_LABEL_TO_ENUM = {
+    "144p": "VERY_LOW",
+    "240p": "LOW",
+    "360p": "R360P",
+    "480p": "STANDARD",
+    "540p": "WEB_HD",
+    "720p": "STANDARD_HD",
+    "1080p": "FULL_HD",
+    "1440p": "QUAD_HD",
+    "2160p": "FOUR_K",
+    "4k": "FOUR_K",
+    "5k": "FIVE_K",
+    "6k": "SIX_K",
+    "7k": "SEVEN_K",
+    "8k": "EIGHT_K",
+}
+
 def transform_saved_filter(object_filter: dict) -> dict:
     """Convert a Stash saved-filter object_filter blob into a SceneFilterType-compatible dict."""
     if not object_filter or not isinstance(object_filter, dict):
@@ -18,11 +35,12 @@ def transform_saved_filter(object_filter: dict) -> dict:
             result[key] = str(value['value']).lower() if isinstance(value, dict) and 'value' in value else str(value).lower()
             continue
         # Stash GraphQL expects these as plain Booleans, not filter objects
-        if key in ('organized', 'interactive'):
+        if key in ('organized', 'interactive', 'performer_favorite'):
             if isinstance(value, bool):
                 result[key] = value
             elif isinstance(value, dict) and 'value' in value:
-                result[key] = bool(value['value'])
+                v = value['value']
+                result[key] = v if isinstance(v, bool) else str(v).lower() not in ('false', '0', '')
             continue
         if key in ('AND', 'OR', 'NOT'):
             if isinstance(value, list):
@@ -30,9 +48,22 @@ def transform_saved_filter(object_filter: dict) -> dict:
             elif isinstance(value, dict):
                 result[key] = transform_saved_filter(value)
             continue
+        # StashIDCriterionInput has no 'value' field — uses endpoint/stash_id directly
+        if key == 'stash_id_endpoint':
+            modifier = value.get('modifier', '') if isinstance(value, dict) else ''
+            inner = value.get('value', {}) if isinstance(value, dict) else {}
+            if not isinstance(inner, dict):
+                inner = {}
+            result[key] = {
+                'modifier': modifier,
+                'endpoint': inner.get('endpoint', ''),
+                'stash_id': inner.get('stashID', inner.get('stash_id', '')),
+            }
+            continue
         if isinstance(value, dict):
             modifier = value.get('modifier')
             val = value.get('value')
+            # HierarchicalMultiCriterionInput: items at top level (older Stash format)
             if 'items' in value:
                 ids = [item.get('id') for item in value['items'] if isinstance(item, dict) and item.get('id')]
                 excludes = [e.get('id') if isinstance(e, dict) else e for e in value.get('excluded', [])]
@@ -41,10 +72,23 @@ def transform_saved_filter(object_filter: dict) -> dict:
             if modifier in ('IS_NULL', 'NOT_NULL'):
                 result[key] = {'value': '', 'modifier': modifier}
                 continue
+            # HierarchicalMultiCriterionInput: items nested inside value (current Stash format)
+            if isinstance(val, dict) and 'items' in val:
+                ids = [item.get('id') for item in val['items'] if isinstance(item, dict) and item.get('id')]
+                excludes = [e.get('id') if isinstance(e, dict) else e for e in val.get('excluded', [])]
+                result[key] = {'value': ids, 'modifier': modifier, 'depth': val.get('depth', 0), 'excludes': excludes}
+                continue
+            # Unwrap nested {value: X, value2: Y} — preserve value2 for BETWEEN ranges
+            value2 = None
             if isinstance(val, dict) and 'value' in val:
+                value2 = val.get('value2')
                 val = val['value']
             if modifier and val is not None:
+                if key == "resolution" and isinstance(val, str):
+                    val = _RESOLUTION_LABEL_TO_ENUM.get(val.lower(), val)
                 transformed = {'modifier': modifier, 'value': val}
+                if value2 is not None:
+                    transformed['value2'] = value2
                 for k, v in value.items():
                     if k not in ('modifier', 'value'):
                         transformed[k] = v

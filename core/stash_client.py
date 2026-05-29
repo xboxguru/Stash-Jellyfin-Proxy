@@ -135,7 +135,7 @@ async def fetch_scenes(filter_args: Dict[str, Any], page: int = 1, per_page: int
     
     query = f"query FindScenes($filter: FindFilterType, $scene_filter: SceneFilterType) {{ findScenes(filter: $filter, scene_filter: $scene_filter) {{ count scenes {{ {BASE_SCENE_FIELDS} }} }} }}"
     filter_args.update({"page": page, "per_page": per_page})
-    
+    logger.debug(f"fetch_scenes scene_filter: {sf}")
     data = await call_graphql(query, {"filter": filter_args, "scene_filter": sf})
     return data.get("findScenes") if data else {"count": 0, "scenes": []}
 
