@@ -57,6 +57,14 @@ async def _flush_play(c):
         await c._pending_play_task
 
 
+async def _feed_rate_sample(c, prev_pos, new_pos, dwall=5.0):
+    """Simulate one progress ping `dwall` seconds after the previous, moving prev_pos->new_pos, so the
+    rate estimator sees raw = (new_pos-prev_pos)/dwall without real waiting."""
+    c._last_position_s = prev_pos
+    c._last_event_t = time.monotonic() - dwall
+    await c.on_progress(new_pos, is_paused=False)
+
+
 def _ready_controller(session_id="sess-1"):
     c = HandyController(session_id, make_interactive_scene())
     c.state = "ready"
@@ -216,6 +224,101 @@ class TestPositionExtrapolation:
         c._last_event_t = time.monotonic() - 0.4
         await c._play(10.0)
         assert 10.35 <= c._hsp_play.await_args[0][0] <= 10.6
+
+    def test_extrapolation_scales_by_rate(self):
+        c = HandyController("s", make_interactive_scene())
+        c._playback_rate = 2.0
+        c._last_event_t = time.monotonic() - 0.5   # age 0.5s x rate 2.0 = +1.0s
+        assert c._extrapolated_pos(10.0) == pytest.approx(11.0, abs=0.15)
+
+
+# ── playback-speed inference (clients rarely report it) ───────────────────────
+
+class TestPlaybackRate:
+    async def test_commits_rate_after_two_agreeing_samples(self):
+        c = _ready_controller()
+        c._is_playing = True
+        await _feed_rate_sample(c, 100.0, 110.0)   # raw 2.0 — first off-rate sample
+        assert c._playback_rate == 1.0             # not committed yet
+        assert c._rate_candidate == 2.0
+        await _feed_rate_sample(c, 110.0, 120.0)   # raw 2.0 agrees — commit
+        assert c._playback_rate == 2.0
+        await _flush_play(c)
+
+    async def test_committed_rate_snaps_to_standard_speed(self):
+        c = _ready_controller()
+        c._is_playing = True
+        # ~1.44x inferred (7.2 / 5.0) twice -> must snap to the standard 1.5x, not drift-lock at 1.44.
+        await _feed_rate_sample(c, 100.0, 107.2)
+        await _feed_rate_sample(c, 107.2, 114.4)
+        assert c._playback_rate == 1.5
+        await _flush_play(c)
+
+    def test_snap_rate_helper(self):
+        assert handy_controller._snap_rate(1.42) == 1.5
+        assert handy_controller._snap_rate(1.92) == 2.0
+        assert handy_controller._snap_rate(0.72) == 0.75
+        assert handy_controller._snap_rate(2.6) == 2.6   # outside tolerance -> kept as-is
+
+    async def test_transient_offrate_then_normal_does_not_commit(self):
+        c = _ready_controller()
+        c._is_playing = True
+        await _feed_rate_sample(c, 100.0, 110.0)   # raw 2.0 — candidate set
+        assert c._rate_candidate == 2.0
+        await _feed_rate_sample(c, 110.0, 115.0)   # raw 1.0 — back to normal, candidate cleared
+        assert c._playback_rate == 1.0
+        assert c._rate_candidate is None
+
+    async def test_out_of_range_advance_is_seek_not_rate(self):
+        c = _ready_controller()
+        c._is_playing = True
+        await _feed_rate_sample(c, 100.0, 300.0)   # raw 40 — discontinuity
+        await _flush_play(c)
+        c._play.assert_awaited_once_with(300.0)
+        assert c._playback_rate == 1.0
+        assert c._rate_candidate is None
+
+    async def test_no_false_seek_at_committed_rate(self):
+        c = _ready_controller()
+        c._is_playing = True
+        c._playback_rate = 2.0
+        await _feed_rate_sample(c, 100.0, 110.0)   # normal 2x advance — must NOT look like a seek
+        await _flush_play(c)
+        c._play.assert_not_awaited()
+
+    async def test_seek_still_detected_at_committed_rate(self):
+        c = _ready_controller()
+        c._is_playing = True
+        c._playback_rate = 2.0
+        await _feed_rate_sample(c, 100.0, 130.0)   # +20s beyond the expected +10s -> seek
+        await _flush_play(c)
+        c._play.assert_awaited_once_with(130.0)
+
+    async def test_v3_hssp_play_includes_rate(self):
+        config.HANDY_APPLICATION_ID = "app-1"
+        c = HandyController("s", make_interactive_scene())
+        c._playback_rate = 1.5
+        c._api_put = AsyncMock()
+        await c._play(5.0)
+        _, body = c._api_put.await_args[0]
+        assert body["playback_rate"] == 1.5
+
+    async def test_v2_hssp_play_has_no_rate(self):
+        config.HANDY_APPLICATION_ID = ""   # v2 legacy
+        c = HandyController("s", make_interactive_scene())
+        c._api_put = AsyncMock()
+        await c._play(5.0)
+        _, body = c._api_put.await_args[0]
+        assert "playback_rate" not in body
+
+    async def test_hsp_play_includes_rate(self):
+        c = _hsp_controller()
+        c._playback_rate = 1.75
+        c._api_put = AsyncMock(return_value={"result": {}})
+        await c._hsp_play(0.0)
+        body = c._api_put.await_args_list[0][0][1]
+        assert body["playback_rate"] == 1.75
+        c._cancel_refill()
 
 
 # ── activation ────────────────────────────────────────────────────────────────

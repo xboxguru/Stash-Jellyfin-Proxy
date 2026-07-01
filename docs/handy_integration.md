@@ -109,13 +109,30 @@ server_time = round(cs_offset + now_ms)                           # Tcest — "n
   (positive pulls the script *ahead* of the video).
 
 **Position extrapolation (`_extrapolated_pos`).** The reported video position was sampled by the
-client a moment before we issue the command (the seek debounce + processing). Since playback is 1×, we
-advance the position by the wall time elapsed since it was sampled (`_last_event_t`), so the device
+client a moment before we issue the command (the seek debounce + processing). We advance the position
+by the wall time elapsed since it was sampled (`_last_event_t`) × the playback rate, so the device
 syncs to where the video is at *issue* time, not sample time. Applied once in `_play()` (covers HSSP
 and HSP); bounded by `MAX_EXTRAPOLATION_S` (2 s) so a stale timestamp can't overshoot. This cancels the
 report→issue lag — mostly the 0.4 s seek debounce. It does **not** correct the client→proxy network leg
 (small on LAN) or the device's physical actuation latency; those residuals are what `funscriptOffset`
 trims.
+
+**Playback speed (`_playback_rate`).** Jellyfin clients rarely report playback speed (bench-confirmed
+our DirectPlay client sends no rate field), so we **infer** it in `on_progress` from how fast the
+position advances vs wall-clock: `raw = Δpos/Δwall`. In-range values (`RATE_MIN`…`RATE_MAX` = 0.1–4×)
+are speed samples; out-of-range is a seek. A rate *change* is committed only after **two consecutive
+agreeing samples** (`RATE_DEADBAND`), so a one-off in-range seek isn't mistaken for a speed change —
+this costs ~1 extra ping (~5–10 s) of lag on a real speed change, which the bench trace shows is the
+natural settling time anyway. The committed value is **snapped to the nearest standard Jellyfin speed**
+(`STANDARD_RATES` 0.25–2.0, within `RATE_SNAP_TOLERANCE`) — inference is only ~±0.1 accurate, and a
+value like 1.42 for a real 1.5× would otherwise lock in and drift ~0.08× forever (the per-ping residual
+stays under the seek threshold, so it's never re-corrected). On commit we re-play at the new rate. Two
+consequences:
+- **Seek detection is rate-aware:** `|Δpos − Δwall × rate| > SEEK_THRESHOLD_S`. Without this, non-1×
+  playback would false-trigger a seek every ping.
+- **The rate is sent to the device** via `playback_rate` in the v3 play body (`hsp/play` always;
+  `hssp/play` on v3 — `1.0` is a no-op so it's always safe to send; v2 legacy omits it), so the device
+  plays the script at the matching speed and stays locked instead of drifting.
 
 ## 6. HSSP path (cloud-hosted script)
 

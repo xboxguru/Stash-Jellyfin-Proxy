@@ -70,10 +70,24 @@ SEEK_THRESHOLD_S = 2.0
 # device, so a burst of seek pings collapses into a single play at the settled position.
 SEEK_DEBOUNCE_S = 0.4
 # When we issue a play, the reported video position was sampled a moment earlier (the debounce wait +
-# processing). Since playback runs at 1x, we advance the position by that elapsed wall time so the
+# processing). We advance the position by that elapsed wall time (scaled by the playback rate) so the
 # device syncs to where the video is *now*, not where it was sampled — cancels the report→issue lag.
 # Capped so a stale/anomalous timestamp can't overshoot.
 MAX_EXTRAPOLATION_S = 2.0
+
+# Playback-speed inference. Most clients don't report speed, so we derive it from how fast the
+# reported position advances vs wall-clock (bench-confirmed accurate). A plausible in-range ratio is
+# a rate sample; anything outside RATE_MIN..RATE_MAX is a seek/discontinuity. A rate *change* is only
+# committed after two consecutive agreeing samples, so a one-off in-range seek isn't mistaken for it.
+RATE_MIN, RATE_MAX = 0.1, 4.0
+RATE_DEADBAND = 0.2          # rates within this of each other count as "the same"
+MIN_RATE_SAMPLE_S = 1.5      # need at least this much wall gap between pings to estimate a rate
+# Jellyfin exposes a fixed set of playback speeds. Inference is only accurate to ~±0.1, so we snap the
+# committed rate to the nearest standard speed when close — otherwise a value like 1.42 (for a real
+# 1.5x) locks in and drifts ~0.08x forever (per-ping residual stays under the seek threshold, so it's
+# never re-corrected). A genuinely non-standard rate (outside the tolerance) is used as-is.
+STANDARD_RATES = (0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0)
+RATE_SNAP_TOLERANCE = 0.15
 # Number of /servertime samples used to estimate the client<->Handy clock offset (cs_offset).
 OFFSET_SAMPLES = 5
 # Grace period after hssp/setup for the device to download the script before the first play.
@@ -131,6 +145,13 @@ def _client() -> httpx.AsyncClient:
 
 def _now_ms() -> float:
     return time.time() * 1000.0
+
+
+def _snap_rate(rate: float) -> float:
+    """Snap an inferred playback rate to the nearest standard Jellyfin speed when within tolerance;
+    otherwise return it rounded (a genuinely non-standard speed)."""
+    nearest = min(STANDARD_RATES, key=lambda s: abs(s - rate))
+    return nearest if abs(nearest - rate) <= RATE_SNAP_TOLERANCE else round(rate, 2)
 
 
 def _resolve_use_hsp(sync_mode: str, cfg: Dict[str, Any]) -> bool:
@@ -294,6 +315,8 @@ class HandyController:
 
         self._is_playing = False
         self._playback_started = False   # True once the first play event has been handled
+        self._playback_rate: float = 1.0                 # inferred client playback speed
+        self._rate_candidate: Optional[float] = None     # unconfirmed pending rate (needs 2nd sample)
         self._last_position_s: Optional[float] = None
         self._last_event_t: Optional[float] = None
         self._pending_play_pos: Optional[float] = None
@@ -506,19 +529,48 @@ class HandyController:
                     self._schedule_play(position_seconds)
                     return
 
-                # Playing: infer a seek when reported position diverges from wall-clock. Debounced so
-                # a scrub (many rapid pings) collapses into one play at the settled position.
+                # Playing. Two things per ping, both debounced (a scrub collapses to one re-play):
+                #   1) infer the client playback rate from Δpos/Δwall (clients rarely report it);
+                #   2) infer a seek when the position jumps beyond what the current rate explains.
                 if prev_pos is not None and prev_t is not None:
                     d_pos = position_seconds - prev_pos
                     d_wall = now - prev_t
-                    if abs(d_pos - d_wall) > SEEK_THRESHOLD_S:
+                    if self._update_rate_and_maybe_replay(d_pos, d_wall, position_seconds):
+                        return
+                    # Rate-aware seek: divergence from the expected (rate-scaled) advance.
+                    if abs(d_pos - d_wall * self._playback_rate) > SEEK_THRESHOLD_S:
                         logger.info(
                             f"[handy] seek detected {prev_pos:.1f}->{position_seconds:.1f}s "
-                            f"(Δpos={d_pos:.1f} Δwall={d_wall:.1f}) -> re-play (debounced), session={self.session_id}"
+                            f"(Δpos={d_pos:.1f} Δwall={d_wall:.1f} rate={self._playback_rate}) -> "
+                            f"re-play (debounced) dev={self.label} session={self.session_id}"
                         )
                         self._schedule_play(position_seconds)
             except Exception as e:
                 logger.debug(f"[handy] progress handling error for session {self.session_id}: {e}")
+
+    def _update_rate_and_maybe_replay(self, d_pos: float, d_wall: float, position_seconds: float) -> bool:
+        """Feed one progress interval into the playback-rate estimator. Commits a rate change (and
+        re-plays at the new rate) only after two consecutive agreeing off-rate samples, so a one-off
+        in-range seek isn't mistaken for a speed change. Returns True if it issued the re-play (caller
+        then skips its own seek check). Out-of-range advances are left for the caller's seek check.
+        Caller holds self.lock."""
+        if d_wall < MIN_RATE_SAMPLE_S:
+            return False
+        raw = d_pos / d_wall
+        if not (RATE_MIN <= raw <= RATE_MAX):
+            self._rate_candidate = None      # discontinuity (seek) — not a plausible speed
+            return False
+        if abs(raw - self._playback_rate) <= RATE_DEADBAND:
+            self._rate_candidate = None      # steady at the current rate
+            return False
+        if self._rate_candidate is not None and abs(raw - self._rate_candidate) <= RATE_DEADBAND:
+            self._playback_rate = _snap_rate(raw)   # settled sample, snapped to the nearest standard speed
+            self._rate_candidate = None
+            logger.info(f"[handy] playback rate -> {self._playback_rate}x dev={self.label} session={self.session_id}")
+            self._schedule_play(position_seconds)
+            return True
+        self._rate_candidate = raw           # first off-rate sample (unconfirmed)
+        return False
 
     # --- debounced play scheduling --------------------------------------
 
@@ -565,16 +617,17 @@ class HandyController:
     # --- Handy command primitives (v3) ----------------------------------
 
     def _extrapolated_pos(self, position_seconds: float) -> float:
-        """Advance the reported position by the wall time elapsed since it was sampled, so the play
-        command reflects where the video is at *issue* time rather than at sample time. This cancels
-        the report→issue delay (mainly the seek debounce). Does not correct the client→proxy network
-        leg — that residual is left for a future manual offset knob. Bounded by MAX_EXTRAPOLATION_S."""
+        """Advance the reported position by the wall time elapsed since it was sampled (scaled by the
+        playback rate — at 2x the video moved 2 media-seconds per wall-second), so the play command
+        reflects where the video is at *issue* time rather than at sample time. This cancels the
+        report→issue delay (mainly the seek debounce). Does not correct the client→proxy network leg —
+        that residual is left for a future manual offset knob. Bounded by MAX_EXTRAPOLATION_S."""
         if self._last_event_t is None:
             return position_seconds
         age = time.monotonic() - self._last_event_t
         if age <= 0:
             return position_seconds
-        return position_seconds + min(age, MAX_EXTRAPOLATION_S)
+        return position_seconds + min(age, MAX_EXTRAPOLATION_S) * self._playback_rate
 
     async def _play(self, position_seconds: float):
         position_seconds = self._extrapolated_pos(position_seconds)
@@ -585,7 +638,9 @@ class HandyController:
         start_time = round(position_seconds * 1000 + self.script_offset_ms)
         server_time = round(self.estimated_offset_ms + _now_ms())
         if self.use_v3:
-            body = {"start_time": start_time, "server_time": server_time}
+            # playback_rate lets the device match non-1x video speed (v3 synced-play contract). At 1.0
+            # it's a no-op, so it's always safe to send; v2 (legacy) has no rate field.
+            body = {"start_time": start_time, "server_time": server_time, "playback_rate": self._playback_rate}
         else:
             body = {"startTime": start_time, "serverTime": server_time}
         result = await self._api_put("hssp/play", body)
@@ -668,6 +723,7 @@ class HandyController:
         body = {
             "start_time": start_time,
             "server_time": server_time,
+            "playback_rate": self._playback_rate,   # match non-1x video speed (1.0 = normal)
             "add": self._hsp_add_body(batch, flush=True),
         }
         result = await self._api_put("hsp/play", body)
