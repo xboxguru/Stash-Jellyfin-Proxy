@@ -373,42 +373,12 @@ class TestFanOut:
         assert "s5" not in handy_controller._groups
 
 
-# ── LAN/direct funscript-serving endpoint ─────────────────────────────────────
+# ── shared fake request (device/config endpoints) ─────────────────────────────
 
 class _FakeRequest:
     def __init__(self, scene_id, query=""):
         self.path_params = {"scene_id": scene_id}
         self.query_params = QueryParams(query)
-
-
-class TestServeFunscriptEndpoint:
-    async def test_serves_raw_json_by_default(self):
-        config.ENABLE_HANDY_SYNC = True
-        fs = {"actions": [{"at": 0, "pos": 0}, {"at": 100, "pos": 90}]}
-        with patch("api.handy_controller._fetch_funscript", new=AsyncMock(return_value=fs)):
-            resp = await handy_controller.endpoint_funscript(_FakeRequest("751"))
-        assert resp.status_code == 200
-        assert json.loads(bytes(resp.body)) == fs
-
-    async def test_serves_csv_when_requested(self):
-        config.ENABLE_HANDY_SYNC = True
-        fs = {"actions": [{"at": 0, "pos": 0}, {"at": 100, "pos": 90}]}
-        with patch("api.handy_controller._fetch_funscript", new=AsyncMock(return_value=fs)):
-            resp = await handy_controller.endpoint_funscript(_FakeRequest("751", "format=csv"))
-        assert resp.status_code == 200
-        assert resp.media_type == "text/csv"
-        assert bytes(resp.body).decode() == "0,0\r\n100,90\r\n"
-
-    async def test_404_when_disabled(self):
-        config.ENABLE_HANDY_SYNC = False
-        resp = await handy_controller.endpoint_funscript(_FakeRequest("751"))
-        assert resp.status_code == 404
-
-    async def test_404_when_funscript_unavailable(self):
-        config.ENABLE_HANDY_SYNC = True
-        with patch("api.handy_controller._fetch_funscript", new=AsyncMock(return_value=None)):
-            resp = await handy_controller.endpoint_funscript(_FakeRequest("751"))
-        assert resp.status_code == 404
 
 
 # ── prewarm + upload-URL cache ────────────────────────────────────────────────
@@ -934,6 +904,30 @@ class TestHandySessionGroup:
         assert any(d["key"] == "stashkey" for d in handy_devices.list_devices())
         group._cancel_abandon_timeout()
 
+    async def test_slow_device_times_out_and_is_isolated(self):
+        handy_devices.add_device({"key": "k1", "label": "Slow"})
+        handy_devices.add_device({"key": "k2", "label": "Fast"})
+        group = HandySessionGroup("sess", make_interactive_scene())
+        fast_ran = []
+
+        async def maybe_slow(self, arm=True):
+            if self.label == "Slow":
+                await asyncio.sleep(1)   # exceeds the (lowered) per-device op timeout
+            else:
+                fast_ran.append(self.label)
+
+        orig = handy_controller.DEVICE_OP_TIMEOUT_S
+        handy_controller.DEVICE_OP_TIMEOUT_S = 0.05
+        try:
+            with patch.object(HandyController, "preactivate", new=maybe_slow), _patch_seed_cfg():
+                await group.preactivate()
+        finally:
+            handy_controller.DEVICE_OP_TIMEOUT_S = orig
+        slow = next(c for c in group.controllers if c.label == "Slow")
+        assert slow.state == "failed"      # timed out -> marked failed, not left hanging
+        assert fast_ran == ["Fast"]        # the healthy device still ran
+        group._cancel_abandon_timeout()
+
 
 class TestDeviceEndpoints:
     async def test_status_probes_only_enabled(self):
@@ -950,3 +944,12 @@ class TestDeviceEndpoints:
             resp = await handy_controller.endpoint_devices_list(_FakeRequest(""))
         data = json.loads(bytes(resp.body))
         assert any(d["key"] == "stashk" for d in data["devices"])
+
+    async def test_status_noop_when_sync_disabled(self):
+        config.ENABLE_HANDY_SYNC = False
+        handy_devices.add_device({"key": "k1", "label": "A"})
+        with patch.object(handy_controller, "_probe_connected", new=AsyncMock(return_value=True)) as m:
+            resp = await handy_controller.endpoint_devices_status(_FakeRequest(""))
+        data = json.loads(bytes(resp.body))
+        assert data["status"] == [] and data.get("disabled") is True
+        m.assert_not_awaited()   # no handyfeeling traffic while disabled

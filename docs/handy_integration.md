@@ -122,7 +122,7 @@ trims.
 `_prepare_hssp()`:
 1. `_prepare_upload_url(scene_id, funscript_url)` — fetch the funscript from Stash (with our API key),
    convert to Handy CSV (`funscript_to_csv`: `at,pos\r\n` rows, honors `inverted`, clamps 0–100), POST
-   to `…/api/sync/upload?local=true`, get a content-hash hosting URL back. Cached per scene
+   to `…/api/sync/upload`, get a content-hash hosting URL back. Cached per scene
    (`SCRIPT_URL_TTL_S` = 1 h); `prewarm()` populates it eagerly on PlaybackInfo.
 2. `_set_mode(MODE_HSSP)` (`/mode2` on v3, `/mode` on v2).
 3. `_hssp_setup(url)` → `hssp/setup {url}`; then a `SETUP_SETTLE_S` (0.25 s) wait for the device to
@@ -132,9 +132,10 @@ Play/stop: `_play` → `hssp/play {start_time, server_time}` (snake_case v3 / ca
 `hssp/stop`.
 
 > HSSP on FW 4.2.x **only** accepts publicly-hosted (cloud) URLs — private-network URLs return
-> `HTTP 400 UNSUPPORTED_URL` (for Stash too). The LAN-serve endpoint
-> `GET /handy/scene/{scene_id}/funscript` ([routes.py](../routes.py)) is retained for a future
-> publicly-reachable deployment but is **not** used by the current HSSP path.
+> `HTTP 400 UNSUPPORTED_URL` (for Stash too). There is therefore **no LAN-direct funscript path**: the
+> device cannot fetch a script from the proxy over the LAN. HSSP always uploads to handyfeeling's
+> hosting (which returns a `handyfeeling.com/api/hosting/...` cloud URL); HSP streams points via the
+> cloud API.
 
 ## 7. HSP path (live point-streaming, v3-only)
 
@@ -236,7 +237,10 @@ The proxy drives **N Handy devices at once** for a single playing scene. Each de
 mutually in sync because each is independently synced to the same video timeline (§5). A
 `HandySessionGroup` (keyed by `PlaySessionId`) owns the per-session list of controllers and fans every
 lifecycle action (`preactivate`/`begin_playback`/`on_progress`/`teardown`) out to them **concurrently
-and with per-device isolation** — one device failing to connect never affects the others or video.
+and with per-device isolation** — one device failing to connect never affects the others or video. Each
+per-device op is bounded by `DEVICE_OP_TIMEOUT_S` (8 s): a device that connects then hangs (each HTTP
+call has the 10 s timeout, and prepare makes several) can't stall the group — it's cancelled, marked
+failed, and the healthy devices proceed.
 
 **Device list config** (JSON at `LOG_DIR/handy_devices.json`, in-memory `_devices`, atomic
 tmp+replace — mirrors LiveTV's `channels.json`). Each device:
@@ -270,12 +274,12 @@ infrequent.
 
 | File | Role |
 |---|---|
-| [api/handy_controller.py](../api/handy_controller.py) | `HandyController` (per-device driver) + `HandySessionGroup` (per-session fan-out), HSSP + HSP primitives, Handy API client, funscript fetch/convert, fire-and-forget fan-out, device CRUD/status + LAN-serve endpoints. |
+| [api/handy_controller.py](../api/handy_controller.py) | `HandyController` (per-device driver) + `HandySessionGroup` (per-session fan-out), HSSP + HSP primitives, Handy API client, funscript fetch/convert, fire-and-forget fan-out, device CRUD/status endpoints. |
 | [api/handy_devices.py](../api/handy_devices.py) | Device registry: JSON store (`handy_devices.json`), CRUD, `enabled_devices()`, `ensure_stash_seed()`. |
 | [api/userdata_routes.py](../api/userdata_routes.py) | `endpoint_sessions_playing` → `notify_playing`; `endpoint_sessions_stopped` → `notify_stopped`. |
 | [api/stream_routes.py](../api/stream_routes.py) | PlaybackInfo → `prewarm(scene)`; stream request `startTimeTicks` → `note_start_position`. |
 | [core/stash_client.py](../core/stash_client.py) | `interactive` + `paths.funscript` on scene fields; `get_stash_interface_config()`. |
-| [routes.py](../routes.py) | `/api/handy/devices*` CRUD + status; `GET /handy/scene/{scene_id}/funscript` (LAN-serve; retained, not on the HSSP path). |
+| [routes.py](../routes.py) | `/api/handy/devices*` CRUD + status routes. |
 | [config.py](../config.py) | The six global `ENABLE_HANDY_SYNC` / `HANDY_*` settings (per-device settings live in `handy_devices.json`). |
 | [templates/components/tab_settings.html](../templates/components/tab_settings.html) | **Handy** settings tab: globals + device rows (status glow, add/edit/delete) + management JS. |
 
@@ -298,7 +302,10 @@ even on rejection — a 200 alone is not success; `_parse` checks the envelope).
   handyfeeling / Stash call is mocked. Covers funscript→CSV/points conversion, event→command mapping
   (play/pause/resume/seek/scrub-coalesce/steady-state), sync-offset + position extrapolation,
   activation success/failure, fan-out gating + isolation, protocol/API-version selection, the HSP
-  play/seed/refill/teardown flow, and the LAN-serve endpoint.
+  play/seed/refill/teardown flow, per-device binding, the session group (fan-out, isolation, timeout),
+  and the device CRUD/status endpoints.
+- [tests/test_handy_devices.py](../tests/test_handy_devices.py) — device registry (CRUD, coercion,
+  Stash seed, persistence).
 - `TestHandyFanOut` in [tests/test_userdata_routes.py](../tests/test_userdata_routes.py) — route-level
   fan-out.
 
@@ -309,5 +316,6 @@ even on rejection — a 200 alone is not success; `_parse` checks the envelope).
   re-sync is not implemented.
 - **No cloud-free transport.** All control is cloud-relayed (§2); Bluetooth LE / Intiface would be a
   separate architecture and is not implemented.
-- **Device connection status is polled, not pushed** (tab-open + 30 s), sharing the handyfeeling rate
-  budget — so the glow can lag a device power-cycle by up to the poll interval.
+- **Device connection status is polled, not pushed** (tab-open + 30 s; skipped entirely while Handy
+  sync is disabled), sharing the handyfeeling rate budget — so the glow can lag a device power-cycle by
+  up to the poll interval.

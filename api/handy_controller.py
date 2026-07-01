@@ -1,8 +1,10 @@
 """Feature 3 — Interactive Toy (Handy) Sync.
 
-A per-PlaySessionId backend controller that drives a connected Handy device in sync with an
-interactive scene's funscript, using the Jellyfin playback-reporting events the proxy already
-receives (/sessions/playing[/progress], /sessions/playing/stopped in api/userdata_routes.py).
+Drives one or more connected Handy devices in sync with an interactive scene's funscript, using the
+Jellyfin playback-reporting events the proxy already receives (/sessions/playing[/progress],
+/sessions/playing/stopped in api/userdata_routes.py). One `HandyController` per device; a
+`HandySessionGroup` (keyed by PlaySessionId) fans lifecycle events out to all enabled devices. Device
+registry lives in api/handy_devices.py.
 
 Handy REST API. Uses **v3** (handy-rest/v3) when `HANDY_APPLICATION_ID` is configured — sent as the
 `X-Api-Key` header — otherwise falls back to **v2** (device connection key only, as Stash uses).
@@ -10,16 +12,16 @@ Lifecycle:
     connect probe -> estimate server-time offset -> mode(HSSP) -> hssp/setup(url)
     -> hssp/play(start_time, server_time) / hssp/stop
 
-Protocol is chosen per session (see `_resolve_use_hsp`):
-  - HSSP (cloud-hosted script URL) — the stable path.
-  - HSP  (local point-streaming)  — the beta path (Phase B; v3-only). Streams the funscript as live
-    {t,x} points instead of uploading it as a hosted file: no persistent cloud-hosted copy and no
-    512 KB cap. NOTE: commands are still relayed through the Handy cloud (handyfeeling.com) to reach
-    the device; "local" here means the script isn't hosted as a file, NOT a device-LAN-only path.
-The proxy setting `HANDY_SYNC_MODE` (auto|hosted|local) overrides Stash's `useStashHostedFunscript`.
-See PLANNED_FEATURES §3.11 for the v2/v3 auth split.
+Protocol is chosen per device (see `_resolve_use_hsp`, driven by the device's sync_mode):
+  - HSSP (cloud-hosted script URL) — uploads the funscript to handyfeeling hosting.
+  - HSP  (local point-streaming, v3-only) — streams the funscript as live {t,x} points instead of a
+    hosted file: no persistent cloud copy, no 512 KB cap. NOTE: commands are still relayed through the
+    Handy cloud (handyfeeling.com) to reach the device; "local" means the script isn't hosted as a
+    file, NOT a device-LAN-only path (there is no LAN-direct path on FW 4.2.x).
 
-ISOLATION CONTRACT (mandatory, see PLANNED_FEATURES §3.1):
+Full design/reference: docs/handy_integration.md.
+
+ISOLATION CONTRACT (mandatory — see docs/handy_integration.md §8):
 The controller is a best-effort, fully isolated side-channel. Every public entry point is a
 fire-and-forget scheduler and every Handy/network call is wrapped so an exception can NEVER reach
 the /sessions/playing response or affect video playback. On any activation failure we log once,
@@ -34,7 +36,7 @@ from typing import Any, Dict, Optional
 
 import httpx
 from starlette.requests import Request
-from starlette.responses import JSONResponse, PlainTextResponse, Response
+from starlette.responses import JSONResponse, Response
 
 import config
 from api import handy_devices
@@ -45,10 +47,13 @@ logger = logging.getLogger(__name__)
 # Handy REST API. v3 (handy-rest/v3) needs an ApplicationID (sent as X-Api-Key) on device
 # endpoints; when `HANDY_APPLICATION_ID` is configured we use v3, otherwise we fall back to v2
 # (which authenticates with only the device connection key — the same thing Stash uses). HSP
-# (local streaming) is v3-only. See PLANNED_FEATURES §3.11.
+# (local streaming) is v3-only. See docs/handy_integration.md §3.
 HANDY_API_BASE_V2 = "https://www.handyfeeling.com/api/handy/v2"
 HANDY_API_BASE_V3 = "https://www.handyfeeling.com/api/handy-rest/v3"
-HANDY_UPLOAD_URL = "https://www.handyfeeling.com/api/sync/upload?local=true"
+# handyfeeling hosting upload for HSSP. Returns a content-hash cloud download URL. The old
+# `?local=true` query flag was a guess at enabling LAN/local serving and was never confirmed to do
+# anything — dropped; verify HSSP still uploads/plays on the bench.
+HANDY_UPLOAD_URL = "https://www.handyfeeling.com/api/sync/upload"
 
 # Device mode enum: HAMP=0, HSSP=1, HDSP=2, MAINTENANCE=3 (v3 also adds HSP=4).
 MODE_HSSP = 1
@@ -79,6 +84,12 @@ SCRIPT_URL_TTL_S = 3600
 # If a session is pre-activated (PlaybackInfo) but never actually plays within this window, tear the
 # controller down so a browse-but-don't-play doesn't leave the device claimed.
 PREACTIVATION_ABANDON_S = 45
+# Upper bound on a single per-device lifecycle op (prepare/play/teardown) inside a session group's
+# fan-out. Bounds the group lock a slow/black-holing device can hold: a legit prepare is ~2 s (connect
+# + 5×servertime + setup), but a device that connects then hangs could otherwise stall the whole
+# session (each network call has the 10 s HTTP timeout). On timeout we mark that device failed and
+# leave the others untouched.
+DEVICE_OP_TIMEOUT_S = 8.0
 
 # --- HSP (local point-streaming) buffer tuning (Phase B) ------------------------
 # The HSP buffer is measured in *seconds of motion*, not point count, so the safety margin is the
@@ -325,13 +336,13 @@ class HandyController:
             if use_hsp and not self.use_v3:
                 logger.warning(
                     f"[handy] HSP (local streaming) requires the v3 API (set HANDY_APPLICATION_ID); "
-                    f"disabling sync for session {self.session_id}"
+                    f"disabling sync for dev={self.label} session {self.session_id}"
                 )
                 self.state = "failed"
                 return
 
             if not await self._get_connected():
-                logger.info(f"[handy] device not connected (key ...{self.key[-4:]}); disabling sync for session {self.session_id}")
+                logger.info(f"[handy] device not connected (dev={self.label} key ...{self.key[-4:]}); disabling sync for session {self.session_id}")
                 self.state = "failed"
                 return
 
@@ -357,7 +368,7 @@ class HandyController:
             self.state = "ready"
             proto = "HSP" if use_hsp else "HSSP"
             logger.info(
-                f"[handy] prepared ({proto} {'v3' if self.use_v3 else 'v2'}) session={self.session_id} "
+                f"[handy] prepared ({proto} {'v3' if self.use_v3 else 'v2'}) dev={self.label} session={self.session_id} "
                 f"scene={self.scene_id} cs_offset={self.estimated_offset_ms:.0f}ms "
                 f"script_offset={self.script_offset_ms}ms"
                 + (f" points={len(self._hsp_points)} max_points={self._hsp_max_points}" if use_hsp else "")
@@ -428,7 +439,7 @@ class HandyController:
             self._last_position_s = initial_pos
             self._last_event_t = time.monotonic()
             logger.info(
-                f"[handy] begin playback session={self.session_id} @ {initial_pos:.1f}s "
+                f"[handy] begin playback dev={self.label} session={self.session_id} @ {initial_pos:.1f}s "
                 f"(reported {position_seconds:.1f}s) paused={is_paused}"
             )
             if not is_paused:
@@ -549,7 +560,7 @@ class HandyController:
             finally:
                 self.state = "closed"
                 _start_pos_by_session.pop(self.session_id, None)
-                logger.info(f"[handy] torn down session={self.session_id} scene={self.scene_id}")
+                logger.info(f"[handy] torn down dev={self.label} session={self.session_id} scene={self.scene_id}")
 
     # --- Handy command primitives (v3) ----------------------------------
 
@@ -579,15 +590,15 @@ class HandyController:
             body = {"startTime": start_time, "serverTime": server_time}
         result = await self._api_put("hssp/play", body)
         if result is None:
-            logger.warning(f"[handy] play@{start_time}ms NOT accepted by device, session={self.session_id}")
+            logger.warning(f"[handy] play@{start_time}ms NOT accepted by dev={self.label}, session={self.session_id}")
             return
         self._is_playing = True
-        logger.info(f"[handy] play@{start_time}ms (server_time={server_time}) session={self.session_id}")
+        logger.info(f"[handy] play@{start_time}ms (server_time={server_time}) dev={self.label} session={self.session_id}")
 
     async def _stop(self):
         await self._api_put("hsp/stop" if self.use_hsp else "hssp/stop", {})
         self._is_playing = False
-        logger.info(f"[handy] stop session={self.session_id}")
+        logger.info(f"[handy] stop dev={self.label} session={self.session_id}")
 
     async def _set_mode(self, mode_value: int) -> bool:
         # v3 uses /mode2 (needs the ApplicationID); v2 uses /mode.
@@ -661,11 +672,11 @@ class HandyController:
         }
         result = await self._api_put("hsp/play", body)
         if result is None:
-            logger.warning(f"[handy] hsp play@{start_time}ms NOT accepted by device, session={self.session_id}")
+            logger.warning(f"[handy] hsp play@{start_time}ms NOT accepted by dev={self.label}, session={self.session_id}")
             return
         self._is_playing = True
         logger.info(
-            f"[handy] hsp play@{start_time}ms (server_time={server_time}) seeded {len(batch)} points "
+            f"[handy] hsp play@{start_time}ms (server_time={server_time}) dev={self.label} seeded {len(batch)} points "
             f"from index {idx} session={self.session_id}"
         )
         # Top the fresh buffer up to the seed floor (MIN seconds ahead of the play head) so we start
@@ -892,7 +903,13 @@ class HandySessionGroup:
     async def _fan(self, method: str, *args):
         async def run(c: "HandyController"):
             try:
-                await getattr(c, method)(*args)
+                await asyncio.wait_for(getattr(c, method)(*args), timeout=DEVICE_OP_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                c.state = "failed"
+                logger.warning(
+                    f"[handy] {method} timed out (>{DEVICE_OP_TIMEOUT_S:.0f}s) for dev={c.label} "
+                    f"session={self.session_id} — device marked failed; other devices unaffected"
+                )
             except Exception as e:
                 logger.debug(f"[handy] {method} error dev={c.label} session={self.session_id}: {e}")
         await asyncio.gather(*(run(c) for c in self.controllers), return_exceptions=True)
@@ -1096,7 +1113,10 @@ async def endpoint_devices_delete(request: Request) -> Response:
 
 async def endpoint_devices_status(request: Request) -> Response:
     """Probe every enabled device's Handy connection concurrently for the GUI status glow. Shares the
-    handyfeeling rate budget, so the GUI polls this infrequently (tab open + every 30 s)."""
+    handyfeeling rate budget, so the GUI polls this infrequently (tab open + every 30 s). No-op (no
+    handyfeeling traffic) while the master toggle is off — the GUI leaves the dots neutral."""
+    if not getattr(config, "ENABLE_HANDY_SYNC", False):
+        return JSONResponse({"status": [], "disabled": True})
     devices = handy_devices.enabled_devices()
     results = await asyncio.gather(*(_probe_connected(d) for d in devices), return_exceptions=True)
     status = [
@@ -1104,24 +1124,3 @@ async def endpoint_devices_status(request: Request) -> Response:
         for d, r in zip(devices, results)
     ]
     return JSONResponse({"status": status})
-
-
-# --- LAN funscript serving (retained for a future publicly-reachable deployment) -----------
-
-async def endpoint_funscript(request: Request) -> Response:
-    """Serves a scene's funscript for a Handy to fetch directly. NOTE: on FW 4.2.x, HSSP no longer
-    accepts private-network URLs, so this is not used by the current HSSP path; it is retained for a
-    future publicly-reachable deployment. Re-fetches from Stash with our API key.
-
-    Default response is raw .funscript JSON; `?format=csv` serves Handy CSV."""
-    if not getattr(config, "ENABLE_HANDY_SYNC", False):
-        return PlainTextResponse("Handy sync disabled", status_code=404)
-    scene_id = request.path_params.get("scene_id", "")
-    fmt = request.query_params.get("format", "json").lower()
-    funscript_url = f"{config.get_stash_base()}/scene/{scene_id}/funscript"
-    funscript = await _fetch_funscript(funscript_url)
-    if not funscript:
-        return PlainTextResponse("funscript unavailable", status_code=404)
-    if fmt == "csv":
-        return PlainTextResponse(funscript_to_csv(funscript), media_type="text/csv")
-    return JSONResponse(funscript)
