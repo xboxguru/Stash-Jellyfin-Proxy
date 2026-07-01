@@ -28,13 +28,13 @@ def cache_log(func, *args, **kwargs):
 
 # Lightweight fields for fast library browsing (Grid View)
 BASE_SCENE_FIELDS = """
-    id title code date details o_counter play_count rating100 created_at organized resume_time
+    id title code date details o_counter play_count rating100 created_at organized resume_time interactive
     files { path duration video_codec audio_codec frame_rate bit_rate width height format size basename }
     studio { id name image_path }
     tags { name }
     performers { name id image_path }
     captions { language_code caption_type }
-    paths { caption }
+    paths { caption funscript }
 """
 
 # Heavy fields including Markers for individual scene details and playback
@@ -138,6 +138,19 @@ async def fetch_scenes(filter_args: Dict[str, Any], page: int = 1, per_page: int
     logger.debug(f"fetch_scenes scene_filter: {sf}")
     data = await call_graphql(query, {"filter": filter_args, "scene_filter": sf})
     return data.get("findScenes") if data else {"count": 0, "scenes": []}
+
+async def get_stash_interface_config() -> dict:
+    """Reads Handy-relevant interface settings from Stash (handyKey, funscriptOffset,
+    useStashHostedFunscript). Used by the Handy controller (Feature 3). Returns {} on failure.
+
+    Intentionally NOT cached: it's read at most a couple of times per playback (prewarm +
+    activation), and caching made mode toggles in Stash take up to 5 min / a restart to apply."""
+    data = await call_graphql(
+        "query { configuration { interface { handyKey funscriptOffset useStashHostedFunscript } } }"
+    )
+    if data and data.get("configuration", {}).get("interface"):
+        return data["configuration"]["interface"]
+    return {}
 
 @cached(ttl=60)
 async def get_stash_stats() -> dict:

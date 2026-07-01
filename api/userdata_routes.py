@@ -6,6 +6,7 @@ from starlette.background import BackgroundTasks
 import config
 from core import stash_client
 from core.jellyfin_mapper import decode_id
+from api import handy_controller
 import state
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,7 @@ async def endpoint_sessions_playing(request: Request):
         data = await request.json()
         session_id = data.get("PlaySessionId") or data.get("SessionId") or "unknown_session"
         item_id = decode_id(data.get("ItemId") or data.get("Item", {}).get("Id", ""))
-        
+
         playback_ticks = float(data.get("PlaybackPositionTicks") or data.get("PositionTicks") or 0)
         runtime_ticks = float(data.get("RunTimeTicks") or data.get("Item", {}).get("RunTimeTicks") or 0)
         title = data.get("Item", {}).get("Name", "Unknown Scene")
@@ -52,7 +53,8 @@ async def endpoint_sessions_playing(request: Request):
         
         client_ip, client_type = _get_client_info(request, data.get("Client", ""))
         user = data.get("UserId") or getattr(config, "SJS_USER", "Admin") or "Admin"
-        
+
+        scene = None
         if item_id.startswith("scene-"):
             raw_id = item_id.replace("scene-", "")
             scene = await stash_client.get_scene(raw_id)
@@ -75,12 +77,18 @@ async def endpoint_sessions_playing(request: Request):
             logger.debug(f"Stream progress update: {session_id} @ {playback_ticks} ticks")
             stream["last_ticks"] = max(stream.get("last_ticks", 0), playback_ticks)
             stream["last_ping"] = int(time.time())
-            if not stream.get("runtime_ticks") and runtime_ticks > 0: 
+            if not stream.get("runtime_ticks") and runtime_ticks > 0:
                 stream["runtime_ticks"] = runtime_ticks
 
-    except Exception as e: 
+        # Feature 3 — fan out to the Handy controller (best-effort, fire-and-forget; never blocks
+        # this 204 or affects playback). No-op unless ENABLE_HANDY_SYNC and the scene is interactive.
+        handy_controller.notify_playing(
+            session_id, scene, playback_ticks / 10000000.0, bool(data.get("IsPaused", False))
+        )
+
+    except Exception as e:
         logger.error(f"Error parsing playing session: {e}")
-        
+
     return JSONResponse({}, status_code=204)
 
 def _evaluate_playback_action(playback_ticks: float, runtime_ticks: float) -> tuple[bool, float]:
@@ -100,7 +108,10 @@ async def endpoint_sessions_stopped(request: Request):
     try:
         data = await request.json()
         session_id = data.get("PlaySessionId") or data.get("SessionId") or "unknown_session"
-        
+
+        # Feature 3 — stop the Handy and tear down its controller (best-effort, fire-and-forget).
+        handy_controller.notify_stopped(session_id)
+
         if hasattr(state, "active_streams"):
             stream = next((s for s in state.active_streams if s.get("id") == session_id), None)
             if stream:

@@ -1,6 +1,7 @@
 import os
 import sys
 import uuid
+import socket
 import logging
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,9 @@ FFMPEG_PATH = "ffmpeg"
 LIVE_TV_IDLE_TIMEOUT = 60
 LIVE_TV_HLS_LIST_SIZE = 15
 LIVE_TV_SEG_RETENTION = 30
+ENABLE_HANDY_SYNC = False
+HANDY_SYNC_MODE = "auto"  # auto (follow Stash) | hosted (force HSSP/cloud) | local (force HSP/LAN)
+HANDY_APPLICATION_ID = ""  # Handy REST API v3 ApplicationID (X-Api-Key); empty = fall back to v2 API
 
 config_defined_keys = set()
 env_overrides = []
@@ -92,6 +96,35 @@ def normalize_path(path, default="/graphql"):
 def get_stash_base():
     """Returns the Stash URL stripped of trailing slashes."""
     return getattr(sys.modules[__name__], "STASH_URL", "http://localhost:9999").rstrip('/')
+
+_cached_proxy_ip = None
+
+def _detect_local_ip():
+    """Best-effort LAN-reachable IP for this proxy: configured HOST_IP, else the source IP used
+    to reach the internet, else the bind address. Cached after first call."""
+    global _cached_proxy_ip
+    if _cached_proxy_ip:
+        return _cached_proxy_ip
+    ip = getattr(sys.modules[__name__], "HOST_IP", "").strip()
+    if not ip:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(1.0)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+        except Exception:
+            ip = getattr(sys.modules[__name__], "PROXY_BIND", "127.0.0.1")
+            if ip == "0.0.0.0":
+                ip = "127.0.0.1"
+    _cached_proxy_ip = ip
+    return ip
+
+def get_proxy_base():
+    """Returns the proxy's LAN-reachable base URL (http://<ip>:<PROXY_PORT>), for handing
+    device-reachable URLs (e.g. the Handy funscript URL in LAN/direct mode) to external devices."""
+    port = getattr(sys.modules[__name__], "PROXY_PORT", 8096)
+    return f"http://{_detect_local_ip()}:{port}"
 
 # --- 2. DYNAMIC SAVE FUNCTION ---
 def save_config():
@@ -114,6 +147,7 @@ def save_config():
         "ENABLE_SHORTS_CHANNEL", "SHORTS_MAX_MINUTES",
         "FFMPEG_PATH", "LIVE_TV_IDLE_TIMEOUT",
         "LIVE_TV_HLS_LIST_SIZE", "LIVE_TV_SEG_RETENTION",
+        "ENABLE_HANDY_SYNC", "HANDY_SYNC_MODE", "HANDY_APPLICATION_ID",
     ]
 
     try:
@@ -147,7 +181,7 @@ def _coerce_config_value(key, val):
     elif key in ["ENABLE_FILTERS", "ENABLE_TAG_FILTERS", "ENABLE_ALL_TAGS", "REQUIRE_AUTH_FOR_CONFIG",
                  "STASH_VERIFY_TLS", "TRUST_PROXY_HEADERS", "UI_PUBLIC_STATUS_ENDPOINT",
                  "UI_CSRF_PROTECTION", "ENABLE_LIVE_TV", "ENABLE_TUNARR", "ENABLE_STASH_CHANNELS",
-                 "ENABLE_SHORTS_CHANNEL"]:
+                 "ENABLE_SHORTS_CHANNEL", "ENABLE_HANDY_SYNC"]:
         return str(val).lower() in ['true', '1', 'yes', 'on']
     elif key in ["TAG_GROUPS", "LATEST_GROUPS", "TRUSTED_PROXY_IPS", "CORS_ALLOWED_ORIGINS", "UI_ALLOWED_IPS"]:
         return [x.strip() for x in str(val).split(",") if x.strip()]
@@ -155,6 +189,9 @@ def _coerce_config_value(key, val):
         return set(x.strip() for x in str(val).split(",") if x.strip())
     elif key == "LOG_LEVEL": return str(val).upper()
     elif key == "STASH_GRAPHQL_PATH": return normalize_path(val)
+    elif key == "HANDY_SYNC_MODE":
+        v = str(val).strip().lower()
+        return v if v in ("auto", "hosted", "local") else "auto"
     return val
 
 # --- 3. ROBUST LOAD FUNCTION ---
@@ -200,6 +237,7 @@ _supported_keys = [
     "ENABLE_SHORTS_CHANNEL", "SHORTS_MAX_MINUTES",
     "FFMPEG_PATH", "LIVE_TV_IDLE_TIMEOUT",
     "LIVE_TV_HLS_LIST_SIZE", "LIVE_TV_SEG_RETENTION",
+    "ENABLE_HANDY_SYNC", "HANDY_SYNC_MODE", "HANDY_APPLICATION_ID",
 ]
 
 for k in _supported_keys:

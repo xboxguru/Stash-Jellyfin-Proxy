@@ -16,7 +16,7 @@ Covers:
   - POST /useritems/{item_id}/userdata: userdata fetch
 """
 import pytest
-from unittest.mock import AsyncMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch, call
 from core.jellyfin_mapper import encode_id
 from tests.conftest import make_scene
 import state
@@ -311,3 +311,61 @@ class TestUpdateUserdata:
         with patch("core.stash_client.get_scene", new=AsyncMock(return_value=scene)):
             data = client.post(f"/useritems/{encoded}/userdata").json()
         assert data["IsFavorite"] is True
+
+
+# ── Feature 3 — Handy controller fan-out (api/handy_controller hooks) ─────────
+
+class TestHandyFanOut:
+    def _interactive_scene(self):
+        s = make_scene(scene_id="751")
+        s["interactive"] = True
+        s["paths"] = {"funscript": "http://stash:9999/scene/751/funscript"}
+        return s
+
+    def _payload(self, ticks=50_000_000, is_paused=False):
+        return {
+            "PlaySessionId": "sess-handy",
+            "ItemId": encode_id("scene", "751"),
+            "PlaybackPositionTicks": ticks,
+            "RunTimeTicks": 36_000_000_000,
+            "IsPaused": is_paused,
+            "Item": {"Name": "Interactive Scene", "RunTimeTicks": 36_000_000_000},
+        }
+
+    def test_playing_fans_out_scene_position_and_pause(self, client):
+        mock_notify = MagicMock()
+        with patch("core.stash_client.get_scene", new=AsyncMock(return_value=self._interactive_scene())), \
+             patch("api.handy_controller.notify_playing", new=mock_notify):
+            client.post("/sessions/playing", json=self._payload(ticks=50_000_000, is_paused=False))
+        mock_notify.assert_called_once()
+        args = mock_notify.call_args[0]
+        assert args[0] == "sess-handy"          # session_id
+        assert args[1]["interactive"] is True   # scene
+        assert args[2] == pytest.approx(5.0)    # 50_000_000 ticks -> 5.0 s
+        assert args[3] is False                 # is_paused
+
+    def test_playing_passes_is_paused_true(self, client):
+        mock_notify = MagicMock()
+        with patch("core.stash_client.get_scene", new=AsyncMock(return_value=self._interactive_scene())), \
+             patch("api.handy_controller.notify_playing", new=mock_notify):
+            client.post("/sessions/playing", json=self._payload(is_paused=True))
+        assert mock_notify.call_args[0][3] is True
+
+    def test_handy_exception_never_breaks_204(self, client):
+        with patch("core.stash_client.get_scene", new=AsyncMock(return_value=self._interactive_scene())), \
+             patch("api.handy_controller.notify_playing", side_effect=RuntimeError("boom")):
+            r = client.post("/sessions/playing", json=self._payload())
+        assert r.status_code == 204
+
+    def test_stopped_notifies_handy(self, client):
+        mock_notify = MagicMock()
+        with patch("api.handy_controller.notify_stopped", new=mock_notify), \
+             patch("core.stash_client.increment_play_count", new=AsyncMock()), \
+             patch("core.stash_client.update_resume_time", new=AsyncMock()):
+            client.post("/sessions/playing/stopped", json={
+                "PlaySessionId": "sess-handy",
+                "ItemId": encode_id("scene", "751"),
+                "PlaybackPositionTicks": 9_500_000,
+                "RunTimeTicks": 10_000_000,
+            })
+        mock_notify.assert_called_once_with("sess-handy")

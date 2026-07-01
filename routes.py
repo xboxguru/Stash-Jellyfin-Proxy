@@ -10,6 +10,7 @@ from starlette.websockets import WebSocket
 
 from api import (
     auth_routes,
+    handy_controller,
     image_routes,
     library_routes,
     live_tv_admin_routes,
@@ -195,6 +196,10 @@ routes = [
     Route("/videos/{item_id}/main.m3u8", stream_routes.endpoint_stream, methods=["GET", "HEAD"]),
     Route("/videos/{item_id}/stream.mp4", stream_routes.endpoint_stream, methods=["GET", "HEAD"]),
     Route("/videos/{item_id}/stream", stream_routes.endpoint_stream, methods=["GET", "HEAD"]),
+
+    # Path mirrors Stash's own funscript URL shape (…/scene/<id>/funscript) so handyfeeling's HSSP
+    # setup accepts it as a script URL. The Handy device fetches this directly over the LAN.
+    Route("/handy/scene/{scene_id}/funscript", handy_controller.endpoint_funscript, methods=["GET"]),
 
     Route("/sessions/playing", userdata_routes.endpoint_sessions_playing, methods=["POST"]),
     Route("/sessions/playing/progress", userdata_routes.endpoint_sessions_playing, methods=["POST"]),

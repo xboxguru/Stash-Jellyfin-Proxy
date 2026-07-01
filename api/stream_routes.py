@@ -35,6 +35,11 @@ async def endpoint_playback_info(request: Request):
     if not scene:
         return JSONResponse({"error": "Item not found"}, status_code=404)
 
+    # Feature 3 — pre-upload the funscript now (best-effort) so Handy activation on the first
+    # /sessions/playing event reuses the cached URL instead of preparing it inline.
+    from api import handy_controller
+    handy_controller.prewarm(scene)
+
     jellyfin_item = jellyfin_mapper.format_jellyfin_item(scene)
     return JSONResponse({
         "MediaSources": jellyfin_item.get("MediaSources", []),
@@ -206,7 +211,14 @@ async def endpoint_stream(request: Request):
         try:
             start_sec = float(start_ticks) / 10000000.0
             stash_stream_url += f"{'&' if '?' in stash_stream_url else '?'}start={start_sec}"
-        except ValueError: 
+            # Feature 3 — hand the exact start position to the Handy controller for an instant,
+            # correctly-positioned first play (best-effort; never affects streaming).
+            try:
+                from api import handy_controller
+                handy_controller.note_start_position(raw_id, start_sec)
+            except Exception:
+                pass
+        except ValueError:
             pass
 
     if apikey and "apikey=" not in stash_stream_url.lower():
