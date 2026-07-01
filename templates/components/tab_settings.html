@@ -8,6 +8,7 @@
         <button type="button" class="tab-btn config-tab-btn" data-tab="security" style="padding: 10px 20px; font-weight: 500;">Security</button>
         <button type="button" class="tab-btn config-tab-btn" data-tab="logging" style="padding: 10px 20px; font-weight: 500;">Logging</button>
         <button type="button" class="tab-btn config-tab-btn" data-tab="livetv" style="padding: 10px 20px; font-weight: 500;">Live TV</button>
+        <button type="button" class="tab-btn config-tab-btn" data-tab="handy" style="padding: 10px 20px; font-weight: 500;">Handy</button>
     </div>
 
     <form id="config-form" autocomplete="off">
@@ -207,57 +208,6 @@
                     </div>
                     <div class="form-hint">Increments Etag and Image versions to force Tunarr and ErsatzTV to re-download metadata and thumbnails.</div>
                 </div>
-            </div>
-
-            <div class="card">
-                <h3 class="card-title">Interactive Toy (Handy) Sync</h3>
-                <div class="toggle-row" style="margin-bottom: 0;">
-                    <label class="toggle-switch">
-                        <input type="checkbox" name="ENABLE_HANDY_SYNC">
-                        <span class="toggle-slider"></span>
-                    </label>
-                    <div>
-                        <div class="toggle-label">Enable Handy Sync</div>
-                        <div class="toggle-hint">Drive a connected Handy device in sync with interactive scenes (funscript). Connection key and offset are read from your Stash interface settings. Non-interactive scenes are unaffected; toy errors never interrupt video playback.</div>
-                    </div>
-                </div>
-                <div class="form-row" style="margin-top: 16px;">
-                    <div class="form-group" style="margin-bottom: 0;">
-                        <label class="form-label">Sync Mode</label>
-                        <select class="form-input" name="HANDY_SYNC_MODE">
-                            <option value="auto">Auto (follow Stash)</option>
-                            <option value="hosted">Hosted / HSSP (cloud)</option>
-                            <option value="local">Local / HSP (LAN)</option>
-                        </select>
-                        <div class="form-hint">How the funscript reaches the device: <b>Auto</b> follows Stash, <b>Hosted</b> uploads it as a hosted file (HSSP), <b>Local</b> streams it live (HSP) — no hosted copy or size cap. Both still relay via the Handy cloud.</div>
-                    </div>
-                    <div class="form-group" style="margin-bottom: 0;">
-                        <label class="form-label">Handy ApplicationID</label>
-                        <input type="text" class="form-input" name="HANDY_APPLICATION_ID" placeholder="Blank = v2 API">
-                        <div class="form-hint">v3 <b>ApplicationID</b> (<code>X-Api-Key</code>) — register at <b>devs.handyfeeling.com</b>. Required for Local/HSP; blank falls back to the v2 API.</div>
-                    </div>
-                </div>
-                <details style="margin-top: 16px;">
-                    <summary style="cursor: pointer; color: var(--text-secondary); font-size: 13px; user-select: none;">Advanced options</summary>
-                    <div class="form-hint" style="margin-top: 10px;">HSP buffer tuning (Local / HSP only — HSSP ignores these). Measured in seconds of motion.</div>
-                    <div class="form-row three-col" style="margin-top: 12px;">
-                        <div class="form-group" style="margin-bottom: 0;">
-                            <label class="form-label">Seed on play/seek (s)</label>
-                            <input type="number" min="5" class="form-input" name="HANDY_HSP_BUFFER_MIN_S" placeholder="30">
-                            <div class="form-hint">Buffered immediately on play/seek — the safety floor.</div>
-                        </div>
-                        <div class="form-group" style="margin-bottom: 0;">
-                            <label class="form-label">Buffer target (s)</label>
-                            <input type="number" min="10" class="form-input" name="HANDY_HSP_BUFFER_MAX_S" placeholder="60">
-                            <div class="form-hint">Topped up to this on each poll.</div>
-                        </div>
-                        <div class="form-group" style="margin-bottom: 0;">
-                            <label class="form-label">Poll interval (s)</label>
-                            <input type="number" min="2" class="form-input" name="HANDY_HSP_POLL_INTERVAL_S" placeholder="15">
-                            <div class="form-hint">How often the buffer is refilled.</div>
-                        </div>
-                    </div>
-                </details>
             </div>
         </div>
 
@@ -541,6 +491,59 @@
 
         </div>
 
+        <div id="config-handy" class="config-section hidden">
+            <div class="card">
+                <h3 class="card-title">Interactive Toy (Handy) Sync</h3>
+                <div class="toggle-row" style="margin-bottom: 0;">
+                    <label class="toggle-switch">
+                        <input type="checkbox" name="ENABLE_HANDY_SYNC">
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <div>
+                        <div class="toggle-label">Enable Handy Sync</div>
+                        <div class="toggle-hint">Drive connected Handy device(s) in sync with interactive scenes (funscript). Non-interactive scenes are unaffected; toy errors never interrupt video playback.</div>
+                    </div>
+                </div>
+                <div class="form-group" style="max-width: 480px; margin-top: 16px; margin-bottom: 0;">
+                    <label class="form-label">Handy ApplicationID</label>
+                    <input type="text" class="form-input" name="HANDY_APPLICATION_ID" placeholder="Blank = v2 API">
+                    <div class="form-hint">v3 <b>ApplicationID</b> (<code>X-Api-Key</code>) — register once at <b>devs.handyfeeling.com</b>. Shared by all devices; required for Local/HSP. Blank falls back to the v2 API.</div>
+                </div>
+                <details style="margin-top: 16px;">
+                    <summary style="cursor: pointer; color: var(--text-secondary); font-size: 13px; user-select: none;">Advanced — default HSP buffer tuning</summary>
+                    <div class="form-hint" style="margin-top: 10px;">Defaults for devices that don't set their own (Local / HSP only). Measured in seconds of motion.</div>
+                    <div class="form-row three-col" style="margin-top: 12px;">
+                        <div class="form-group" style="margin-bottom: 0;">
+                            <label class="form-label">Seed on play/seek (s)</label>
+                            <input type="number" min="5" class="form-input" name="HANDY_HSP_BUFFER_MIN_S" placeholder="30">
+                            <div class="form-hint">Buffered immediately on play/seek — the safety floor.</div>
+                        </div>
+                        <div class="form-group" style="margin-bottom: 0;">
+                            <label class="form-label">Buffer target (s)</label>
+                            <input type="number" min="10" class="form-input" name="HANDY_HSP_BUFFER_MAX_S" placeholder="60">
+                            <div class="form-hint">Topped up to this on each poll.</div>
+                        </div>
+                        <div class="form-group" style="margin-bottom: 0;">
+                            <label class="form-label">Poll interval (s)</label>
+                            <input type="number" min="2" class="form-input" name="HANDY_HSP_POLL_INTERVAL_S" placeholder="15">
+                            <div class="form-hint">How often the buffer is refilled.</div>
+                        </div>
+                    </div>
+                </details>
+                <div class="form-hint" style="margin-top: 14px;">The global settings above are saved with <b>Save Configuration</b>. Devices below save individually.</div>
+            </div>
+
+            <div class="card">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                    <h3 class="card-title" style="margin-bottom: 0;">Devices</h3>
+                    <button type="button" id="btn-handy-refresh-status" class="btn btn-secondary" style="padding: 6px 12px; font-size: 12px;">Refresh status</button>
+                </div>
+                <div class="form-hint" style="margin-bottom: 16px;">Your Stash-configured Handy is added automatically. Add more devices to drive several at once — they all sync to the same video. Deleting is manual; disabling keeps a device but stops driving it.</div>
+                <div id="handy-device-list"></div>
+                <button type="button" id="btn-handy-add-device" class="btn" style="margin-top: 12px;">+ Add Device</button>
+            </div>
+        </div>
+
         <div id="env-notice" class="env-notice" style="margin-bottom: 16px;">
             <strong>Environment Override:</strong> The following fields are set via environment variables and cannot be changed here: <span></span>
         </div>
@@ -561,11 +564,138 @@
             document.querySelectorAll('.config-tab-btn').forEach(b => b.classList.remove('active'));
             // Hide all config sections
             document.querySelectorAll('.config-section').forEach(sec => sec.classList.add('hidden'));
-            
+
             // Activate clicked tab
             e.target.classList.add('active');
             // Show corresponding section
             document.getElementById('config-' + e.target.dataset.tab).classList.remove('hidden');
+
+            if (e.target.dataset.tab === 'handy') handyDevicesOpen();
         });
     });
+
+    // ── Handy device management ──────────────────────────────────────────────
+    const HANDY_MODES = [['local', 'Local / HSP'], ['hosted', 'Hosted / HSSP'], ['auto', 'Auto (follow Stash)']];
+    let _handyStatusTimer = null;
+    let _handyAppIdSet = false;
+
+    function _hEsc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+    async function handyDevicesOpen() {
+        await loadHandyDevices();
+        if (_handyStatusTimer) clearInterval(_handyStatusTimer);
+        _handyStatusTimer = setInterval(() => {
+            if (document.getElementById('config-handy') && !document.getElementById('config-handy').classList.contains('hidden')) {
+                refreshHandyStatus();
+            } else if (_handyStatusTimer) { clearInterval(_handyStatusTimer); _handyStatusTimer = null; }
+        }, 30000);
+    }
+
+    async function loadHandyDevices() {
+        const list = document.getElementById('handy-device-list');
+        if (!list) return;
+        try {
+            const res = await fetch('/api/handy/devices');
+            const data = await res.json();
+            _handyAppIdSet = !!data.application_id_set;
+            const devices = data.devices || [];
+            list.innerHTML = devices.length ? devices.map(renderHandyDeviceCard).join('')
+                : '<div class="form-hint">No devices yet. Your Stash-configured Handy appears here automatically once its key is set in Stash.</div>';
+            refreshHandyStatus();
+        } catch (e) { list.innerHTML = '<div class="form-hint">Could not load devices.</div>'; }
+    }
+
+    function renderHandyDeviceCard(d) {
+        const opts = HANDY_MODES.map(([v, label]) =>
+            `<option value="${v}" ${d.sync_mode === v ? 'selected' : ''}>${label}</option>`).join('');
+        const num = (v) => v == null ? '' : v;
+        return `<div class="handy-device-card" data-id="${_hEsc(d.id)}">
+          <div style="display:flex; align-items:center; gap:10px; margin-bottom:12px;">
+            <span class="handy-dot unknown" data-dot="${_hEsc(d.id)}" title="Connection status"></span>
+            <input type="text" class="form-input" data-f="label" value="${_hEsc(d.label)}" placeholder="Label" style="max-width:220px;">
+            ${d.source === 'stash' ? '<span class="badge-warning" style="text-transform:none;">from Stash</span>' : ''}
+            <div style="flex:1;"></div>
+            <label class="toggle-switch" style="transform:scale(0.85);"><input type="checkbox" data-f="enabled" ${d.enabled ? 'checked' : ''}><span class="toggle-slider"></span></label>
+            <button type="button" class="btn btn-secondary" data-act="save" style="padding:6px 12px; font-size:12px;">Save</button>
+            <button type="button" class="btn" data-act="delete" style="padding:6px 12px; font-size:12px; background:var(--error); color:#fff;">Delete</button>
+          </div>
+          <div class="form-row three-col">
+            <div class="form-group" style="margin-bottom:0;">
+              <label class="form-label">Connection Key</label>
+              <input type="text" class="form-input" data-f="key" value="${_hEsc(d.key)}" placeholder="Handy connection key" autocomplete="off">
+            </div>
+            <div class="form-group" style="margin-bottom:0;">
+              <label class="form-label">Sync Mode</label>
+              <select class="form-input" data-f="sync_mode">${opts}</select>
+            </div>
+            <div class="form-group" style="margin-bottom:0;">
+              <label class="form-label">Funscript Offset (ms)</label>
+              <input type="number" class="form-input" data-f="funscript_offset" value="${num(d.funscript_offset)}" placeholder="Stash default">
+            </div>
+          </div>
+          <details style="margin-top:12px;">
+            <summary style="cursor:pointer; color:var(--text-secondary); font-size:12px;">Advanced — HSP buffer overrides</summary>
+            <div class="form-row three-col" style="margin-top:10px;">
+              <div class="form-group" style="margin-bottom:0;"><label class="form-label">Seed (s)</label><input type="number" class="form-input" data-f="hsp_buffer_min_s" value="${num(d.hsp_buffer_min_s)}" placeholder="30"></div>
+              <div class="form-group" style="margin-bottom:0;"><label class="form-label">Buffer (s)</label><input type="number" class="form-input" data-f="hsp_buffer_max_s" value="${num(d.hsp_buffer_max_s)}" placeholder="60"></div>
+              <div class="form-group" style="margin-bottom:0;"><label class="form-label">Poll (s)</label><input type="number" class="form-input" data-f="hsp_poll_interval_s" value="${num(d.hsp_poll_interval_s)}" placeholder="15"></div>
+            </div>
+          </details>
+        </div>`;
+    }
+
+    function _handyCardPayload(card) {
+        const get = (f) => card.querySelector(`[data-f="${f}"]`);
+        const numOrNull = (f) => { const v = get(f).value.trim(); return v === '' ? null : parseInt(v); };
+        return {
+            label: get('label').value.trim(),
+            key: get('key').value.trim(),
+            sync_mode: get('sync_mode').value,
+            enabled: get('enabled').checked,
+            funscript_offset: numOrNull('funscript_offset'),
+            hsp_buffer_min_s: numOrNull('hsp_buffer_min_s'),
+            hsp_buffer_max_s: numOrNull('hsp_buffer_max_s'),
+            hsp_poll_interval_s: numOrNull('hsp_poll_interval_s'),
+        };
+    }
+
+    document.getElementById('handy-device-list')?.addEventListener('click', async (e) => {
+        const btn = e.target.closest('[data-act]');
+        if (!btn) return;
+        const card = btn.closest('.handy-device-card');
+        const id = card.dataset.id;
+        if (btn.dataset.act === 'save') {
+            try {
+                const res = await fetch(`/api/handy/devices/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(_handyCardPayload(card)) });
+                showToast(res.ok ? 'Device saved.' : 'Save failed.', res.ok ? 'success' : 'error');
+                if (res.ok) refreshHandyStatus();
+            } catch (_) { showToast('Save failed.', 'error'); }
+        } else if (btn.dataset.act === 'delete') {
+            if (!confirm('Delete this device?')) return;
+            try {
+                await fetch(`/api/handy/devices/${id}`, { method: 'DELETE' });
+                loadHandyDevices();
+            } catch (_) { showToast('Delete failed.', 'error'); }
+        }
+    });
+
+    document.getElementById('btn-handy-add-device')?.addEventListener('click', async () => {
+        try {
+            await fetch('/api/handy/devices', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ label: 'New Handy', sync_mode: 'local' }) });
+            loadHandyDevices();
+        } catch (_) { showToast('Could not add device.', 'error'); }
+    });
+
+    document.getElementById('btn-handy-refresh-status')?.addEventListener('click', refreshHandyStatus);
+
+    async function refreshHandyStatus() {
+        try {
+            const res = await fetch('/api/handy/devices/status');
+            const data = await res.json();
+            (data.status || []).forEach(s => {
+                const dot = document.querySelector(`[data-dot="${s.id}"]`);
+                if (dot) { dot.classList.remove('unknown', 'connected', 'disconnected'); dot.classList.add(s.connected ? 'connected' : 'disconnected'); dot.title = s.connected ? 'Connected' : 'Disconnected'; }
+            });
+        } catch (_) { /* leave dots as-is */ }
+    }
 </script>

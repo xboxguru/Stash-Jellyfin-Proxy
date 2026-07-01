@@ -98,6 +98,12 @@ routes = [
     Route("/api/livetv/channels-config/{tvg_id}", live_tv_admin_routes.endpoint_channels_config_update, methods=["PATCH"]),
     Route("/api/livetv/channels-config/{tvg_id}", live_tv_admin_routes.endpoint_channels_config_delete, methods=["DELETE"]),
     Route("/api/livetv/channels-config/{tvg_id}/rebuild", live_tv_admin_routes.endpoint_channel_rebuild, methods=["POST"]),
+    # Handy devices (multi-device registry — see docs/handy_integration.md §9a)
+    Route("/api/handy/devices", handy_controller.endpoint_devices_list, methods=["GET"]),
+    Route("/api/handy/devices", handy_controller.endpoint_devices_create, methods=["POST"]),
+    Route("/api/handy/devices/status", handy_controller.endpoint_devices_status, methods=["GET"]),
+    Route("/api/handy/devices/{device_id}", handy_controller.endpoint_devices_update, methods=["PUT"]),
+    Route("/api/handy/devices/{device_id}", handy_controller.endpoint_devices_delete, methods=["DELETE"]),
     # Stash source lists
     Route("/api/livetv/stash-tags", live_tv_admin_routes.endpoint_stash_tags_list, methods=["GET"]),
     Route("/api/livetv/stash-filters", live_tv_admin_routes.endpoint_stash_filters_list, methods=["GET"]),

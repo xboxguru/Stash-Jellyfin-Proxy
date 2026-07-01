@@ -109,6 +109,12 @@
         @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
         .hidden { display: none; }
         select.form-input { cursor: pointer; }
+        /* Handy device cards + connection-status glow */
+        .handy-device-card { border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 12px; background: rgba(0,0,0,0.12); }
+        .handy-dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; flex-shrink: 0; background: #555; transition: box-shadow 0.4s, background 0.4s; }
+        .handy-dot.connected { background: var(--success); box-shadow: 0 0 9px 2px color-mix(in srgb, var(--success) 75%, transparent); }
+        .handy-dot.disconnected { background: var(--error); box-shadow: 0 0 7px 1px color-mix(in srgb, var(--error) 45%, transparent); opacity: 0.85; }
+        .handy-dot.unknown { background: #666; box-shadow: none; }
         @media (max-width: 768px) {
             .layout { flex-direction: column; }
             .sidebar { width: 100%; display: flex; flex-wrap: wrap; padding: 10px; border-right: none; border-bottom: 1px solid var(--border); }

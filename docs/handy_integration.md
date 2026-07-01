@@ -1,15 +1,18 @@
 # Handy (Interactive Toy) Sync — Implementation
 
-Drives a connected [Handy](https://www.handyfeeling.com) device in sync with an interactive scene's
-funscript while it plays through the proxy on a Jellyfin client (Wholphin / ExoPlayer / MPV / web).
-The proxy acts as the Handy controller, driven by the Jellyfin **playback-reporting events** it
+Drives one or more connected [Handy](https://www.handyfeeling.com) devices in sync with an interactive
+scene's funscript while it plays through the proxy on a Jellyfin client (Wholphin / ExoPlayer / MPV /
+web). The proxy acts as the Handy controller, driven by the Jellyfin **playback-reporting events** it
 already receives — there is no client-side toy support required.
 
-**Status:** implemented and bench-confirmed on **Handy FW 4.2.2+44874492**. Both serving paths work:
-HSSP (cloud-hosted script) and HSP (live point-streaming). Disabled by default (`ENABLE_HANDY_SYNC`).
+**Status:** implemented and bench-confirmed on **Handy FW 4.2.2+44874492**. Both serving paths work —
+HSSP (cloud-hosted script) and HSP (live point-streaming) — and multiple devices can be driven at once
+(§9a). Disabled by default (`ENABLE_HANDY_SYNC`).
 
-All Handy code lives in [api/handy_controller.py](../api/handy_controller.py); tests in
-[tests/test_handy_controller.py](../tests/test_handy_controller.py).
+Handy code lives in [api/handy_controller.py](../api/handy_controller.py) (drivers + fan-out) and
+[api/handy_devices.py](../api/handy_devices.py) (device registry); tests in
+[tests/test_handy_controller.py](../tests/test_handy_controller.py) and
+[tests/test_handy_devices.py](../tests/test_handy_devices.py).
 
 ---
 
@@ -204,34 +207,77 @@ The controller is a **best-effort, fully isolated side-channel**. It must never 
 Proxy settings (config.py — all follow the standard default + `.conf` save + env override + GUI
 pattern; wired in [templates/components/tab_settings.html](../templates/components/tab_settings.html)):
 
+**Global** settings (config.py — standard default + `.conf` save + env override + GUI form pattern):
+
 | Setting | Default | Purpose |
 |---|---|---|
 | `ENABLE_HANDY_SYNC` | `false` | Master toggle. |
-| `HANDY_SYNC_MODE` | `auto` | `auto` \| `hosted` (force HSSP) \| `local` (force HSP). GUI kill-switch: flip to `hosted` for stable HSSP. |
-| `HANDY_APPLICATION_ID` | `""` | v3 ApplicationID (`X-Api-Key`). Set → v3; blank → v2. Required for HSP. |
-| `HANDY_HSP_BUFFER_MIN_S` | `30` | HSP seed floor (s). *Advanced.* |
-| `HANDY_HSP_BUFFER_MAX_S` | `60` | HSP refill target (s). *Advanced.* |
-| `HANDY_HSP_POLL_INTERVAL_S` | `15` | HSP refill poll interval (s). *Advanced.* |
+| `HANDY_APPLICATION_ID` | `""` | v3 ApplicationID (`X-Api-Key`), shared by all devices. Set → v3; blank → v2. Required for HSP. |
+| `HANDY_HSP_BUFFER_MIN_S` | `30` | HSP seed floor (s) — default for devices that don't override. *Advanced.* |
+| `HANDY_HSP_BUFFER_MAX_S` | `60` | HSP refill target (s) — default. *Advanced.* |
+| `HANDY_HSP_POLL_INTERVAL_S` | `15` | HSP refill poll interval (s) — default. *Advanced.* |
+| `HANDY_SYNC_MODE` | `auto` | Fallback sync mode for the legacy/standalone (device-less) path only — the GUI sets mode **per device** (§9a). |
 
-The `HANDY_HSP_*` knobs are hidden behind an **Advanced options** disclosure in the Handy settings card
-(HSP-only — HSSP ignores them). `_cfg_int` reads them live, so GUI changes take effect on the next
-poll/play without a restart.
+The `HANDY_HSP_*` knobs are the **defaults**; a device can override each in its own Advanced section.
+`_cfg_int(name, default, device_override)` resolves override → live global → default, read fresh each
+call so edits take effect without a restart.
+
+**Per-device** settings live in `handy_devices.json` (§9a). **Sync mode, funscript offset, and the HSP
+knobs are per-device**; the ApplicationID and enable toggle are global.
 
 Read from **Stash** (via `get_stash_interface_config()`, `configuration.interface`, no cache):
-`handyKey` (device connection key), `funscriptOffset` (ms), `useStashHostedFunscript` (HSSP vs HSP in
-`auto` mode). These are intentionally **not** duplicated into the proxy config.
+`handyKey` (seeds the first device — §9a), `funscriptOffset` (ms, the fallback when a device sets no
+offset), `useStashHostedFunscript` (drives `auto` mode).
+
+## 9a. Multiple devices
+
+The proxy drives **N Handy devices at once** for a single playing scene. Each device is an independent
+`HandyController` with its own connection key, clock offset, protocol, and buffer state; they stay
+mutually in sync because each is independently synced to the same video timeline (§5). A
+`HandySessionGroup` (keyed by `PlaySessionId`) owns the per-session list of controllers and fans every
+lifecycle action (`preactivate`/`begin_playback`/`on_progress`/`teardown`) out to them **concurrently
+and with per-device isolation** — one device failing to connect never affects the others or video.
+
+**Device list config** (JSON at `LOG_DIR/handy_devices.json`, in-memory `_devices`, atomic
+tmp+replace — mirrors LiveTV's `channels.json`). Each device:
+
+| Field | Notes |
+|---|---|
+| `id` | Stable short id. |
+| `label` | Display name. |
+| `key` | Handy connection key (`X-Connection-Key`) — the device identity. |
+| `sync_mode` | `auto` \| `hosted` (HSSP) \| `local` (HSP). **Default `local` (HSP).** `auto` follows Stash's `useStashHostedFunscript`. |
+| `funscript_offset` | Optional per-device offset (ms); `null` → use Stash's `funscriptOffset`. Enables intentional phase differences. |
+| `hsp_buffer_min_s` / `hsp_buffer_max_s` / `hsp_poll_interval_s` | Optional per-device HSP knobs; `null` → global `HANDY_HSP_*` default. |
+| `enabled` | Disabled devices are kept but not driven. |
+| `source` | `stash` (auto-seeded) or `manual`. |
+
+**ApplicationID stays global** (`HANDY_APPLICATION_ID`) — it authenticates the *application*, not a
+device, so all devices share it.
+
+**Stash auto-seed.** When Stash's `handyKey` is non-empty and no device already has that key, a device
+is auto-added (`source: stash`, `sync_mode: local`). If the Stash key later changes, the new key is
+added as an additional device — existing devices are **never** auto-deleted; deletion is manual only.
+
+**CRUD + status** (routes in [routes.py](../routes.py) / handled in `api/handy_controller.py`):
+`GET/POST /api/handy/devices`, `PUT/DELETE /api/handy/devices/{id}`, and
+`GET /api/handy/devices/status` (probes each enabled device's `/connected`). The **Handy** settings tab
+renders one row per device with a green (connected) / red (disconnected) status glow, polled on tab
+open and every 30 s. Status probes share the handyfeeling rate budget, so polling is deliberately
+infrequent.
 
 ## 10. Code map
 
 | File | Role |
 |---|---|
-| [api/handy_controller.py](../api/handy_controller.py) | Everything: `HandyController` lifecycle, HSSP + HSP primitives, Handy API client, funscript fetch/convert, fire-and-forget fan-out, LAN-serve endpoint. |
+| [api/handy_controller.py](../api/handy_controller.py) | `HandyController` (per-device driver) + `HandySessionGroup` (per-session fan-out), HSSP + HSP primitives, Handy API client, funscript fetch/convert, fire-and-forget fan-out, device CRUD/status + LAN-serve endpoints. |
+| [api/handy_devices.py](../api/handy_devices.py) | Device registry: JSON store (`handy_devices.json`), CRUD, `enabled_devices()`, `ensure_stash_seed()`. |
 | [api/userdata_routes.py](../api/userdata_routes.py) | `endpoint_sessions_playing` → `notify_playing`; `endpoint_sessions_stopped` → `notify_stopped`. |
 | [api/stream_routes.py](../api/stream_routes.py) | PlaybackInfo → `prewarm(scene)`; stream request `startTimeTicks` → `note_start_position`. |
 | [core/stash_client.py](../core/stash_client.py) | `interactive` + `paths.funscript` on scene fields; `get_stash_interface_config()`. |
-| [routes.py](../routes.py) | `GET /handy/scene/{scene_id}/funscript` (LAN-serve; retained, not on the HSSP path). |
-| [config.py](../config.py) | The six `ENABLE_HANDY_SYNC` / `HANDY_*` settings. |
-| [templates/components/tab_settings.html](../templates/components/tab_settings.html) | Handy settings card + Advanced options. |
+| [routes.py](../routes.py) | `/api/handy/devices*` CRUD + status; `GET /handy/scene/{scene_id}/funscript` (LAN-serve; retained, not on the HSSP path). |
+| [config.py](../config.py) | The six global `ENABLE_HANDY_SYNC` / `HANDY_*` settings (per-device settings live in `handy_devices.json`). |
+| [templates/components/tab_settings.html](../templates/components/tab_settings.html) | **Handy** settings tab: globals + device rows (status glow, add/edit/delete) + management JS. |
 
 ## 11. Wire reference
 
@@ -256,12 +302,12 @@ even on rejection — a 200 alone is not success; `_parse` checks the envelope).
 - `TestHandyFanOut` in [tests/test_userdata_routes.py](../tests/test_userdata_routes.py) — route-level
   fan-out.
 
-## 13. Not yet done
+## 13. Limitations
 
-- **Periodic drift re-sync per progress ping** — compare device expected position vs reported and
-  re-sync only past a threshold. Currently we sync on start/seek/resume and rely on the device's
-  autonomous clock (tight `cs_offset` makes drift small).
-- **Manual offset knob in the proxy GUI** — the systematic extrapolation (§5) handles the report→issue
-  lag; a per-deployment manual offset slider (beyond Stash's `funscriptOffset`) could dial in residual
-  device-actuation latency. Not yet needed.
-- **True cloud-free (Bluetooth LE / Intiface) transport** — separate architecture (§2); not planned.
+- **No periodic drift re-sync.** Sync happens on start/seek/resume only; between those the device
+  free-runs on its own clock. The tight `cs_offset` (±few ms) keeps drift negligible, so per-ping
+  re-sync is not implemented.
+- **No cloud-free transport.** All control is cloud-relayed (§2); Bluetooth LE / Intiface would be a
+  separate architecture and is not implemented.
+- **Device connection status is polled, not pushed** (tab-open + 30 s), sharing the handyfeeling rate
+  budget — so the glow can lag a device power-cycle by up to the poll interval.

@@ -37,6 +37,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
 
 import config
+from api import handy_devices
 from core import stash_client
 
 logger = logging.getLogger(__name__)
@@ -94,8 +95,9 @@ HSP_ADD_BATCH = 100
 # past the 240 req/min device rate limit. 12 * 100 pts is far more than any sane seed/refill needs.
 HSP_MAX_ADDS_PER_FILL = 12
 
-# Registry of live controllers, keyed by PlaySessionId.
-_controllers: Dict[str, "HandyController"] = {}
+# Registry of live session groups, keyed by PlaySessionId. Each group fans out to one controller per
+# configured Handy device (multi-device — see handy_devices.py / docs §9a).
+_groups: Dict[str, "HandySessionGroup"] = {}
 _registry_lock = asyncio.Lock()
 
 # Prepared upload-mode script URLs, keyed by scene_id -> (expiry_monotonic, url). Populated either
@@ -120,12 +122,11 @@ def _now_ms() -> float:
     return time.time() * 1000.0
 
 
-def _resolve_use_hsp(cfg: Dict[str, Any]) -> bool:
-    """Decide whether this session should use HSP (local streaming) vs HSSP (cloud hosting).
-
-    Proxy setting `HANDY_SYNC_MODE` overrides Stash: `hosted` forces HSSP, `local` forces HSP,
-    `auto` follows Stash's `useStashHostedFunscript` (local serving -> HSP)."""
-    mode = str(getattr(config, "HANDY_SYNC_MODE", "auto")).strip().lower()
+def _resolve_use_hsp(sync_mode: str, cfg: Dict[str, Any]) -> bool:
+    """Decide whether a device uses HSP (local streaming) vs HSSP (cloud hosting) from its per-device
+    `sync_mode`: `hosted` forces HSSP, `local` forces HSP, `auto` follows Stash's
+    `useStashHostedFunscript` (local serving -> HSP)."""
+    mode = str(sync_mode or "auto").strip().lower()
     if mode == "hosted":
         return False
     if mode == "local":
@@ -242,7 +243,7 @@ class HandyController:
     """Drives one Handy device for one PlaySessionId. All public methods are serialized by
     `self.lock`; state transitions: init -> ready | failed -> closed."""
 
-    def __init__(self, session_id: str, scene: Dict[str, Any]):
+    def __init__(self, session_id: str, scene: Dict[str, Any], device: Optional[Dict[str, Any]] = None):
         self.session_id = session_id
         self.scene_id = scene.get("id")
         self.stash_funscript_url = (scene.get("paths") or {}).get("funscript")
@@ -253,7 +254,18 @@ class HandyController:
         self.lock = asyncio.Lock()
         self.state = "init"  # init | ready | failed | closed
 
-        self.key: str = ""
+        # Per-device binding (multi-device — see handy_devices.py / docs §9a). When no device is given
+        # (standalone/legacy), key falls back to Stash's handyKey in _prepare and mode to the global
+        # HANDY_SYNC_MODE. The ApplicationID is application-level and always global.
+        self.device = device or {}
+        self.label: str = self.device.get("label") or "Handy"
+        self.key: str = (self.device.get("key") or "").strip()
+        self.sync_mode: str = str(self.device.get("sync_mode") or getattr(config, "HANDY_SYNC_MODE", "auto")).strip().lower()
+        self._dev_offset_ms = self.device.get("funscript_offset")   # None -> use Stash funscriptOffset
+        self._dev_hsp_min = self.device.get("hsp_buffer_min_s")     # None -> global HANDY_HSP_* default
+        self._dev_hsp_max = self.device.get("hsp_buffer_max_s")
+        self._dev_hsp_poll = self.device.get("hsp_poll_interval_s")
+
         self.script_offset_ms: int = 0
         self.estimated_offset_ms: float = 0.0  # cs_offset
         self.app_id: str = _app_id()
@@ -285,22 +297,26 @@ class HandyController:
         This is the ~1.7 s of work we move off the critical path via preactivate()."""
         try:
             cfg = await stash_client.get_stash_interface_config()
-            self.key = (cfg.get("handyKey") or "").strip()
+            # Connection key: the bound device's key, else fall back to Stash's handyKey (legacy /
+            # standalone). Offset: per-device override wins, else Stash's funscriptOffset.
+            if not self.key:
+                self.key = (cfg.get("handyKey") or "").strip()
             try:
-                self.script_offset_ms = int(cfg.get("funscriptOffset") or 0)
+                self.script_offset_ms = int(self._dev_offset_ms if self._dev_offset_ms is not None
+                                            else (cfg.get("funscriptOffset") or 0))
             except (TypeError, ValueError):
                 self.script_offset_ms = 0
-            use_hsp = _resolve_use_hsp(cfg)
+            use_hsp = _resolve_use_hsp(self.sync_mode, cfg)
             self.use_hsp = use_hsp
             logger.debug(
-                f"[handy] preparing session={self.session_id} scene={self.scene_id} "
+                f"[handy] preparing session={self.session_id} dev={self.label} scene={self.scene_id} "
                 f"api={'v3' if self.use_v3 else 'v2'} key=...{(self.key[-4:] if self.key else '----')} "
                 f"app_id={'set' if self.app_id else 'none'} script_offset={self.script_offset_ms}ms "
-                f"sync_mode={getattr(config, 'HANDY_SYNC_MODE', 'auto')} use_hsp={use_hsp}"
+                f"sync_mode={self.sync_mode} use_hsp={use_hsp}"
             )
 
             if not self.key:
-                logger.info(f"[handy] no handyKey configured in Stash; disabling sync for session {self.session_id}")
+                logger.info(f"[handy] no connection key for device {self.label}; disabling sync for session {self.session_id}")
                 self.state = "failed"
                 return
 
@@ -386,15 +402,16 @@ class HandyController:
             return False
         return True
 
-    async def preactivate(self):
+    async def preactivate(self, arm_watchdog: bool = True):
         """Pre-instantiate on PlaybackInfo: run _prepare() so the device is set up and the clock
         synced, but do NOT play (no motion until the user actually starts). Arms an abandonment
-        timeout so a browse-but-don't-play leaves nothing lingering."""
+        timeout so a browse-but-don't-play leaves nothing lingering. When driven by a
+        HandySessionGroup, `arm_watchdog=False` — the group owns abandonment for the whole session."""
         async with self.lock:
             if self.state != "init":
                 return
             await self._prepare()
-            if not self._playback_started:
+            if arm_watchdog and not self._playback_started:
                 self._arm_abandon_timeout()
 
     async def begin_playback(self, position_seconds: float, is_paused: bool):
@@ -452,12 +469,9 @@ class HandyController:
             return
         logger.info(
             f"[handy] pre-activation abandoned (no playback in {PREACTIVATION_ABANDON_S}s) — "
-            f"tearing down session={self.session_id}"
+            f"tearing down device {self.label} session={self.session_id}"
         )
         await self.teardown()
-        async with _registry_lock:
-            _controllers.pop(self.session_id, None)
-        _start_pos_by_session.pop(self.session_id, None)
 
     async def on_progress(self, position_seconds: float, is_paused: bool):
         async with self.lock:
@@ -656,7 +670,7 @@ class HandyController:
         )
         # Top the fresh buffer up to the seed floor (MIN seconds ahead of the play head) so we start
         # with the full safety margin rather than just the first 100 points, then start the refill.
-        min_s = self._cfg_int("HANDY_HSP_BUFFER_MIN_S", DEFAULT_HSP_BUFFER_MIN_S)
+        min_s = self._cfg_int("HANDY_HSP_BUFFER_MIN_S", DEFAULT_HSP_BUFFER_MIN_S, self._dev_hsp_min)
         await self._hsp_fill_to(start_time + min_s * 1000)
         self._start_refill()
 
@@ -694,7 +708,7 @@ class HandyController:
         so this just keeps feeding forward from _hsp_next_index."""
         try:
             while True:
-                await asyncio.sleep(self._cfg_int("HANDY_HSP_POLL_INTERVAL_S", DEFAULT_HSP_POLL_INTERVAL_S))
+                await asyncio.sleep(self._cfg_int("HANDY_HSP_POLL_INTERVAL_S", DEFAULT_HSP_POLL_INTERVAL_S, self._dev_hsp_poll))
                 async with self.lock:
                     if self.state != "ready" or not self._is_playing:
                         continue
@@ -713,7 +727,7 @@ class HandyController:
         current_time = self._hsp_current_time(state)
         if current_time is None:
             return
-        max_s = self._cfg_int("HANDY_HSP_BUFFER_MAX_S", DEFAULT_HSP_BUFFER_MAX_S)
+        max_s = self._cfg_int("HANDY_HSP_BUFFER_MAX_S", DEFAULT_HSP_BUFFER_MAX_S, self._dev_hsp_max)
         await self._hsp_fill_to(current_time + max_s * 1000)
 
     @staticmethod
@@ -728,10 +742,12 @@ class HandyController:
         except (KeyError, TypeError, ValueError):
             return None
 
-    def _cfg_int(self, name: str, default: int) -> int:
-        """Read an int config knob (live-tunable via the GUI), falling back to default."""
+    def _cfg_int(self, name: str, default: int, override: Optional[int] = None) -> int:
+        """Resolve an int knob: per-device override wins, else the live global config value, else
+        default. Read fresh each call so GUI edits take effect without a restart."""
+        val = override if override is not None else getattr(config, name, default)
         try:
-            return int(getattr(config, name, default) or default)
+            return int(val if val is not None else default)
         except (TypeError, ValueError):
             return default
 
@@ -839,21 +855,106 @@ class HandyController:
             return None
 
 
+# --- multi-device session group -----------------------------------------
+
+class HandySessionGroup:
+    """Owns the per-`PlaySessionId` set of `HandyController`s (one per enabled device) and fans every
+    lifecycle action out to them concurrently, with per-device isolation — one device failing never
+    affects the others or video. Also owns the pre-activation abandonment watchdog for the session."""
+
+    def __init__(self, session_id: str, scene: Dict[str, Any]):
+        self.session_id = session_id
+        self.scene = scene
+        self.controllers: "list[HandyController]" = []
+        self.lock = asyncio.Lock()
+        self._built = False
+        self._playback_started = False
+        self._abandon_task: Optional[asyncio.Task] = None
+
+    async def _ensure_built(self):
+        """Seed the Stash-configured device (once) and instantiate one controller per enabled device.
+        Idempotent."""
+        if self._built:
+            return
+        self._built = True
+        try:
+            cfg = await stash_client.get_stash_interface_config()
+            handy_devices.ensure_stash_seed(cfg.get("handyKey"))
+        except Exception as e:
+            logger.debug(f"[handy] stash seed skipped for session {self.session_id}: {e}")
+        self.controllers = [
+            HandyController(self.session_id, self.scene, device)
+            for device in handy_devices.enabled_devices()
+        ]
+        if not self.controllers:
+            logger.info(f"[handy] no enabled devices configured; nothing to drive for session {self.session_id}")
+
+    async def _fan(self, method: str, *args):
+        async def run(c: "HandyController"):
+            try:
+                await getattr(c, method)(*args)
+            except Exception as e:
+                logger.debug(f"[handy] {method} error dev={c.label} session={self.session_id}: {e}")
+        await asyncio.gather(*(run(c) for c in self.controllers), return_exceptions=True)
+
+    async def preactivate(self):
+        async with self.lock:
+            await self._ensure_built()
+            await self._fan("preactivate", False)  # group owns the abandonment watchdog
+            if not self._playback_started and self.controllers:
+                self._arm_abandon_timeout()
+
+    async def handle_playing(self, position_seconds: float, is_paused: bool):
+        async with self.lock:
+            await self._ensure_built()
+            self._cancel_abandon_timeout()
+            if not self._playback_started:
+                self._playback_started = True
+                await self._fan("begin_playback", position_seconds, is_paused)
+            else:
+                await self._fan("on_progress", position_seconds, is_paused)
+
+    async def teardown(self):
+        async with self.lock:
+            self._cancel_abandon_timeout()
+            await self._fan("teardown")
+
+    # abandonment watchdog (session-level: no /playing after PlaybackInfo → tear the group down)
+    def _arm_abandon_timeout(self):
+        self._abandon_task = asyncio.create_task(self._abandon_watchdog())
+
+    def _cancel_abandon_timeout(self):
+        if self._abandon_task and not self._abandon_task.done():
+            self._abandon_task.cancel()
+        self._abandon_task = None
+
+    async def _abandon_watchdog(self):
+        try:
+            await asyncio.sleep(PREACTIVATION_ABANDON_S)
+        except asyncio.CancelledError:
+            return
+        if self._playback_started:
+            return
+        logger.info(
+            f"[handy] pre-activation abandoned (no playback in {PREACTIVATION_ABANDON_S}s) — "
+            f"tearing down session={self.session_id}"
+        )
+        await self.teardown()
+        async with _registry_lock:
+            _groups.pop(self.session_id, None)
+        _start_pos_by_session.pop(self.session_id, None)
+
+
 # --- module fan-out API (called from userdata_routes) --------------------
 
 async def _safe_handle_playing(session_id: str, scene: Dict[str, Any], position_seconds: float, is_paused: bool):
     try:
         async with _registry_lock:
-            controller = _controllers.get(session_id)
-            if controller is None:
-                controller = HandyController(session_id, scene)
-                _controllers[session_id] = controller
-        # First real /playing → begin playback (prepares inline if not pre-activated); thereafter
-        # events are progress updates.
-        if not controller._playback_started:
-            await controller.begin_playback(position_seconds, is_paused)
-        else:
-            await controller.on_progress(position_seconds, is_paused)
+            group = _groups.get(session_id)
+            if group is None:
+                group = HandySessionGroup(session_id, scene)
+                _groups[session_id] = group
+        await group.handle_playing(position_seconds, is_paused)
     except Exception as e:
         logger.error(f"[handy] unexpected error handling playing for session {session_id}: {e}")
 
@@ -861,9 +962,9 @@ async def _safe_handle_playing(session_id: str, scene: Dict[str, Any], position_
 async def _safe_handle_stopped(session_id: str):
     try:
         async with _registry_lock:
-            controller = _controllers.pop(session_id, None)
-        if controller is not None:
-            await controller.teardown()
+            group = _groups.pop(session_id, None)
+        if group is not None:
+            await group.teardown()
     except Exception as e:
         logger.error(f"[handy] unexpected error handling stopped for session {session_id}: {e}")
 
@@ -883,9 +984,9 @@ def notify_playing(session_id: str, scene: Optional[Dict[str, Any]], position_se
 
 
 def notify_stopped(session_id: str):
-    """Fire-and-forget: schedule Handy teardown for a stopped event. No-op if no controller exists
+    """Fire-and-forget: schedule Handy teardown for a stopped event. No-op if no group exists
     for this session."""
-    if session_id not in _controllers:
+    if session_id not in _groups:
         return
     try:
         asyncio.create_task(_safe_handle_stopped(session_id))
@@ -896,11 +997,11 @@ def notify_stopped(session_id: str):
 async def _safe_preactivate(session_id: str, scene: Dict[str, Any]):
     try:
         async with _registry_lock:
-            if session_id in _controllers:
+            if session_id in _groups:
                 return  # already (pre)activated for this session
-            controller = HandyController(session_id, scene)
-            _controllers[session_id] = controller
-        await controller.preactivate()
+            group = HandySessionGroup(session_id, scene)
+            _groups[session_id] = group
+        await group.preactivate()
     except Exception as e:
         logger.debug(f"[handy] preactivate error for session {session_id}: {e}")
 
@@ -937,6 +1038,72 @@ def note_start_position(scene_id: str, start_seconds: float):
         _start_pos_by_session[f"stash_{scene_id}"] = float(start_seconds)
     except (TypeError, ValueError):
         pass
+
+
+# --- device registry HTTP API (config GUI) -------------------------------
+
+async def _probe_connected(device: Dict[str, Any]) -> bool:
+    """Best-effort connection probe for one device, reusing the controller's v2/v3-aware
+    `_get_connected`. Never raises."""
+    try:
+        c = HandyController("probe", {}, device)
+        if not c.key:
+            return False
+        return await c._get_connected()
+    except Exception:
+        return False
+
+
+async def endpoint_devices_list(request: Request) -> Response:
+    """List configured Handy devices. Auto-seeds the Stash-configured connection key as a device on
+    first sight (never deletes existing ones)."""
+    try:
+        cfg = await stash_client.get_stash_interface_config()
+        handy_devices.ensure_stash_seed(cfg.get("handyKey"))
+    except Exception as e:
+        logger.debug(f"[handy] device-list stash seed skipped: {e}")
+    return JSONResponse({"devices": handy_devices.list_devices(),
+                         "application_id_set": bool(_app_id())})
+
+
+async def endpoint_devices_create(request: Request) -> Response:
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    device = handy_devices.add_device(body, source="manual")
+    return JSONResponse(device, status_code=201)
+
+
+async def endpoint_devices_update(request: Request) -> Response:
+    device_id = request.path_params.get("device_id", "")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    device = handy_devices.update_device(device_id, body)
+    if device is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse(device)
+
+
+async def endpoint_devices_delete(request: Request) -> Response:
+    device_id = request.path_params.get("device_id", "")
+    if not handy_devices.delete_device(device_id):
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"status": "deleted"})
+
+
+async def endpoint_devices_status(request: Request) -> Response:
+    """Probe every enabled device's Handy connection concurrently for the GUI status glow. Shares the
+    handyfeeling rate budget, so the GUI polls this infrequently (tab open + every 30 s)."""
+    devices = handy_devices.enabled_devices()
+    results = await asyncio.gather(*(_probe_connected(d) for d in devices), return_exceptions=True)
+    status = [
+        {"id": d.get("id"), "connected": (r is True)}
+        for d, r in zip(devices, results)
+    ]
+    return JSONResponse({"status": status})
 
 
 # --- LAN funscript serving (retained for a future publicly-reachable deployment) -----------

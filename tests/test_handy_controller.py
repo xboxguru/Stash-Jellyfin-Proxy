@@ -22,8 +22,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from starlette.datastructures import QueryParams
 
 import config
-from api import handy_controller
-from api.handy_controller import HandyController, funscript_to_csv, funscript_to_points
+from api import handy_controller, handy_devices
+from api.handy_controller import HandyController, HandySessionGroup, funscript_to_csv, funscript_to_points
 
 
 def make_interactive_scene(scene_id="751", funscript_url="http://stash:9999/scene/751/funscript", interactive=True):
@@ -32,9 +32,11 @@ def make_interactive_scene(scene_id="751", funscript_url="http://stash:9999/scen
 
 @pytest.fixture(autouse=True)
 def _clean_registry():
-    handy_controller._controllers.clear()
+    handy_controller._groups.clear()
     handy_controller._script_url_cache.clear()
     handy_controller._start_pos_by_session.clear()
+    handy_devices._devices.clear()
+    handy_devices._loaded = True   # treat as loaded/empty; don't touch disk during tests
     config.HANDY_SYNC_MODE = "auto"
     config.HANDY_APPLICATION_ID = ""   # default to v2 unless a test opts into v3
     config.HANDY_HSP_BUFFER_MIN_S = 30
@@ -44,8 +46,9 @@ def _clean_registry():
     handy_controller.SEEK_DEBOUNCE_S = 0.01  # keep debounce tests fast
     yield
     handy_controller.SEEK_DEBOUNCE_S = orig_debounce
-    handy_controller._controllers.clear()
+    handy_controller._groups.clear()
     handy_controller._script_url_cache.clear()
+    handy_devices._devices.clear()
 
 
 async def _flush_play(c):
@@ -304,21 +307,28 @@ class TestActivation:
 
 # ── fan-out gating + isolation ────────────────────────────────────────────────
 
+def _patch_seed_cfg(**over):
+    """Patch the Stash interface-config fetch used by group build/seed (no network in tests)."""
+    cfg = {"handyKey": "", "funscriptOffset": 0, "useStashHostedFunscript": False}
+    cfg.update(over)
+    return patch("core.stash_client.get_stash_interface_config", new=AsyncMock(return_value=cfg))
+
+
 class TestFanOut:
     def test_notify_playing_noop_when_disabled(self):
         config.ENABLE_HANDY_SYNC = False
         handy_controller.notify_playing("s", make_interactive_scene(), 0.0, False)
-        assert "s" not in handy_controller._controllers
+        assert "s" not in handy_controller._groups
 
     def test_notify_playing_noop_when_non_interactive(self):
         config.ENABLE_HANDY_SYNC = True
         handy_controller.notify_playing("s", make_interactive_scene(interactive=False), 0.0, False)
-        assert "s" not in handy_controller._controllers
+        assert "s" not in handy_controller._groups
 
     def test_notify_playing_noop_when_scene_none(self):
         config.ENABLE_HANDY_SYNC = True
         handy_controller.notify_playing("s", None, 0.0, False)
-        assert "s" not in handy_controller._controllers
+        assert "s" not in handy_controller._groups
 
     async def test_notify_playing_schedules_handler_when_enabled(self):
         config.ENABLE_HANDY_SYNC = True
@@ -334,32 +344,33 @@ class TestFanOut:
 
     async def test_safe_handle_playing_swallows_exceptions(self):
         config.ENABLE_HANDY_SYNC = True
-        with patch.object(HandyController, "begin_playback", new=AsyncMock(side_effect=RuntimeError("boom"))):
-            # Must not raise — isolation contract.
+        handy_devices.add_device({"key": "k", "label": "d1"})
+        with patch.object(HandyController, "begin_playback", new=AsyncMock(side_effect=RuntimeError("boom"))), \
+             _patch_seed_cfg():
+            # Must not raise — isolation contract (per-device error is swallowed by the group fan-out).
             await handy_controller._safe_handle_playing("s3", make_interactive_scene(), 0.0, False)
 
-    async def test_failed_controller_is_not_retried(self):
+    async def test_first_event_begins_then_progresses(self):
         config.ENABLE_HANDY_SYNC = True
+        handy_devices.add_device({"key": "k", "label": "d1"})
         with patch.object(HandyController, "begin_playback", new=AsyncMock()) as m_begin, \
-             patch.object(HandyController, "on_progress", new=AsyncMock()) as m_progress:
-            # First event begins playback; mark started+failed afterwards (as real begin_playback would).
+             patch.object(HandyController, "on_progress", new=AsyncMock()) as m_progress, \
+             _patch_seed_cfg():
+            # First event → begin_playback; second → on_progress (group tracks _playback_started).
             await handy_controller._safe_handle_playing("s4", make_interactive_scene(), 0.0, False)
-            handy_controller._controllers["s4"]._playback_started = True
-            handy_controller._controllers["s4"].state = "failed"
-            # Second event routes to on_progress (no re-begin), which itself no-ops on failed.
             await handy_controller._safe_handle_playing("s4", make_interactive_scene(), 1.0, False)
         assert m_begin.await_count == 1
         assert m_progress.await_count == 1
 
     async def test_notify_stopped_tears_down(self):
         config.ENABLE_HANDY_SYNC = True
-        c = _ready_controller("s5")
-        handy_controller._controllers["s5"] = c
-        with patch.object(c, "teardown", new=AsyncMock()) as m_teardown:
+        group = HandySessionGroup("s5", make_interactive_scene())
+        handy_controller._groups["s5"] = group
+        with patch.object(group, "teardown", new=AsyncMock()) as m_teardown:
             handy_controller.notify_stopped("s5")
             await asyncio.sleep(0)
         m_teardown.assert_awaited_once()
-        assert "s5" not in handy_controller._controllers
+        assert "s5" not in handy_controller._groups
 
 
 # ── LAN/direct funscript-serving endpoint ─────────────────────────────────────
@@ -426,34 +437,34 @@ class TestPrewarmCache:
 class TestPreactivation:
     async def test_prewarm_noop_when_disabled(self):
         config.ENABLE_HANDY_SYNC = False
-        with patch.object(HandyController, "preactivate", new=AsyncMock()) as m:
+        with patch.object(HandySessionGroup, "preactivate", new=AsyncMock()) as m:
             handy_controller.prewarm(make_interactive_scene())
             await asyncio.sleep(0.02)
         m.assert_not_awaited()
-        assert "stash_751" not in handy_controller._controllers
+        assert "stash_751" not in handy_controller._groups
 
     async def test_prewarm_noop_when_non_interactive(self):
         config.ENABLE_HANDY_SYNC = True
-        with patch.object(HandyController, "preactivate", new=AsyncMock()) as m:
+        with patch.object(HandySessionGroup, "preactivate", new=AsyncMock()) as m:
             handy_controller.prewarm(make_interactive_scene(interactive=False))
             await asyncio.sleep(0.02)
         m.assert_not_awaited()
 
     async def test_prewarm_preactivates_under_deterministic_session_id(self):
         config.ENABLE_HANDY_SYNC = True
-        with patch.object(HandyController, "preactivate", new=AsyncMock()) as m:
+        with patch.object(HandySessionGroup, "preactivate", new=AsyncMock()) as m:
             handy_controller.prewarm(make_interactive_scene("751"))
             await asyncio.sleep(0.02)
         m.assert_awaited_once()
-        assert "stash_751" in handy_controller._controllers  # keyed like PlaybackInfo's PlaySessionId
+        assert "stash_751" in handy_controller._groups  # keyed like PlaybackInfo's PlaySessionId
 
     async def test_prewarm_idempotent_if_already_registered(self):
         config.ENABLE_HANDY_SYNC = True
-        handy_controller._controllers["stash_751"] = _ready_controller("stash_751")
-        with patch.object(HandyController, "preactivate", new=AsyncMock()) as m:
+        handy_controller._groups["stash_751"] = HandySessionGroup("stash_751", make_interactive_scene("751"))
+        with patch.object(HandySessionGroup, "preactivate", new=AsyncMock()) as m:
             handy_controller.prewarm(make_interactive_scene("751"))
             await asyncio.sleep(0.02)
-        m.assert_not_awaited()  # already (pre)active — no second controller/preactivate
+        m.assert_not_awaited()  # already (pre)active — no second group/preactivate
 
     async def test_preactivate_prepares_without_playing(self):
         c = HandyController("stash_751", make_interactive_scene("751"))
@@ -489,20 +500,16 @@ class TestPreactivation:
 
 class TestResolveUseHsp:
     def test_auto_follows_stash_local(self):
-        config.HANDY_SYNC_MODE = "auto"
-        assert handy_controller._resolve_use_hsp({"useStashHostedFunscript": True}) is True
+        assert handy_controller._resolve_use_hsp("auto", {"useStashHostedFunscript": True}) is True
 
     def test_auto_follows_stash_cloud(self):
-        config.HANDY_SYNC_MODE = "auto"
-        assert handy_controller._resolve_use_hsp({"useStashHostedFunscript": False}) is False
+        assert handy_controller._resolve_use_hsp("auto", {"useStashHostedFunscript": False}) is False
 
     def test_hosted_forces_hssp_ignoring_stash(self):
-        config.HANDY_SYNC_MODE = "hosted"
-        assert handy_controller._resolve_use_hsp({"useStashHostedFunscript": True}) is False
+        assert handy_controller._resolve_use_hsp("hosted", {"useStashHostedFunscript": True}) is False
 
     def test_local_forces_hsp_ignoring_stash(self):
-        config.HANDY_SYNC_MODE = "local"
-        assert handy_controller._resolve_use_hsp({"useStashHostedFunscript": False}) is True
+        assert handy_controller._resolve_use_hsp("local", {"useStashHostedFunscript": False}) is True
 
 
 # ── API version gating (HANDY_APPLICATION_ID → v3, else v2) ────────────────────
@@ -832,3 +839,114 @@ class TestHspRefill:
         except asyncio.CancelledError:
             pass
         assert task.done()
+
+
+# ── multi-device: per-device binding, session group, endpoints ────────────────
+
+class TestDeviceBinding:
+    async def test_controller_uses_device_key_and_mode(self):
+        config.HANDY_APPLICATION_ID = "app-xyz"
+        device = {"label": "Toy2", "key": "devkey", "sync_mode": "hosted"}
+        c = HandyController("s", make_interactive_scene(), device)
+        c._get_connected = AsyncMock(return_value=True)
+        c._estimate_offset = AsyncMock(return_value=0.0)
+        c._prepare_hssp = AsyncMock(return_value=True)
+        c._prepare_hsp = AsyncMock(return_value=True)
+        with patch("core.stash_client.get_stash_interface_config",
+                   new=AsyncMock(return_value={"handyKey": "STASHKEY", "useStashHostedFunscript": True})):
+            await c.preactivate()
+        assert c.key == "devkey"          # device key wins over Stash's
+        assert c.use_hsp is False         # sync_mode=hosted forces HSSP even though Stash says local
+        c._prepare_hssp.assert_awaited_once()
+        c._prepare_hsp.assert_not_awaited()
+        c._cancel_abandon_timeout()
+
+    async def test_device_offset_overrides_stash(self):
+        device = {"key": "k", "funscript_offset": 500}
+        c = HandyController("s", make_interactive_scene(), device)
+        c._get_connected = AsyncMock(return_value=True)
+        c._estimate_offset = AsyncMock(return_value=0.0)
+        c._prepare_hssp = AsyncMock(return_value=True)
+        with patch("core.stash_client.get_stash_interface_config",
+                   new=AsyncMock(return_value={"funscriptOffset": 999})):
+            await c.preactivate()
+        assert c.script_offset_ms == 500   # device override wins over Stash's 999
+        c._cancel_abandon_timeout()
+
+    def test_device_hsp_knob_override(self):
+        c = HandyController("s", make_interactive_scene(), {"key": "k", "hsp_buffer_max_s": 90})
+        assert c._cfg_int("HANDY_HSP_BUFFER_MAX_S", 60, c._dev_hsp_max) == 90
+        # None override falls back to the global default
+        c2 = HandyController("s", make_interactive_scene(), {"key": "k"})
+        assert c2._cfg_int("HANDY_HSP_BUFFER_MAX_S", 60, c2._dev_hsp_max) == 60
+
+
+class TestHandySessionGroup:
+    async def test_builds_one_controller_per_enabled_device(self):
+        handy_devices.add_device({"key": "k1", "label": "A"})
+        handy_devices.add_device({"key": "k2", "label": "B", "enabled": False})
+        handy_devices.add_device({"key": "k3", "label": "C"})
+        group = HandySessionGroup("sess", make_interactive_scene())
+        with patch.object(HandyController, "preactivate", new=AsyncMock()), _patch_seed_cfg():
+            await group.preactivate()
+        assert [c.label for c in group.controllers] == ["A", "C"]  # disabled B skipped
+        group._cancel_abandon_timeout()
+
+    async def test_fan_isolates_per_device_failure(self):
+        handy_devices.add_device({"key": "k1", "label": "A"})
+        handy_devices.add_device({"key": "k2", "label": "B"})
+        driven = []
+
+        async def begin(self, pos, paused):
+            driven.append(self.label)
+            if self.label == "A":
+                raise RuntimeError("device A boom")
+
+        group = HandySessionGroup("sess", make_interactive_scene())
+        with patch.object(HandyController, "begin_playback", new=begin), _patch_seed_cfg():
+            await group.handle_playing(5.0, False)  # must not raise
+        assert set(driven) == {"A", "B"}  # B still driven despite A failing
+
+    async def test_handle_playing_begins_then_progresses(self):
+        handy_devices.add_device({"key": "k1", "label": "A"})
+        group = HandySessionGroup("sess", make_interactive_scene())
+        with patch.object(HandyController, "begin_playback", new=AsyncMock()) as mb, \
+             patch.object(HandyController, "on_progress", new=AsyncMock()) as mp, _patch_seed_cfg():
+            await group.handle_playing(0.0, False)
+            await group.handle_playing(1.0, False)
+        assert mb.await_count == 1 and mp.await_count == 1
+
+    async def test_teardown_fans_to_all(self):
+        handy_devices.add_device({"key": "k1", "label": "A"})
+        handy_devices.add_device({"key": "k2", "label": "B"})
+        group = HandySessionGroup("sess", make_interactive_scene())
+        with patch.object(HandyController, "preactivate", new=AsyncMock()), _patch_seed_cfg():
+            await group.preactivate()
+        with patch.object(HandyController, "teardown", new=AsyncMock()) as mt:
+            await group.teardown()
+        assert mt.await_count == 2
+
+    async def test_seed_adds_stash_device_on_build(self):
+        group = HandySessionGroup("sess", make_interactive_scene())
+        with patch.object(HandyController, "preactivate", new=AsyncMock()), \
+             _patch_seed_cfg(handyKey="stashkey"):
+            await group.preactivate()
+        assert any(d["key"] == "stashkey" for d in handy_devices.list_devices())
+        group._cancel_abandon_timeout()
+
+
+class TestDeviceEndpoints:
+    async def test_status_probes_only_enabled(self):
+        handy_devices.add_device({"key": "k1", "label": "A"})
+        handy_devices.add_device({"key": "k2", "label": "B", "enabled": False})
+        with patch.object(handy_controller, "_probe_connected", new=AsyncMock(return_value=True)):
+            resp = await handy_controller.endpoint_devices_status(_FakeRequest(""))
+        data = json.loads(bytes(resp.body))
+        assert len(data["status"]) == 1
+        assert data["status"][0]["connected"] is True
+
+    async def test_list_seeds_stash_device(self):
+        with _patch_seed_cfg(handyKey="stashk"):
+            resp = await handy_controller.endpoint_devices_list(_FakeRequest(""))
+        data = json.loads(bytes(resp.body))
+        assert any(d["key"] == "stashk" for d in data["devices"])
