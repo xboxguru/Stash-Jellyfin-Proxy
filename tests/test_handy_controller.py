@@ -23,7 +23,7 @@ from starlette.datastructures import QueryParams
 
 import config
 from api import handy_controller
-from api.handy_controller import HandyController, funscript_to_csv
+from api.handy_controller import HandyController, funscript_to_csv, funscript_to_points
 
 
 def make_interactive_scene(scene_id="751", funscript_url="http://stash:9999/scene/751/funscript", interactive=True):
@@ -37,6 +37,9 @@ def _clean_registry():
     handy_controller._start_pos_by_session.clear()
     config.HANDY_SYNC_MODE = "auto"
     config.HANDY_APPLICATION_ID = ""   # default to v2 unless a test opts into v3
+    config.HANDY_HSP_BUFFER_MIN_S = 30
+    config.HANDY_HSP_BUFFER_MAX_S = 60
+    config.HANDY_HSP_POLL_INTERVAL_S = 15
     orig_debounce = handy_controller.SEEK_DEBOUNCE_S
     handy_controller.SEEK_DEBOUNCE_S = 0.01  # keep debounce tests fast
     yield
@@ -174,6 +177,42 @@ class TestPlayOffsets:
         assert body["startTime"] == 10 * 1000 + 400          # positionSeconds*1000 + scriptOffset
         assert body["serverTime"] == round(1000.0 + 5000.0)  # estimatedServerTimeOffset + now
         assert c._is_playing is True
+
+
+# ── position extrapolation (report→issue lag compensation) ────────────────────
+
+class TestPositionExtrapolation:
+    async def test_play_extrapolates_stale_position(self):
+        c = HandyController("s", make_interactive_scene())  # v2 (no app id)
+        c.estimated_offset_ms = 0.0
+        c.script_offset_ms = 0
+        c._api_put = AsyncMock()
+        c._last_event_t = time.monotonic() - 0.4  # position was sampled ~0.4 s ago
+        await c._play(10.0)
+        _, body = c._api_put.await_args[0]
+        assert 10350 <= body["startTime"] <= 10600  # advanced ~400 ms (slack for test timing)
+
+    async def test_play_no_extrapolation_without_anchor(self):
+        c = HandyController("s", make_interactive_scene())
+        c.estimated_offset_ms = 0.0
+        c.script_offset_ms = 0
+        c._api_put = AsyncMock()
+        assert c._last_event_t is None
+        await c._play(10.0)
+        _, body = c._api_put.await_args[0]
+        assert body["startTime"] == 10000  # unchanged
+
+    def test_extrapolation_is_capped(self):
+        c = HandyController("s", make_interactive_scene())
+        c._last_event_t = time.monotonic() - 100  # absurdly stale
+        assert c._extrapolated_pos(5.0) == 5.0 + handy_controller.MAX_EXTRAPOLATION_S
+
+    async def test_hsp_play_receives_extrapolated_pos(self):
+        c = _hsp_controller()
+        c._hsp_play = AsyncMock()
+        c._last_event_t = time.monotonic() - 0.4
+        await c._play(10.0)
+        assert 10.35 <= c._hsp_play.await_args[0][0] <= 10.6
 
 
 # ── activation ────────────────────────────────────────────────────────────────
@@ -512,3 +551,284 @@ class TestApiVersionGating:
         c._api_put = AsyncMock(return_value={"result": 0})
         await c._set_mode(1)
         assert c._api_put.await_args[0][0] == "mode"
+
+
+# ── HSP (local streaming) point conversion ────────────────────────────────────
+
+class TestFunscriptToPoints:
+    def test_basic_points(self):
+        pts = funscript_to_points({"actions": [{"at": 0, "pos": 0}, {"at": 100, "pos": 90}]})
+        assert pts == [{"t": 0, "x": 0}, {"t": 100, "x": 90}]
+
+    def test_inverted_flips_position(self):
+        assert funscript_to_points({"actions": [{"at": 5, "pos": 20}], "inverted": True}) == [{"t": 5, "x": 80}]
+
+    def test_clamps_out_of_range(self):
+        pts = funscript_to_points({"actions": [{"at": 0, "pos": 250}, {"at": 1, "pos": -5}]})
+        assert pts == [{"t": 0, "x": 100}, {"t": 1, "x": 0}]
+
+    def test_sorted_by_time(self):
+        pts = funscript_to_points({"actions": [{"at": 200, "pos": 5}, {"at": 10, "pos": 6}]})
+        assert [p["t"] for p in pts] == [10, 200]
+
+    def test_skips_malformed_and_empty(self):
+        assert funscript_to_points({"actions": [{"at": None, "pos": 5}]}) == []
+        assert funscript_to_points({"actions": []}) == []
+
+
+# ── HSP setup / prepare branch ────────────────────────────────────────────────
+
+def _hsp_controller(session_id="hsp-1", points=None):
+    """A v3 HSP controller pre-seeded with points and a stubbed offset, ready for _hsp_play.
+    Default points are 1/s (sparse), so the 30 s seed fits in the first 100-point batch and play
+    issues a single call — dense cases pass their own points."""
+    config.HANDY_APPLICATION_ID = "app-xyz"
+    c = HandyController(session_id, make_interactive_scene())
+    c.state = "ready"
+    c.use_hsp = True
+    c.estimated_offset_ms = 0.0
+    c.script_offset_ms = 0
+    c._hsp_points = points if points is not None else [{"t": i * 1000, "x": i % 100} for i in range(500)]
+    c._hsp_times = [p["t"] for p in c._hsp_points]
+    return c
+
+
+class TestHspPrepareBranch:
+    def _patch_cfg(self, **over):
+        cfg = {"handyKey": "kJVRef7g", "funscriptOffset": 0, "useStashHostedFunscript": True}
+        cfg.update(over)
+        return patch("core.stash_client.get_stash_interface_config", new=AsyncMock(return_value=cfg))
+
+    async def test_prepare_uses_hsp_when_local_and_v3(self):
+        config.HANDY_APPLICATION_ID = "app-xyz"
+        config.HANDY_SYNC_MODE = "local"
+        c = HandyController("s", make_interactive_scene())
+        c._get_connected = AsyncMock(return_value=True)
+        c._estimate_offset = AsyncMock(return_value=0.0)
+        c._set_mode = AsyncMock(return_value=True)
+        c._hsp_setup = AsyncMock(return_value=True)
+        with patch("api.handy_controller._fetch_funscript",
+                   new=AsyncMock(return_value={"actions": [{"at": 0, "pos": 10}, {"at": 50, "pos": 90}]})), \
+             self._patch_cfg():
+            await c.preactivate()
+        assert c.state == "ready"
+        assert c.use_hsp is True
+        assert c._hsp_points == [{"t": 0, "x": 10}, {"t": 50, "x": 90}]
+        c._set_mode.assert_awaited_once_with(handy_controller.MODE_HSP)
+        c._hsp_setup.assert_awaited_once()
+        c._cancel_abandon_timeout()
+
+    async def test_hsp_fails_loudly_without_v3(self):
+        config.HANDY_APPLICATION_ID = ""   # no app id -> v2 only
+        config.HANDY_SYNC_MODE = "local"
+        c = HandyController("s", make_interactive_scene())
+        c._get_connected = AsyncMock(return_value=True)
+        with self._patch_cfg():
+            await c.preactivate()
+        assert c.state == "failed"          # no silent HSSP fallback
+        c._get_connected.assert_not_awaited()
+
+    async def test_hsp_setup_captures_max_points_and_stream_id(self):
+        config.HANDY_APPLICATION_ID = "app-xyz"
+        c = HandyController("s", make_interactive_scene())
+        c._api_put = AsyncMock(return_value={"result": {"max_points": 9876, "stream_id": 42}})
+        assert await c._hsp_setup() is True
+        assert c._hsp_max_points == 9876
+        assert c._hsp_stream_id == 42
+        assert c._api_put.await_args[0][0] == "hsp/setup"
+
+
+# ── HSP play / seed / refill ──────────────────────────────────────────────────
+
+def _dense_points(count, step_ms=100):
+    """Points every step_ms (default 10/s) — used to exercise multi-chunk seeding/refill."""
+    return [{"t": i * step_ms, "x": i % 100} for i in range(count)]
+
+
+class TestHspPlay:
+    async def test_play_seeds_from_position_with_flush(self):
+        c = _hsp_controller()  # 1/s points
+        c._api_put = AsyncMock(return_value={"result": {}})
+        with patch("api.handy_controller._now_ms", return_value=5000.0):
+            await c._hsp_play(10.0)  # 10 s -> start_time 10000 ms -> index 10
+        # First (and only, sparse) call is the play with the embedded flush seed.
+        path, body = c._api_put.await_args_list[0][0]
+        assert path == "hsp/play"
+        assert body["start_time"] == 10000
+        assert body["server_time"] == 5000
+        add = body["add"]
+        assert add["flush"] is True
+        assert len(add["points"]) == handy_controller.HSP_ADD_BATCH  # 100 pts covers >30 s at 1/s
+        assert add["points"][0] == {"t": 10000, "x": 10}
+        assert add["tail_point_stream_index"] == handy_controller.HSP_ADD_BATCH - 1
+        assert c._is_playing is True
+        assert c._hsp_next_index == 10 + handy_controller.HSP_ADD_BATCH
+        c._cancel_refill()
+
+    async def test_play_seeds_min_seconds_when_dense(self):
+        # Dense (10/s): the play's embedded add only covers 10 s, so follow-up adds must fill to the
+        # 30 s seed floor before the refill task starts.
+        c = _hsp_controller(points=_dense_points(2000))
+        c._api_put = AsyncMock(return_value={"result": {}})
+        await c._hsp_play(0.0)
+        calls = c._api_put.await_args_list
+        assert calls[0][0][0] == "hsp/play"
+        assert all(call[0][0] == "hsp/add" for call in calls[1:])
+        assert calls[1][0][1]["flush"] is False       # follow-up seed adds don't flush
+        # 30 s at 10/s = ~300 pts -> the 100-pt play seed + 2 more adds (200 pts) -> covers t<=30000.
+        assert c._hsp_next_index >= 300
+        assert c._hsp_points[c._hsp_next_index - 1]["t"] <= 30000 + 100
+        c._cancel_refill()
+
+    async def test_play_applies_script_offset_to_seed(self):
+        pts = [{"t": t, "x": 0} for t in (0, 1000, 2000, 3000)]
+        c = _hsp_controller(points=pts)
+        c.script_offset_ms = 1000
+        c._api_put = AsyncMock(return_value={"result": {}})
+        await c._hsp_play(1.0)  # 1000 + offset 1000 = start_time 2000 -> seed at t>=2000
+        add = c._api_put.await_args_list[0][0][1]["add"]
+        assert add["points"][0]["t"] == 2000
+        c._cancel_refill()
+
+    async def test_play_past_end_does_not_command(self):
+        pts = [{"t": t, "x": 0} for t in (0, 100, 200)]
+        c = _hsp_controller(points=pts)
+        c._api_put = AsyncMock()
+        await c._hsp_play(999.0)  # far past the last point
+        c._api_put.assert_not_awaited()
+        assert c._is_playing is False
+
+    async def test_play_not_accepted_leaves_not_playing(self):
+        c = _hsp_controller()
+        c._api_put = AsyncMock(return_value=None)  # device rejected
+        await c._hsp_play(0.0)
+        assert c._is_playing is False
+
+    async def test_seek_reseeds_with_flush_and_resets_counter(self):
+        c = _hsp_controller()
+        c._api_put = AsyncMock(return_value={"result": {}})
+        await c._hsp_play(0.0)
+        first_sent = c._hsp_points_sent
+        await c._hsp_play(20.0)  # seek -> new flush add
+        add = c._api_put.await_args_list[-1][0][1]["add"]
+        assert add["flush"] is True
+        # flush restarts the run, so the counter reflects only this batch, not the sum.
+        assert c._hsp_points_sent == len(add["points"]) == first_sent
+        c._cancel_refill()
+
+    async def test_dispatch_play_routes_to_hsp(self):
+        # _play() must branch to _hsp_play when use_hsp is set.
+        c = _hsp_controller()
+        c._hsp_play = AsyncMock()
+        await c._play(3.0)
+        c._hsp_play.assert_awaited_once_with(3.0)
+
+    async def test_stop_uses_hsp_endpoint(self):
+        c = _hsp_controller()
+        c._api_put = AsyncMock()
+        c._is_playing = True
+        await c._stop()
+        assert c._api_put.await_args[0][0] == "hsp/stop"
+        assert c._is_playing is False
+
+
+class TestHspRefill:
+    def test_current_time_parses_result_and_flat(self):
+        assert HandyController._hsp_current_time({"result": {"current_time": 1234}}) == 1234
+        assert HandyController._hsp_current_time({"current_time": 7}) == 7
+        assert HandyController._hsp_current_time(None) is None
+        assert HandyController._hsp_current_time({"result": {}}) is None
+
+    async def test_refill_fills_to_max_seconds_ahead(self):
+        c = _hsp_controller()  # 1/s points
+        c._is_playing = True
+        c._hsp_next_index = 0
+        c._api_get = AsyncMock(return_value={"result": {"current_time": 0}})
+        c._api_put = AsyncMock(return_value={"result": {}})
+        await c._hsp_refill_once()  # MAX=60 s -> fill points with t<=60000 (61 points, one add)
+        assert c._api_put.await_count == 1
+        assert c._hsp_next_index == 61
+        assert c._hsp_points[c._hsp_next_index - 1]["t"] <= 60000
+
+    async def test_refill_uses_device_current_time_as_window_base(self):
+        c = _hsp_controller()  # 1/s
+        c._is_playing = True
+        c._hsp_next_index = 100  # already streamed up to t=99000
+        c._api_get = AsyncMock(return_value={"result": {"current_time": 100000}})  # 100 s in
+        c._api_put = AsyncMock(return_value={"result": {}})
+        await c._hsp_refill_once()  # window end = 100000 + 60000 = 160000 -> up to index 161
+        assert c._hsp_next_index == 161
+
+    async def test_refill_noop_when_already_buffered_past_window(self):
+        c = _hsp_controller()  # 1/s
+        c._is_playing = True
+        c._hsp_next_index = 200  # already buffered to t=199000, well past a 60 s window from t=0
+        c._api_get = AsyncMock(return_value={"result": {"current_time": 0}})
+        c._api_put = AsyncMock()
+        await c._hsp_refill_once()
+        c._api_put.assert_not_awaited()
+
+    async def test_refill_chunks_dense_buffer(self):
+        c = _hsp_controller(points=_dense_points(2000))  # 10/s
+        c._is_playing = True
+        c._hsp_next_index = 0
+        c._api_get = AsyncMock(return_value={"result": {"current_time": 0}})
+        c._api_put = AsyncMock(return_value={"result": {}})
+        await c._hsp_refill_once()  # 60 s at 10/s = 601 pts (incl. t=60000) -> 7 adds
+        assert c._api_put.await_count == 7
+        assert c._hsp_next_index == 601
+
+    async def test_refill_caps_adds_per_fill(self):
+        # Ultra-dense (100/s): a 60 s window is 6000 pts, but a single pass is capped.
+        c = _hsp_controller(points=_dense_points(10000, step_ms=10))
+        c._is_playing = True
+        c._hsp_next_index = 0
+        c._api_get = AsyncMock(return_value={"result": {"current_time": 0}})
+        c._api_put = AsyncMock(return_value={"result": {}})
+        await c._hsp_refill_once()
+        assert c._api_put.await_count == handy_controller.HSP_MAX_ADDS_PER_FILL
+        assert c._hsp_next_index == handy_controller.HSP_MAX_ADDS_PER_FILL * handy_controller.HSP_ADD_BATCH
+
+    async def test_refill_stops_at_end_of_script(self):
+        pts = [{"t": t, "x": 0} for t in range(0, 5000, 1000)]  # 5 points, 1/s
+        c = _hsp_controller(points=pts)
+        c._is_playing = True
+        c._hsp_next_index = 3  # only 2 points left
+        c._api_get = AsyncMock(return_value={"result": {"current_time": 0}})
+        c._api_put = AsyncMock(return_value={"result": {}})
+        await c._hsp_refill_once()
+        assert c._api_put.await_count == 1
+        assert c._hsp_next_index == 5  # pushed the remaining 2, then stopped
+
+    async def test_refill_noop_when_no_current_time(self):
+        c = _hsp_controller()
+        c._is_playing = True
+        c._api_get = AsyncMock(return_value={"result": {}})  # no current_time
+        c._api_put = AsyncMock()
+        await c._hsp_refill_once()
+        c._api_put.assert_not_awaited()
+
+    async def test_refill_stops_on_add_rejection(self):
+        c = _hsp_controller(points=_dense_points(2000))
+        c._is_playing = True
+        c._hsp_next_index = 0
+        c._api_get = AsyncMock(return_value={"result": {"current_time": 0}})
+        c._api_put = AsyncMock(return_value=None)  # first add rejected
+        await c._hsp_refill_once()
+        assert c._api_put.await_count == 1
+        assert c._hsp_next_index == 0
+
+    async def test_teardown_cancels_refill_task(self):
+        c = _hsp_controller()
+        c._api_put = AsyncMock()
+        c._start_refill()
+        task = c._hsp_refill_task
+        assert task is not None and not task.done()
+        await c.teardown()
+        assert c._hsp_refill_task is None
+        # Drain the cancelled task (it may be cancelled before its handler runs, or catch+return).
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        assert task.done()

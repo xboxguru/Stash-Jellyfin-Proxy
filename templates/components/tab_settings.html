@@ -221,20 +221,43 @@
                         <div class="toggle-hint">Drive a connected Handy device in sync with interactive scenes (funscript). Connection key and offset are read from your Stash interface settings. Non-interactive scenes are unaffected; toy errors never interrupt video playback.</div>
                     </div>
                 </div>
-                <div class="form-group" style="max-width: 320px; margin-top: 16px; margin-bottom: 0;">
-                    <label class="form-label">Sync Mode</label>
-                    <select class="form-input" name="HANDY_SYNC_MODE">
-                        <option value="auto">Auto (follow Stash setting)</option>
-                        <option value="hosted">Hosted / HSSP (cloud — stable)</option>
-                        <option value="local">Local / HSP (LAN streaming — beta)</option>
-                    </select>
-                    <div class="form-hint">How the funscript reaches the device. <b>Auto</b> follows Stash's "serve funscripts directly" toggle. <b>Hosted</b> forces handyfeeling cloud hosting (HSSP) — the reliable path. <b>Local</b> forces LAN streaming (HSP) — keeps scripts on your network, still in beta. Handy firmware 4.x no longer accepts private script URLs, so plain LAN-URL serving no longer works; use Local (HSP) for on-network playback.</div>
+                <div class="form-row" style="margin-top: 16px;">
+                    <div class="form-group" style="margin-bottom: 0;">
+                        <label class="form-label">Sync Mode</label>
+                        <select class="form-input" name="HANDY_SYNC_MODE">
+                            <option value="auto">Auto (follow Stash)</option>
+                            <option value="hosted">Hosted / HSSP (cloud)</option>
+                            <option value="local">Local / HSP (LAN)</option>
+                        </select>
+                        <div class="form-hint">How the funscript reaches the device: <b>Auto</b> follows Stash, <b>Hosted</b> uploads it as a hosted file (HSSP), <b>Local</b> streams it live (HSP) — no hosted copy or size cap. Both still relay via the Handy cloud.</div>
+                    </div>
+                    <div class="form-group" style="margin-bottom: 0;">
+                        <label class="form-label">Handy ApplicationID</label>
+                        <input type="text" class="form-input" name="HANDY_APPLICATION_ID" placeholder="Blank = v2 API">
+                        <div class="form-hint">v3 <b>ApplicationID</b> (<code>X-Api-Key</code>) — register at <b>devs.handyfeeling.com</b>. Required for Local/HSP; blank falls back to the v2 API.</div>
+                    </div>
                 </div>
-                <div class="form-group" style="max-width: 480px; margin-top: 16px; margin-bottom: 0;">
-                    <label class="form-label">Handy ApplicationID</label>
-                    <input type="text" class="form-input" name="HANDY_APPLICATION_ID" placeholder="Leave blank to use the legacy v2 API">
-                    <div class="form-hint">Your Handy REST API <b>v3 ApplicationID</b> (sent as <code>X-Api-Key</code>), created at <b>devs.handyfeeling.com</b>. Required by firmware 4.x for the v3 API and for Local/HSP mode. When set, the proxy uses the v3 API; leave blank to fall back to the v2 API. This is an ID (not a secret) but is still per-deployment config — create your own.</div>
-                </div>
+                <details style="margin-top: 16px;">
+                    <summary style="cursor: pointer; color: var(--text-secondary); font-size: 13px; user-select: none;">Advanced options</summary>
+                    <div class="form-hint" style="margin-top: 10px;">HSP buffer tuning (Local / HSP only — HSSP ignores these). Measured in seconds of motion.</div>
+                    <div class="form-row three-col" style="margin-top: 12px;">
+                        <div class="form-group" style="margin-bottom: 0;">
+                            <label class="form-label">Seed on play/seek (s)</label>
+                            <input type="number" min="5" class="form-input" name="HANDY_HSP_BUFFER_MIN_S" placeholder="30">
+                            <div class="form-hint">Buffered immediately on play/seek — the safety floor.</div>
+                        </div>
+                        <div class="form-group" style="margin-bottom: 0;">
+                            <label class="form-label">Buffer target (s)</label>
+                            <input type="number" min="10" class="form-input" name="HANDY_HSP_BUFFER_MAX_S" placeholder="60">
+                            <div class="form-hint">Topped up to this on each poll.</div>
+                        </div>
+                        <div class="form-group" style="margin-bottom: 0;">
+                            <label class="form-label">Poll interval (s)</label>
+                            <input type="number" min="2" class="form-input" name="HANDY_HSP_POLL_INTERVAL_S" placeholder="15">
+                            <div class="form-hint">How often the buffer is refilled.</div>
+                        </div>
+                    </div>
+                </details>
             </div>
         </div>
 

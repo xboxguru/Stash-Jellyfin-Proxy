@@ -82,6 +82,10 @@ LIVE_TV_SEG_RETENTION = 30
 ENABLE_HANDY_SYNC = False
 HANDY_SYNC_MODE = "auto"  # auto (follow Stash) | hosted (force HSSP/cloud) | local (force HSP/LAN)
 HANDY_APPLICATION_ID = ""  # Handy REST API v3 ApplicationID (X-Api-Key); empty = fall back to v2 API
+# HSP (local streaming) buffer tuning — advanced; HSP path only, HSSP ignores these.
+HANDY_HSP_BUFFER_MIN_S = 30       # seconds of motion seeded on play/seek (the safety floor)
+HANDY_HSP_BUFFER_MAX_S = 60       # seconds the buffer is topped up to on each poll
+HANDY_HSP_POLL_INTERVAL_S = 15    # how often the refill task polls the device to top up (seconds)
 
 config_defined_keys = set()
 env_overrides = []
@@ -148,6 +152,7 @@ def save_config():
         "FFMPEG_PATH", "LIVE_TV_IDLE_TIMEOUT",
         "LIVE_TV_HLS_LIST_SIZE", "LIVE_TV_SEG_RETENTION",
         "ENABLE_HANDY_SYNC", "HANDY_SYNC_MODE", "HANDY_APPLICATION_ID",
+        "HANDY_HSP_BUFFER_MIN_S", "HANDY_HSP_BUFFER_MAX_S", "HANDY_HSP_POLL_INTERVAL_S",
     ]
 
     try:
@@ -175,7 +180,8 @@ def _coerce_config_value(key, val):
                 "AUTH_RATE_LIMIT_WINDOW_MINUTES", "AUTH_RATE_LIMIT_MAX_ATTEMPTS",
                 "STASH_SCHEDULE_DAYS", "STASH_KEEP_DAYS", "STASH_CHANNEL_START_NUMBER",
                 "SHORTS_MAX_MINUTES", "LIVE_TV_IDLE_TIMEOUT",
-                "LIVE_TV_HLS_LIST_SIZE", "LIVE_TV_SEG_RETENTION"]:
+                "LIVE_TV_HLS_LIST_SIZE", "LIVE_TV_SEG_RETENTION",
+                "HANDY_HSP_BUFFER_MIN_S", "HANDY_HSP_BUFFER_MAX_S", "HANDY_HSP_POLL_INTERVAL_S"]:
         try: return int(val)
         except ValueError: return None
     elif key in ["ENABLE_FILTERS", "ENABLE_TAG_FILTERS", "ENABLE_ALL_TAGS", "REQUIRE_AUTH_FOR_CONFIG",
@@ -238,6 +244,7 @@ _supported_keys = [
     "FFMPEG_PATH", "LIVE_TV_IDLE_TIMEOUT",
     "LIVE_TV_HLS_LIST_SIZE", "LIVE_TV_SEG_RETENTION",
     "ENABLE_HANDY_SYNC", "HANDY_SYNC_MODE", "HANDY_APPLICATION_ID",
+    "HANDY_HSP_BUFFER_MIN_S", "HANDY_HSP_BUFFER_MAX_S", "HANDY_HSP_POLL_INTERVAL_S",
 ]
 
 for k in _supported_keys:

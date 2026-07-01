@@ -11,8 +11,11 @@ Lifecycle:
     -> hssp/play(start_time, server_time) / hssp/stop
 
 Protocol is chosen per session (see `_resolve_use_hsp`):
-  - HSSP (cloud-hosted script URL) — the stable path (implemented here).
-  - HSP  (local point-streaming)  — the beta path (Phase B; v3-only; currently falls back to HSSP).
+  - HSSP (cloud-hosted script URL) — the stable path.
+  - HSP  (local point-streaming)  — the beta path (Phase B; v3-only). Streams the funscript as live
+    {t,x} points instead of uploading it as a hosted file: no persistent cloud-hosted copy and no
+    512 KB cap. NOTE: commands are still relayed through the Handy cloud (handyfeeling.com) to reach
+    the device; "local" here means the script isn't hosted as a file, NOT a device-LAN-only path.
 The proxy setting `HANDY_SYNC_MODE` (auto|hosted|local) overrides Stash's `useStashHostedFunscript`.
 See PLANNED_FEATURES §3.11 for the v2/v3 auth split.
 
@@ -24,6 +27,7 @@ mark the session's controller failed, and stop touching it — no retries.
 """
 
 import asyncio
+import bisect
 import logging
 import time
 from typing import Any, Dict, Optional
@@ -59,6 +63,11 @@ SEEK_THRESHOLD_S = 2.0
 # Coalesce rapid scrubbing: wait this long after the last position change before commanding the
 # device, so a burst of seek pings collapses into a single play at the settled position.
 SEEK_DEBOUNCE_S = 0.4
+# When we issue a play, the reported video position was sampled a moment earlier (the debounce wait +
+# processing). Since playback runs at 1x, we advance the position by that elapsed wall time so the
+# device syncs to where the video is *now*, not where it was sampled — cancels the report→issue lag.
+# Capped so a stale/anomalous timestamp can't overshoot.
+MAX_EXTRAPOLATION_S = 2.0
 # Number of /servertime samples used to estimate the client<->Handy clock offset (cs_offset).
 OFFSET_SAMPLES = 5
 # Grace period after hssp/setup for the device to download the script before the first play.
@@ -69,6 +78,21 @@ SCRIPT_URL_TTL_S = 3600
 # If a session is pre-activated (PlaybackInfo) but never actually plays within this window, tear the
 # controller down so a browse-but-don't-play doesn't leave the device claimed.
 PREACTIVATION_ABANDON_S = 45
+
+# --- HSP (local point-streaming) buffer tuning (Phase B) ------------------------
+# The HSP buffer is measured in *seconds of motion*, not point count, so the safety margin is the
+# same whether a script is sparse or frantic. On play/seek we seed HANDY_HSP_BUFFER_MIN_S seconds;
+# a background task then polls every HANDY_HSP_POLL_INTERVAL_S and tops the buffer up to
+# HANDY_HSP_BUFFER_MAX_S seconds ahead of the play head. Defaults below; all three are user-tunable
+# via config / the GUI Advanced options (HSP path only — HSSP ignores them).
+DEFAULT_HSP_BUFFER_MIN_S = 30
+DEFAULT_HSP_BUFFER_MAX_S = 60
+DEFAULT_HSP_POLL_INTERVAL_S = 15
+# Device hard cap is 100 points per hsp/add call.
+HSP_ADD_BATCH = 100
+# Safety cap on hsp/add calls in a single fill pass, so a pathologically dense script can't burst
+# past the 240 req/min device rate limit. 12 * 100 pts is far more than any sane seed/refill needs.
+HSP_MAX_ADDS_PER_FILL = 12
 
 # Registry of live controllers, keyed by PlaySessionId.
 _controllers: Dict[str, "HandyController"] = {}
@@ -187,6 +211,33 @@ def funscript_to_csv(funscript: Dict[str, Any]) -> str:
     return "\r\n".join(rows) + "\r\n"
 
 
+def funscript_to_points(funscript: Dict[str, Any]) -> "list[Dict[str, int]]":
+    """Convert a funscript's actions to HSP stream points: `{t: <ms from t=0>, x: <pos 0–100>}`.
+
+    Same conversion as funscript_to_csv (inverted flag + clamp), but emits {t,x} dicts to push
+    straight into the device buffer — no CSV/upload, no hosted-file copy. Sorted by t
+    so the buffer window / seek bisect can rely on ordering.
+
+    Clamped to 0–100 to match HSSP/CSV. (The HSP schema tags `x` with `maximum: 50`, but that's a
+    spec quirk — bench-confirmed on FW 4.2.2 that the device accepts and moves across the full 0–100.)
+    """
+    actions = funscript.get("actions") or []
+    inverted = bool(funscript.get("inverted", False))
+    points: "list[Dict[str, int]]" = []
+    for a in actions:
+        try:
+            at = int(a.get("at", 0))
+            pos = int(a.get("pos", 0))
+        except (TypeError, ValueError):
+            continue
+        if inverted:
+            pos = 100 - pos
+        pos = max(0, min(100, pos))
+        points.append({"t": at, "x": pos})
+    points.sort(key=lambda p: p["t"])
+    return points
+
+
 class HandyController:
     """Drives one Handy device for one PlaySessionId. All public methods are serialized by
     `self.lock`; state transitions: init -> ready | failed -> closed."""
@@ -207,6 +258,16 @@ class HandyController:
         self.estimated_offset_ms: float = 0.0  # cs_offset
         self.app_id: str = _app_id()
         self.use_v3: bool = bool(self.app_id)
+        self.use_hsp: bool = False  # resolved in _prepare(); HSP (local streaming) vs HSSP
+
+        # HSP streaming state (Phase B). Populated only when use_hsp is True.
+        self._hsp_points: "list[Dict[str, int]]" = []   # full {t,x} stream, sorted by t
+        self._hsp_times: "list[int]" = []               # parallel list of t's for seek bisect
+        self._hsp_next_index: int = 0                   # next point to push (forward streaming)
+        self._hsp_points_sent: int = 0                  # cumulative points in the current buffer run
+        self._hsp_max_points: int = 0                   # device buffer cap reported by hsp/setup
+        self._hsp_stream_id: Optional[int] = None
+        self._hsp_refill_task: Optional[asyncio.Task] = None
 
         self._is_playing = False
         self._playback_started = False   # True once the first play event has been handled
@@ -230,6 +291,7 @@ class HandyController:
             except (TypeError, ValueError):
                 self.script_offset_ms = 0
             use_hsp = _resolve_use_hsp(cfg)
+            self.use_hsp = use_hsp
             logger.debug(
                 f"[handy] preparing session={self.session_id} scene={self.scene_id} "
                 f"api={'v3' if self.use_v3 else 'v2'} key=...{(self.key[-4:] if self.key else '----')} "
@@ -242,13 +304,15 @@ class HandyController:
                 self.state = "failed"
                 return
 
-            # Phase A: HSP (local streaming) is not implemented yet — fall back to HSSP so the
-            # 'local' selection still plays (via cloud hosting) instead of failing.
-            if use_hsp:
-                logger.info(
-                    f"[handy] HSP (local streaming) selected for session {self.session_id} but not yet "
-                    f"implemented (Phase B) — using HSSP (hosted) for now"
+            # HSP (local streaming) is v3-only. Fail loudly rather than silently down-shifting to
+            # HSSP so the mis-config (HSP selected without HANDY_APPLICATION_ID) is visible.
+            if use_hsp and not self.use_v3:
+                logger.warning(
+                    f"[handy] HSP (local streaming) requires the v3 API (set HANDY_APPLICATION_ID); "
+                    f"disabling sync for session {self.session_id}"
                 )
+                self.state = "failed"
+                return
 
             if not await self._get_connected():
                 logger.info(f"[handy] device not connected (key ...{self.key[-4:]}); disabling sync for session {self.session_id}")
@@ -262,34 +326,65 @@ class HandyController:
                     f"all /servertime samples failed to parse; sync timing will be unreliable"
                 )
 
-            # HSSP requires a publicly-hosted script URL (private URLs rejected on FW 4.2.x).
-            script_url = await _prepare_upload_url(self.scene_id, self.stash_funscript_url)
-            if not script_url:
-                logger.info(f"[handy] funscript unavailable for scene {self.scene_id}; disabling sync for session {self.session_id}")
-                self.state = "failed"
-                return
+            if use_hsp:
+                if not await self._prepare_hsp():
+                    self.state = "failed"
+                    return
+            else:
+                if not await self._prepare_hssp():
+                    self.state = "failed"
+                    return
 
-            if not await self._set_mode(MODE_HSSP):
-                logger.info(f"[handy] could not set HSSP mode for session {self.session_id}; disabling sync")
-                self.state = "failed"
-                return
-            if not await self._hssp_setup(script_url):
-                logger.info(f"[handy] HSSP setup failed for scene {self.scene_id}; disabling sync for session {self.session_id}")
-                self.state = "failed"
-                return
-
-            # Give the device a moment to download/prepare the script before the first play.
+            # Give the device a moment to settle (download script / open session) before first play.
             await asyncio.sleep(SETUP_SETTLE_S)
 
             self.state = "ready"
+            proto = "HSP" if use_hsp else "HSSP"
             logger.info(
-                f"[handy] prepared (HSSP {'v3' if self.use_v3 else 'v2'}) session={self.session_id} "
+                f"[handy] prepared ({proto} {'v3' if self.use_v3 else 'v2'}) session={self.session_id} "
                 f"scene={self.scene_id} cs_offset={self.estimated_offset_ms:.0f}ms "
                 f"script_offset={self.script_offset_ms}ms"
+                + (f" points={len(self._hsp_points)} max_points={self._hsp_max_points}" if use_hsp else "")
             )
         except Exception as e:
             logger.warning(f"[handy] prepare failed for session {self.session_id}: {e}")
             self.state = "failed"
+
+    async def _prepare_hssp(self) -> bool:
+        """HSSP setup: hosted script URL + mode(HSSP) + hssp/setup. Returns False on any failure."""
+        # HSSP requires a publicly-hosted script URL (private URLs rejected on FW 4.2.x).
+        script_url = await _prepare_upload_url(self.scene_id, self.stash_funscript_url)
+        if not script_url:
+            logger.info(f"[handy] funscript unavailable for scene {self.scene_id}; disabling sync for session {self.session_id}")
+            return False
+        if not await self._set_mode(MODE_HSSP):
+            logger.info(f"[handy] could not set HSSP mode for session {self.session_id}; disabling sync")
+            return False
+        if not await self._hssp_setup(script_url):
+            logger.info(f"[handy] HSSP setup failed for scene {self.scene_id}; disabling sync for session {self.session_id}")
+            return False
+        return True
+
+    async def _prepare_hsp(self) -> bool:
+        """HSP setup: fetch the funscript, convert to {t,x} points (streamed live, not hosted), mode(HSP) +
+        hsp/setup to open a streaming session. The buffer is seeded lazily at first play from the
+        play position (see _hsp_play). Returns False on any failure."""
+        funscript = await _fetch_funscript(self.stash_funscript_url)
+        if not funscript:
+            logger.info(f"[handy] funscript unavailable for scene {self.scene_id}; disabling sync for session {self.session_id}")
+            return False
+        self._hsp_points = funscript_to_points(funscript)
+        if not self._hsp_points:
+            logger.info(f"[handy] funscript has no usable actions for scene {self.scene_id}; disabling sync for session {self.session_id}")
+            return False
+        self._hsp_times = [p["t"] for p in self._hsp_points]
+        if not await self._set_mode(MODE_HSP):
+            logger.info(f"[handy] could not set HSP mode for session {self.session_id}; disabling sync")
+            return False
+        if not await self._hsp_setup():
+            logger.info(f"[handy] HSP setup failed for scene {self.scene_id}; disabling sync for session {self.session_id}")
+            return False
+        return True
 
     async def preactivate(self):
         """Pre-instantiate on PlaybackInfo: run _prepare() so the device is set up and the clock
@@ -432,6 +527,7 @@ class HandyController:
             try:
                 self._cancel_pending_play()
                 self._cancel_abandon_timeout()
+                self._cancel_refill()
                 if self.state == "ready" and self._is_playing:
                     await self._stop()
             except Exception as e:
@@ -443,7 +539,23 @@ class HandyController:
 
     # --- Handy command primitives (v3) ----------------------------------
 
+    def _extrapolated_pos(self, position_seconds: float) -> float:
+        """Advance the reported position by the wall time elapsed since it was sampled, so the play
+        command reflects where the video is at *issue* time rather than at sample time. This cancels
+        the report→issue delay (mainly the seek debounce). Does not correct the client→proxy network
+        leg — that residual is left for a future manual offset knob. Bounded by MAX_EXTRAPOLATION_S."""
+        if self._last_event_t is None:
+            return position_seconds
+        age = time.monotonic() - self._last_event_t
+        if age <= 0:
+            return position_seconds
+        return position_seconds + min(age, MAX_EXTRAPOLATION_S)
+
     async def _play(self, position_seconds: float):
+        position_seconds = self._extrapolated_pos(position_seconds)
+        if self.use_hsp:
+            await self._hsp_play(position_seconds)
+            return
         # server_time = estimated offset + now (Tcest). v3 uses snake_case keys, v2 camelCase.
         start_time = round(position_seconds * 1000 + self.script_offset_ms)
         server_time = round(self.estimated_offset_ms + _now_ms())
@@ -459,7 +571,7 @@ class HandyController:
         logger.info(f"[handy] play@{start_time}ms (server_time={server_time}) session={self.session_id}")
 
     async def _stop(self):
-        await self._api_put("hssp/stop", {})
+        await self._api_put("hsp/stop" if self.use_hsp else "hssp/stop", {})
         self._is_playing = False
         logger.info(f"[handy] stop session={self.session_id}")
 
@@ -472,6 +584,156 @@ class HandyController:
     async def _hssp_setup(self, script_url: str) -> bool:
         result = await self._api_put("hssp/setup", {"url": script_url})
         return result is not None
+
+    # --- HSP (local streaming) primitives (v3) --------------------------
+
+    async def _hsp_setup(self) -> bool:
+        """Open an HSP streaming session (clears any prior buffer). Captures the device's buffer
+        cap / stream_id from the returned HspState."""
+        result = await self._api_put("hsp/setup", {})
+        if result is None:
+            return False
+        res = result.get("result") if isinstance(result, dict) else None
+        if isinstance(res, dict):
+            try:
+                self._hsp_max_points = int(res.get("max_points") or 0)
+            except (TypeError, ValueError):
+                self._hsp_max_points = 0
+            self._hsp_stream_id = res.get("stream_id")
+        return True
+
+    def _hsp_seed_index(self, start_time_ms: int) -> int:
+        """First point index at or after start_time_ms — the point to begin streaming from on a
+        play/seek. Points earlier than the play head are already in the past, so we skip them."""
+        return bisect.bisect_left(self._hsp_times, start_time_ms)
+
+    def _hsp_add_body(self, batch: "list[Dict[str, int]]", flush: bool) -> Dict[str, Any]:
+        """Build an HspAdd body and advance the tail stream index. `tail_point_stream_index` is the
+        absolute index of the last point in the buffer run. A flush starts a fresh run (the device
+        clears its buffer and its current_point resets to -1/0), so we reset the counter; otherwise
+        we continue it. Bench-confirmed: the device echoes exactly this run-relative index (99 after
+        a flush, then 199/299/399 as refill adds land) — it is NOT a never-resetting session counter."""
+        if flush:
+            self._hsp_points_sent = len(batch)
+        else:
+            self._hsp_points_sent += len(batch)
+        return {
+            "points": batch,
+            "flush": flush,
+            "tail_point_stream_index": self._hsp_points_sent - 1,
+        }
+
+    async def _hsp_play(self, position_seconds: float):
+        """Start synced playback at the play position and seed the buffer with the first
+        HANDY_HSP_BUFFER_MIN_S seconds of motion. The initial <=100 points ride along in the hsp/play
+        call (flush) so motion starts immediately; any remainder needed to reach the seed floor is
+        streamed in follow-up hsp/add calls. Same sync math as HSSP: start_time is the script-ms to
+        begin at, server_time is our clock estimate."""
+        start_time = round(position_seconds * 1000 + self.script_offset_ms)
+        server_time = round(self.estimated_offset_ms + _now_ms())
+        idx = self._hsp_seed_index(start_time)
+        batch = self._hsp_points[idx: idx + HSP_ADD_BATCH]
+        if not batch:
+            logger.info(
+                f"[handy] hsp play@{start_time}ms past end of script "
+                f"({len(self._hsp_points)} points); nothing to stream, session={self.session_id}"
+            )
+            return
+        self._hsp_next_index = idx + len(batch)
+        body = {
+            "start_time": start_time,
+            "server_time": server_time,
+            "add": self._hsp_add_body(batch, flush=True),
+        }
+        result = await self._api_put("hsp/play", body)
+        if result is None:
+            logger.warning(f"[handy] hsp play@{start_time}ms NOT accepted by device, session={self.session_id}")
+            return
+        self._is_playing = True
+        logger.info(
+            f"[handy] hsp play@{start_time}ms (server_time={server_time}) seeded {len(batch)} points "
+            f"from index {idx} session={self.session_id}"
+        )
+        # Top the fresh buffer up to the seed floor (MIN seconds ahead of the play head) so we start
+        # with the full safety margin rather than just the first 100 points, then start the refill.
+        min_s = self._cfg_int("HANDY_HSP_BUFFER_MIN_S", DEFAULT_HSP_BUFFER_MIN_S)
+        await self._hsp_fill_to(start_time + min_s * 1000)
+        self._start_refill()
+
+    async def _hsp_fill_to(self, target_t_ms: int):
+        """Stream forward points (non-flush) until the buffer covers up to target_t_ms, in <=100-point
+        chunks and capped at HSP_MAX_ADDS_PER_FILL calls. No-op once the buffer already reaches
+        target_t_ms or the whole script has been pushed. Caller holds self.lock."""
+        end_idx = bisect.bisect_right(self._hsp_times, target_t_ms)
+        adds = 0
+        while self._hsp_next_index < end_idx and adds < HSP_MAX_ADDS_PER_FILL:
+            batch = self._hsp_points[self._hsp_next_index: min(self._hsp_next_index + HSP_ADD_BATCH, end_idx)]
+            result = await self._api_put("hsp/add", self._hsp_add_body(batch, flush=False))
+            if result is None:
+                break
+            self._hsp_next_index += len(batch)
+            adds += 1
+
+    # --- HSP buffer refill task -----------------------------------------
+
+    def _start_refill(self):
+        """Ensure the per-session refill task is running (idempotent)."""
+        if self._hsp_refill_task and not self._hsp_refill_task.done():
+            return
+        self._hsp_refill_task = asyncio.create_task(self._hsp_refill_loop())
+
+    def _cancel_refill(self):
+        if self._hsp_refill_task and not self._hsp_refill_task.done():
+            self._hsp_refill_task.cancel()
+        self._hsp_refill_task = None
+
+    async def _hsp_refill_loop(self):
+        """Every HANDY_HSP_POLL_INTERVAL_S, top the buffer back up to HANDY_HSP_BUFFER_MAX_S seconds
+        ahead of the device's play head. Holds the lock only while refilling; skips while
+        paused/stopped or once the whole script is streamed. A seek re-seeds (flush) via _hsp_play,
+        so this just keeps feeding forward from _hsp_next_index."""
+        try:
+            while True:
+                await asyncio.sleep(self._cfg_int("HANDY_HSP_POLL_INTERVAL_S", DEFAULT_HSP_POLL_INTERVAL_S))
+                async with self.lock:
+                    if self.state != "ready" or not self._is_playing:
+                        continue
+                    if self._hsp_next_index >= len(self._hsp_points):
+                        continue  # entire script has been pushed
+                    await self._hsp_refill_once()
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logger.debug(f"[handy] hsp refill loop error session={self.session_id}: {e}")
+
+    async def _hsp_refill_once(self):
+        """One refill pass (caller holds self.lock). Reads the device's current play time and streams
+        forward points until the buffer covers up to HANDY_HSP_BUFFER_MAX_S seconds ahead of it."""
+        state = await self._api_get("hsp/state")
+        current_time = self._hsp_current_time(state)
+        if current_time is None:
+            return
+        max_s = self._cfg_int("HANDY_HSP_BUFFER_MAX_S", DEFAULT_HSP_BUFFER_MAX_S)
+        await self._hsp_fill_to(current_time + max_s * 1000)
+
+    @staticmethod
+    def _hsp_current_time(state: Optional[Dict[str, Any]]) -> Optional[int]:
+        """Extract the device's current play time (ms) from an /hsp/state response, or None."""
+        if not isinstance(state, dict):
+            return None
+        res = state.get("result")
+        src = res if isinstance(res, dict) else state
+        try:
+            return int(src["current_time"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _cfg_int(self, name: str, default: int) -> int:
+        """Read an int config knob (live-tunable via the GUI), falling back to default."""
+        try:
+            return int(getattr(config, name, default) or default)
+        except (TypeError, ValueError):
+            return default
 
     async def _get_connected(self) -> bool:
         data = await self._api_get("connected")

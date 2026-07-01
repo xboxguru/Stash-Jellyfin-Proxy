@@ -24,6 +24,9 @@ config/logos/
 .idea/
 .DS_Store
 *.md
+# ...except checked-in dev docs
+!docs/
+!docs/**/*.md
 
 # Jellyfin Web UI (Local Testing)
 jellyfin-web/
