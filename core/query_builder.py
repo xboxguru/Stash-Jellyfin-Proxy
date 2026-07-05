@@ -129,6 +129,11 @@ class StashQueryBuilder:
                 self.scene_filter["organized"], self.is_folder_override = True, True
             elif decoded_parent_id == "root-tagged": 
                 self.scene_filter["tags"], self.is_folder_override = {"modifier": "NOT_NULL"}, True
+            elif decoded_parent_id == "root-vertical":
+                # Vertical Multi-View: Stash can only express height > width server-side
+                # (orientation criterion, Stash >= v0.24); the aspect-ratio half of the
+                # predicate is refined client-side via core.vertical.filter_vertical_scenes.
+                self.scene_filter["orientation"], self.is_folder_override = {"value": ["PORTRAIT"]}, True
             elif decoded_parent_id == "root-recent":
                 cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=getattr(config, "RECENT_DAYS", 14))).strftime("%Y-%m-%dT%H:%M:%S")
                 self.scene_filter["created_at"], self.is_folder_override = {"value": cutoff, "modifier": "GREATER_THAN"}, True

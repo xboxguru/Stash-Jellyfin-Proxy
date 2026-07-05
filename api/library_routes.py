@@ -12,6 +12,7 @@ import state
 from core import stash_client, jellyfin_mapper
 from core.jellyfin_mapper import encode_id, decode_id, build_folder, generate_sort_name, generate_image_tag
 from core.query_builder import StashQueryBuilder
+from core.vertical import filter_vertical_scenes
 
 logger = logging.getLogger(__name__)
 
@@ -85,9 +86,12 @@ async def _get_libraries():
     if getattr(config, "ENABLE_FILTERS", True): 
         views.append(build_folder("Saved Filters", encode_id("root", "filters"), server_id, cache_version, is_user_view=True))
         
-    if getattr(config, "ENABLE_TAG_FILTERS", False): 
+    if getattr(config, "ENABLE_TAG_FILTERS", False):
         views.append(build_folder("Stash Tags", encode_id("root", "stashtags"), server_id, cache_version, is_user_view=True))
-    
+
+    if getattr(config, "ENABLE_VERTICAL_MULTI", False):
+        views.append(build_folder("Vertical Multi-View", encode_id("root", "vertical"), server_id, cache_version, is_user_view=True))
+
     tag_names = getattr(config, "TAG_GROUPS", [])
     if tag_names:
         all_tags = await stash_client.get_all_tags()
@@ -359,6 +363,11 @@ async def _handle_library_browse(request: Request, query: JellyfinItemQuery):
     builder = StashQueryBuilder(request, asdict(query))
     filter_args, scene_filter, _, updated_limit = await builder.build()
 
+    # Vertical Multi-View browse: Stash pre-filters to portrait (height > width) server-side;
+    # the aspect-ratio >= VERTICAL_ASPECT_MIN half of the predicate is refined here on each
+    # fetched page. Near-square portraits dropped this way slightly overstate TotalRecordCount.
+    is_vertical_browse = query.decoded_parent_id == "root-vertical"
+
     filter_list = [f.strip() for f in query.filters_string.split(",")] if query.filters_string else []
 
     if query.name_less_than or query.name_starts_with or query.name_starts_with_or_greater:
@@ -403,7 +412,10 @@ async def _handle_library_browse(request: Request, query: JellyfinItemQuery):
             # Map and preserve our strict Python sorting order
             scene_map = {str(scene["id"]): scene for scene in unordered_scenes if scene}
             filtered_scenes = [scene_map[str(sid)] for sid in page_ids if str(sid) in scene_map]
-            
+
+        if is_vertical_browse:
+            filtered_scenes = filter_vertical_scenes(filtered_scenes)
+
         jellyfin_items = []
         safe_root = encode_id("root", "scenes")
         for scene in filtered_scenes:
@@ -460,9 +472,12 @@ async def _handle_library_browse(request: Request, query: JellyfinItemQuery):
         page = (query.start_index // updated_limit) + 1 if updated_limit > 0 else 1
         stash_data = await stash_client.fetch_scenes(filter_args, page=page, per_page=updated_limit, scene_filter=scene_filter)
     
-    if not stash_data: 
+    if not stash_data:
         return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": query.start_index})
-    
+
+    if is_vertical_browse:
+        stash_data["scenes"] = filter_vertical_scenes(stash_data.get("scenes", []))
+
     jellyfin_items = []
     safe_root = encode_id("root", "scenes")
     

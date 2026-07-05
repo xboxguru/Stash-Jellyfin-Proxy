@@ -2,9 +2,10 @@
 Unit tests for config.py
 
 Covers:
-  - _coerce_config_value: ints, bools, lists, strings
+  - _coerce_config_value: ints, bools, floats, lists, strings
   - normalize_path: leading slash, trailing slash, empty input
   - get_stash_base: trailing slash stripping
+  - save_config/load_config_file round-trip for Vertical Multi-View keys
 """
 import pytest
 import config
@@ -50,10 +51,25 @@ class TestCoerceConfigValue:
         "TRUST_PROXY_HEADERS",
         "REQUIRE_AUTH_FOR_CONFIG",
         "UI_CSRF_PROTECTION",
+        "ENABLE_VERTICAL_MULTI",
     ])
     def test_bool_keys_return_bool(self, key):
         assert isinstance(config._coerce_config_value(key, "true"), bool)
         assert isinstance(config._coerce_config_value(key, "false"), bool)
+
+    # Float keys
+    @pytest.mark.parametrize("raw,expected", [
+        ("1.3", 1.3),
+        ("1.78", 1.78),
+        ("2", 2.0),
+    ])
+    def test_vertical_aspect_min_is_float(self, raw, expected):
+        result = config._coerce_config_value("VERTICAL_ASPECT_MIN", raw)
+        assert result == expected
+        assert isinstance(result, float)
+
+    def test_vertical_aspect_min_invalid_returns_none(self):
+        assert config._coerce_config_value("VERTICAL_ASPECT_MIN", "not_a_number") is None
 
     # List keys
     @pytest.mark.parametrize("key", [
@@ -75,6 +91,30 @@ class TestCoerceConfigValue:
     def test_stash_url_unchanged(self):
         result = config._coerce_config_value("STASH_URL", "http://localhost:9999")
         assert result == "http://localhost:9999"
+
+
+class TestVerticalConfigRoundTrip:
+    """New Vertical Multi-View keys survive a save_config -> load_config_file cycle."""
+
+    def test_round_trip_preserves_values_and_types(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "CONFIG_FILE", str(tmp_path / "roundtrip.conf"))
+        monkeypatch.setattr(config, "ENABLE_VERTICAL_MULTI", True)
+        monkeypatch.setattr(config, "VERTICAL_ASPECT_MIN", 1.45)
+        config.save_config()
+
+        # Wipe in-memory values, then reload from disk
+        config.ENABLE_VERTICAL_MULTI = False
+        config.VERTICAL_ASPECT_MIN = 1.3
+        config.load_config_file()
+
+        assert config.ENABLE_VERTICAL_MULTI is True
+        assert config.VERTICAL_ASPECT_MIN == 1.45
+        assert isinstance(config.VERTICAL_ASPECT_MIN, float)
+
+    def test_new_keys_are_env_overridable(self):
+        # _supported_keys gates both env overrides and UI saves (api_post_config)
+        assert "ENABLE_VERTICAL_MULTI" in config._supported_keys
+        assert "VERTICAL_ASPECT_MIN" in config._supported_keys
 
 
 class TestGetStashBase:

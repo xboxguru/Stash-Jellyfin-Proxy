@@ -85,6 +85,9 @@ HANDY_APPLICATION_ID = ""  # Handy REST API v3 ApplicationID (X-Api-Key); empty 
 HANDY_HSP_BUFFER_MIN_S = 30       # seconds of motion seeded on play/seek (the safety floor)
 HANDY_HSP_BUFFER_MAX_S = 60       # seconds the buffer is topped up to on each poll
 HANDY_HSP_POLL_INTERVAL_S = 15    # how often the refill task polls the device to top up (seconds)
+# Vertical Multi-View ("Triptych") — Feature 1
+ENABLE_VERTICAL_MULTI = False     # expose the "Vertical Multi-View" home-screen library
+VERTICAL_ASPECT_MIN = 1.3         # min height/width ratio to count as vertical (excludes near-square)
 
 config_defined_keys = set()
 env_overrides = []
@@ -123,6 +126,7 @@ def save_config():
         "LIVE_TV_HLS_LIST_SIZE", "LIVE_TV_SEG_RETENTION",
         "ENABLE_HANDY_SYNC", "HANDY_SYNC_MODE", "HANDY_APPLICATION_ID",
         "HANDY_HSP_BUFFER_MIN_S", "HANDY_HSP_BUFFER_MAX_S", "HANDY_HSP_POLL_INTERVAL_S",
+        "ENABLE_VERTICAL_MULTI", "VERTICAL_ASPECT_MIN",
     ]
 
     try:
@@ -154,10 +158,13 @@ def _coerce_config_value(key, val):
                 "HANDY_HSP_BUFFER_MIN_S", "HANDY_HSP_BUFFER_MAX_S", "HANDY_HSP_POLL_INTERVAL_S"]:
         try: return int(val)
         except ValueError: return None
+    elif key in ["VERTICAL_ASPECT_MIN"]:
+        try: return float(val)
+        except ValueError: return None
     elif key in ["ENABLE_FILTERS", "ENABLE_TAG_FILTERS", "ENABLE_ALL_TAGS", "REQUIRE_AUTH_FOR_CONFIG",
                  "STASH_VERIFY_TLS", "TRUST_PROXY_HEADERS", "UI_PUBLIC_STATUS_ENDPOINT",
                  "UI_CSRF_PROTECTION", "ENABLE_LIVE_TV", "ENABLE_TUNARR", "ENABLE_STASH_CHANNELS",
-                 "ENABLE_SHORTS_CHANNEL", "ENABLE_HANDY_SYNC"]:
+                 "ENABLE_SHORTS_CHANNEL", "ENABLE_HANDY_SYNC", "ENABLE_VERTICAL_MULTI"]:
         return str(val).lower() in ['true', '1', 'yes', 'on']
     elif key in ["TAG_GROUPS", "LATEST_GROUPS", "TRUSTED_PROXY_IPS", "CORS_ALLOWED_ORIGINS", "UI_ALLOWED_IPS"]:
         return [x.strip() for x in str(val).split(",") if x.strip()]
@@ -215,6 +222,7 @@ _supported_keys = [
     "LIVE_TV_HLS_LIST_SIZE", "LIVE_TV_SEG_RETENTION",
     "ENABLE_HANDY_SYNC", "HANDY_SYNC_MODE", "HANDY_APPLICATION_ID",
     "HANDY_HSP_BUFFER_MIN_S", "HANDY_HSP_BUFFER_MAX_S", "HANDY_HSP_POLL_INTERVAL_S",
+    "ENABLE_VERTICAL_MULTI", "VERTICAL_ASPECT_MIN",
 ]
 
 for k in _supported_keys:
