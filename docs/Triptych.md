@@ -10,7 +10,8 @@ single 16:9 HLS stream, with audio from the center clip only. The full feature p
 | Phase | Scope | Status |
 |---|---|---|
 | **Phase 0** | Library + filtering: vertical predicate, config toggle, settings UI, home-screen tile, browse (scenes play normally) | ✅ Done |
-| Phase 1 | VOD compositor (CPU): `vertical_engine` (Shape A), side-clip selection, PlaybackInfo transcode wiring, center seek, idle teardown | — |
+| **Phase 1a** | Side-clip selection algorithm (pure logic, no FFmpeg) | ✅ Done |
+| Phase 1b | VOD compositor (CPU): `vertical_engine` (Shape A), PlaybackInfo transcode wiring, center seek, idle teardown | — |
 | Phase 1.5 | Hardware encoders (NVENC/QSV/VAAPI), jellyfin-ffmpeg base image, GPU decode/scale | — |
 | Phase 2 | "Vertical TV" continuous Live TV channel reusing the compositor | — |
 
@@ -106,3 +107,71 @@ var, and the generic fetch/populate/save flow matches inputs by `name`.
 - `tests/test_config.py` — bool coercion for `ENABLE_VERTICAL_MULTI`, float coercion for
   `VERTICAL_ASPECT_MIN` (including invalid → `None`), and a full
   `save_config()` → `load_config_file()` round-trip preserving values and types.
+
+## How it works (Phase 1a) — Side-clip selection
+
+`core/vertical_selection.py` picks the 2 looping side clips for a chosen center scene.
+It's pure selection logic — no FFmpeg, no session state — so `api/vertical_engine.py`
+(Phase 1b) can call `select_side_clips(center_scene)` without pulling in the playout
+stack, and the algorithm is unit-testable in isolation.
+
+### The weighting model
+
+Candidates are drawn from a single vertical-only fetch (`stash_client.fetch_scenes`
+with the same `orientation: PORTRAIT` filter as the library browse path, `per_page: -1`,
+refined through `core.vertical.filter_vertical_scenes` — see Phase 0 above). From that
+pool, four **category pools** are built against the center scene:
+
+| Category | Membership | Candidate weight (within pool) |
+|---|---|---|
+| Performer | shares ≥1 performer id with center | uniform (1.0) |
+| Tags | shares ≥1 tag *name* with center (Stash's scene fields carry tag names, not ids) | shared-tag count — higher overlap is picked more often |
+| Studio | same studio id as center | uniform (1.0) |
+| Date | within `VERTICAL_DATE_WINDOW_DAYS` of center's `date` (falls back to `created_at`) | `window + 1 - day_distance` — closer dates are picked more often |
+
+Only **non-empty** pools count. For each of the 2 side slots:
+1. Pick a **category** by weighted-random over `VERTICAL_WEIGHT_PERFORMER/_TAGS/_STUDIO/_DATE`,
+   re-normalized across whatever pools are currently non-empty (a category with 0 matches
+   never gets picked — it isn't in the running at all, not picked-then-discarded).
+2. Pick a **clip** within that category's pool, weighted-random by the per-candidate
+   weight above (so Tags/Date favor the closest matches; Performer/Studio are a flat
+   draw since there's no natural "how much" to rank by).
+3. Tags additionally keep only the top `VERTICAL_TAG_WINDOW` candidates by shared-tag
+   count before the weighted draw — an unbounded tag pool would let a handful of
+   loosely-related clips (1 shared tag out of a large tag set) dilute the pick just as
+   much as strongly-related ones.
+
+Pools are **rebuilt from scratch for slot 2** with the slot-1 pick added to the exclusion
+set. This is what makes the "next-heaviest category" fallback (§1.6.4) happen for free:
+if slot 1 exhausted the only candidate in, say, Tags, slot 2 naturally re-normalizes over
+whatever's left rather than needing special-cased retry logic.
+
+### Fallback ordering, and why
+
+1. **A category's pool is empty** → excluded from the weighted category draw entirely
+   (steps above). Cheapest and most common case — e.g. a center scene with no studio set.
+2. **Every category is empty, or every configured weight is 0** → uniform-random pick
+   over all remaining eligible vertical scenes (`"uniform_random_all_categories_empty"`
+   in the logs). This is the true "no signal to rank by" case — better to hand back
+   *some* vertical clip than to fail the whole selection because metadata is sparse.
+3. **No eligible candidates left at all** (`"no_eligible_candidates"`) → that slot picks
+   nothing.
+4. **Only 1 distinct eligible side existed across both slots** → §1.2.5's tiny-library
+   rule: repeat that one clip for both slots rather than fail. A repeated side is a much
+   smaller UX hit than not offering multi-view at all for a library that's still
+   growing.
+5. **No other vertical scenes exist besides the center** → `select_side_clips` returns
+   `[]`. This is the one case selection *can't* paper over — the caller (Phase 1b) is
+   expected to fall back to normal single-video playback and log a warning, per §1.2.5.
+
+Every pick and fallback logs which path was taken (category name, or one of the fallback
+labels above) so a thin library's behavior is diagnosable from the logs alone.
+
+### Tests
+
+`tests/test_vertical_selection.py` — each category pool builder (membership, weighting,
+ranking, window truncation, boundary days); `_pick_side`'s category re-normalization
+(verified by spying on `random.choices`' weights argument) and both fallback paths;
+`select_side_clips` end-to-end for the 2-distinct-sides case, the tiny-library repeat,
+the single-video empty-list case, and that non-vertical candidates returned by a raw
+`fetch_scenes` result get filtered out before picking.

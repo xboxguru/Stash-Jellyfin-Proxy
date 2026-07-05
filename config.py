@@ -88,6 +88,13 @@ HANDY_HSP_POLL_INTERVAL_S = 15    # how often the refill task polls the device t
 # Vertical Multi-View ("Triptych") — Feature 1
 ENABLE_VERTICAL_MULTI = False     # expose the "Vertical Multi-View" home-screen library
 VERTICAL_ASPECT_MIN = 1.3         # min height/width ratio to count as vertical (excludes near-square)
+# Side-clip selection (Phase 1) — category weights re-normalized over non-empty pools
+VERTICAL_WEIGHT_PERFORMER = 50    # weight: side shares a performer with the center clip
+VERTICAL_WEIGHT_TAGS = 25         # weight: side shares >=1 tag with the center clip
+VERTICAL_WEIGHT_STUDIO = 15       # weight: side is from the same studio as the center clip
+VERTICAL_WEIGHT_DATE = 10         # weight: side is close in date to the center clip
+VERTICAL_TAG_WINDOW = 30          # keep top-N tag-pool candidates ranked by shared-tag count
+VERTICAL_DATE_WINDOW_DAYS = 30    # date-proximity pool: +/- this many days of the center's date
 
 config_defined_keys = set()
 env_overrides = []
@@ -127,6 +134,8 @@ def save_config():
         "ENABLE_HANDY_SYNC", "HANDY_SYNC_MODE", "HANDY_APPLICATION_ID",
         "HANDY_HSP_BUFFER_MIN_S", "HANDY_HSP_BUFFER_MAX_S", "HANDY_HSP_POLL_INTERVAL_S",
         "ENABLE_VERTICAL_MULTI", "VERTICAL_ASPECT_MIN",
+        "VERTICAL_WEIGHT_PERFORMER", "VERTICAL_WEIGHT_TAGS", "VERTICAL_WEIGHT_STUDIO", "VERTICAL_WEIGHT_DATE",
+        "VERTICAL_TAG_WINDOW", "VERTICAL_DATE_WINDOW_DAYS",
     ]
 
     try:
@@ -155,7 +164,9 @@ def _coerce_config_value(key, val):
                 "STASH_SCHEDULE_DAYS", "STASH_KEEP_DAYS", "STASH_CHANNEL_START_NUMBER",
                 "SHORTS_MAX_MINUTES", "LIVE_TV_IDLE_TIMEOUT",
                 "LIVE_TV_HLS_LIST_SIZE", "LIVE_TV_SEG_RETENTION",
-                "HANDY_HSP_BUFFER_MIN_S", "HANDY_HSP_BUFFER_MAX_S", "HANDY_HSP_POLL_INTERVAL_S"]:
+                "HANDY_HSP_BUFFER_MIN_S", "HANDY_HSP_BUFFER_MAX_S", "HANDY_HSP_POLL_INTERVAL_S",
+                "VERTICAL_WEIGHT_PERFORMER", "VERTICAL_WEIGHT_TAGS", "VERTICAL_WEIGHT_STUDIO", "VERTICAL_WEIGHT_DATE",
+                "VERTICAL_TAG_WINDOW", "VERTICAL_DATE_WINDOW_DAYS"]:
         try: return int(val)
         except ValueError: return None
     elif key in ["VERTICAL_ASPECT_MIN"]:
@@ -223,6 +234,8 @@ _supported_keys = [
     "ENABLE_HANDY_SYNC", "HANDY_SYNC_MODE", "HANDY_APPLICATION_ID",
     "HANDY_HSP_BUFFER_MIN_S", "HANDY_HSP_BUFFER_MAX_S", "HANDY_HSP_POLL_INTERVAL_S",
     "ENABLE_VERTICAL_MULTI", "VERTICAL_ASPECT_MIN",
+    "VERTICAL_WEIGHT_PERFORMER", "VERTICAL_WEIGHT_TAGS", "VERTICAL_WEIGHT_STUDIO", "VERTICAL_WEIGHT_DATE",
+    "VERTICAL_TAG_WINDOW", "VERTICAL_DATE_WINDOW_DAYS",
 ]
 
 for k in _supported_keys:

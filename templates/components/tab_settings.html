@@ -188,10 +188,42 @@
                         <div class="toggle-hint">Adds a home-screen library containing only vertical (portrait) scenes.</div>
                     </div>
                 </div>
-                <div class="form-group" style="max-width: 220px; margin-bottom: 0;">
+                <div class="form-group" style="max-width: 220px; margin-bottom: 16px;">
                     <label class="form-label">Vertical Aspect Minimum</label>
                     <input type="number" step="0.05" min="1" class="form-input" name="VERTICAL_ASPECT_MIN" placeholder="1.3">
                     <div class="form-hint">Minimum height ÷ width for a scene to count as vertical. 1.3 keeps 9:16 and 4:3 portrait; excludes near-square.</div>
+                </div>
+                <h4 style="margin-bottom: 8px;">Side-Clip Selection Weights</h4>
+                <div class="form-hint" style="margin-bottom: 8px;">How heavily each category counts when picking the two looping side clips. Re-normalized over categories that have any matching scenes.</div>
+                <div class="form-row three-col">
+                    <div class="form-group">
+                        <label class="form-label">Performer Weight</label>
+                        <input type="number" min="0" class="form-input" name="VERTICAL_WEIGHT_PERFORMER" placeholder="50">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Tags Weight</label>
+                        <input type="number" min="0" class="form-input" name="VERTICAL_WEIGHT_TAGS" placeholder="25">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Studio Weight</label>
+                        <input type="number" min="0" class="form-input" name="VERTICAL_WEIGHT_STUDIO" placeholder="15">
+                    </div>
+                </div>
+                <div class="form-row three-col">
+                    <div class="form-group">
+                        <label class="form-label">Date Proximity Weight</label>
+                        <input type="number" min="0" class="form-input" name="VERTICAL_WEIGHT_DATE" placeholder="10">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Tag Pool Window</label>
+                        <input type="number" min="1" class="form-input" name="VERTICAL_TAG_WINDOW" placeholder="30">
+                        <div class="form-hint">Top-N by shared-tag count considered for the Tags category.</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Date Window (days)</label>
+                        <input type="number" min="1" class="form-input" name="VERTICAL_DATE_WINDOW_DAYS" placeholder="30">
+                        <div class="form-hint">± days around the center clip's date.</div>
+                    </div>
                 </div>
             </div>
 
