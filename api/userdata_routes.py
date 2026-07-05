@@ -11,50 +11,6 @@ import state
 
 logger = logging.getLogger(__name__)
 
-# Temporary diagnostic (Feature 3 — playback-speed detection): does the client report a playback
-# rate/speed in its progress body? Emits one DEBUG line per progress ping tagged [speed-probe] with
-# any rate-ish field found + all top-level keys, so we can confirm the field name (if any) before
-# building rate-aware sync. Remove once resolved.
-_RATE_KEY_NOISE = ("bitrate", "framerate", "samplerate", "rating")
-_speed_probe_last: dict = {}   # session_id -> (position_seconds, monotonic_time)
-
-def _probe_playback_speed(session_id: str, data: dict) -> None:
-    try:
-        if not isinstance(data, dict):
-            return
-        rate_fields = {}
-
-        def _scan(d: dict, prefix: str = "") -> None:
-            for k, v in d.items():
-                kl = str(k).lower()
-                if any(n in kl for n in _RATE_KEY_NOISE):
-                    continue
-                if ("rate" in kl or "speed" in kl or "tempo" in kl) and not isinstance(v, (dict, list)):
-                    rate_fields[prefix + k] = v
-                elif isinstance(v, dict):
-                    _scan(v, prefix + k + ".")
-
-        _scan(data)
-
-        # Inferred rate from how fast the reported position advances vs wall-clock. At a steady 2x,
-        # dpos/dwall ~ 2.0; a seek shows up as a one-off spike. IsPaused pings are skipped.
-        pos = float(data.get("PlaybackPositionTicks") or data.get("PositionTicks") or 0) / 10_000_000.0
-        now = time.monotonic()
-        prev = _speed_probe_last.get(session_id)
-        _speed_probe_last[session_id] = (pos, now)
-        inferred = None
-        if prev and not data.get("IsPaused"):
-            dpos, dwall = pos - prev[0], now - prev[1]
-            if dwall > 0.5:
-                inferred = round(dpos / dwall, 2)
-
-        logger.debug(
-            f"[handy][speed-probe] session={session_id} rate_fields={rate_fields or 'NONE'} "
-            f"pos={pos:.1f}s inferred_rate={inferred} keys={sorted(data.keys())}"
-        )
-    except Exception:
-        pass
-
 def _get_client_info(request: Request, user_agent_fallback: str) -> tuple[str, str]:
     """Responsibility: Extract IP and guess the client type from headers."""
     direct_ip = request.client.host if request.client else "Unknown"
@@ -89,10 +45,6 @@ async def endpoint_sessions_playing(request: Request):
         data = await request.json()
         session_id = data.get("PlaySessionId") or data.get("SessionId") or "unknown_session"
         item_id = decode_id(data.get("ItemId") or data.get("Item", {}).get("Id", ""))
-
-        # Temporary: probe whether the client reports playback speed (see helper above).
-        if getattr(config, "ENABLE_HANDY_SYNC", False):
-            _probe_playback_speed(session_id, data)
 
         playback_ticks = float(data.get("PlaybackPositionTicks") or data.get("PositionTicks") or 0)
         runtime_ticks = float(data.get("RunTimeTicks") or data.get("Item", {}).get("RunTimeTicks") or 0)
