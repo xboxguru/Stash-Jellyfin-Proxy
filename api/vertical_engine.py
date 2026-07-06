@@ -41,6 +41,81 @@ from api.live_tv_engine import (
 logger = logging.getLogger(__name__)
 
 
+def _stash_stream_url(scene_id: str) -> str:
+    stash_base = config.get_stash_base()
+    api_key = getattr(config, "STASH_API_KEY", "")
+    url = f"{stash_base}/scene/{scene_id}/stream"
+    if api_key:
+        url += f"?apikey={api_key}"
+    return url
+
+
+def build_composite_cmd(ffmpeg_bin: str, left_id: str, center_id: str,
+                         right_id: str, seek: float, sub_out_v: str) -> list:
+    """Shape A composite: 3 HTTP inputs → per-lane scale/crop → hstack → pad → raw video.
+
+    Sides loop forever (`-stream_loop -1`); the center is the clock — `-shortest`
+    ends the composite when the center ends. `-ss` (input seek) applies only to
+    the center so a seek relaunch keeps the sides looping from their own start.
+    Lane geometry per §1.5: 1080-high scale, crop to 608×1080, hstack→1824×1080,
+    pad to exactly 1920×1080.
+
+    Module-level so both the VOD compositor (`_VerticalSessionManager`) and the
+    always-on Vertical TV Live TV channel (`api/live_tv_engine.py`) share the one
+    filtergraph definition — see docs/Triptych.md § Vertical TV.
+    """
+    left_url = _stash_stream_url(left_id)
+    center_url = _stash_stream_url(center_id)
+    right_url = _stash_stream_url(right_id)
+
+    common_pre = [
+        ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "info", "-stats",
+        "-reconnect", "1", "-reconnect_streamed", "1",
+        "-reconnect_at_eof", "1", "-reconnect_delay_max", "5",
+    ]
+    center_seek = ["-ss", f"{seek:.3f}"] if seek > 0.1 else []
+
+    return common_pre + [
+        # input 0 — left side (loops)
+        "-re", "-stream_loop", "-1", "-i", left_url,
+        # input 1 — center (the clock); seek applies here only
+        "-re", *center_seek, "-i", center_url,
+        # input 2 — right side (loops)
+        "-re", "-stream_loop", "-1", "-i", right_url,
+        "-filter_complex",
+        "[0:v]scale=-2:1080,crop=608:1080,setsar=1[l];"
+        "[1:v]scale=-2:1080,crop=608:1080,setsar=1[c];"
+        "[2:v]scale=-2:1080,crop=608:1080,setsar=1[r];"
+        "[l][c][r]hstack=inputs=3,pad=1920:1080:(ow-iw)/2:0:black,fps=30,format=yuv420p[v]",
+        "-map", "[v]", "-shortest",
+        "-pix_fmt", "yuv420p", "-f", "rawvideo", sub_out_v,
+    ]
+
+
+def build_audio_cmd(ffmpeg_bin: str, center_id: str, seek: float, sub_out_a: str) -> list:
+    """Center-only audio, normalized to 48 kHz stereo PCM (reuses the Live TV
+    normalization). `-map 0:a:0?` keeps a silent center from failing the sub.
+
+    Module-level for the same reason as `build_composite_cmd` above.
+    """
+    center_url = _stash_stream_url(center_id)
+    common_pre = [
+        ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "info", "-stats",
+        "-reconnect", "1", "-reconnect_streamed", "1",
+        "-reconnect_at_eof", "1", "-reconnect_delay_max", "5",
+    ]
+    center_seek = ["-ss", f"{seek:.3f}"] if seek > 0.1 else []
+    return common_pre + [
+        "-re", *center_seek, "-i", center_url,
+        "-map", "0:a:0?", "-vn", "-sn",
+        "-af",
+        "aresample=async=1000:first_pts=0,"
+        "aformat=sample_rates=48000:channel_layouts=stereo",
+        "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le",
+        "-f", "s16le", sub_out_a,
+    ]
+
+
 class _VerticalSessionManager:
     """One master FFmpeg HLS process per active triptych play-session.
 
@@ -157,14 +232,6 @@ class _VerticalSessionManager:
             await self.stop(sid)
 
     # ── internals ──────────────────────────────────────────────────────────────
-
-    def _stash_stream_url(self, scene_id: str) -> str:
-        stash_base = config.get_stash_base()
-        api_key = getattr(config, "STASH_API_KEY", "")
-        url = f"{stash_base}/scene/{scene_id}/stream"
-        if api_key:
-            url += f"?apikey={api_key}"
-        return url
 
     async def _resolve_encoder(self) -> EncoderConfig:
         """Resolve VERTICAL_HWACCEL to a probed-working encoder (Phase 1.5).
@@ -384,62 +451,14 @@ class _VerticalSessionManager:
 
     def _build_composite_cmd(self, ffmpeg_bin: str, left_id: str, center_id: str,
                              right_id: str, seek: float, sub_out_v: str) -> list:
-        """Shape A composite: 3 HTTP inputs → per-lane scale/crop → hstack → pad → raw video.
-
-        Sides loop forever (`-stream_loop -1`); the center is the clock — `-shortest`
-        ends the composite when the center ends.  `-ss` (input seek) applies only to
-        the center so a seek relaunch keeps the sides looping from their own start.
-        Lane geometry per §1.5: 1080-high scale, crop to 608×1080, hstack→1824×1080,
-        pad to exactly 1920×1080.
-        """
-        left_url = self._stash_stream_url(left_id)
-        center_url = self._stash_stream_url(center_id)
-        right_url = self._stash_stream_url(right_id)
-
-        common_pre = [
-            ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "info", "-stats",
-            "-reconnect", "1", "-reconnect_streamed", "1",
-            "-reconnect_at_eof", "1", "-reconnect_delay_max", "5",
-        ]
-        center_seek = ["-ss", f"{seek:.3f}"] if seek > 0.1 else []
-
-        return common_pre + [
-            # input 0 — left side (loops)
-            "-re", "-stream_loop", "-1", "-i", left_url,
-            # input 1 — center (the clock); seek applies here only
-            "-re", *center_seek, "-i", center_url,
-            # input 2 — right side (loops)
-            "-re", "-stream_loop", "-1", "-i", right_url,
-            "-filter_complex",
-            "[0:v]scale=-2:1080,crop=608:1080,setsar=1[l];"
-            "[1:v]scale=-2:1080,crop=608:1080,setsar=1[c];"
-            "[2:v]scale=-2:1080,crop=608:1080,setsar=1[r];"
-            "[l][c][r]hstack=inputs=3,pad=1920:1080:(ow-iw)/2:0:black,fps=30,format=yuv420p[v]",
-            "-map", "[v]", "-shortest",
-            "-pix_fmt", "yuv420p", "-f", "rawvideo", sub_out_v,
-        ]
+        """Thin wrapper — see module-level `build_composite_cmd` (also reused by
+        the Vertical TV Live TV channel in api/live_tv_engine.py)."""
+        return build_composite_cmd(ffmpeg_bin, left_id, center_id, right_id, seek, sub_out_v)
 
     def _build_audio_cmd(self, ffmpeg_bin: str, center_id: str, seek: float,
                          sub_out_a: str) -> list:
-        """Center-only audio, normalized to 48 kHz stereo PCM (reuses the Live TV
-        normalization).  `-map 0:a:0?` keeps a silent center from failing the sub.
-        """
-        center_url = self._stash_stream_url(center_id)
-        common_pre = [
-            ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "info", "-stats",
-            "-reconnect", "1", "-reconnect_streamed", "1",
-            "-reconnect_at_eof", "1", "-reconnect_delay_max", "5",
-        ]
-        center_seek = ["-ss", f"{seek:.3f}"] if seek > 0.1 else []
-        return common_pre + [
-            "-re", *center_seek, "-i", center_url,
-            "-map", "0:a:0?", "-vn", "-sn",
-            "-af",
-            "aresample=async=1000:first_pts=0,"
-            "aformat=sample_rates=48000:channel_layouts=stereo",
-            "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le",
-            "-f", "s16le", sub_out_a,
-        ]
+        """Thin wrapper — see module-level `build_audio_cmd`."""
+        return build_audio_cmd(ffmpeg_bin, center_id, seek, sub_out_a)
 
     async def _await_ready(self, sid: str, proc: asyncio.subprocess.Process,
                            manifest: str, min_segments: int) -> bool:

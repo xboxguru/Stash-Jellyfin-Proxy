@@ -276,3 +276,47 @@ class TestSelectSideClips:
         only_vertical_other = _vscene("3", performers=[{"id": "10", "name": "Jane"}])
         sides = await self._run(center, [center, landscape, only_vertical_other])
         assert sides == ["3", "3"]
+
+
+# ── pick_center_and_sides (Vertical TV channel, Feature 1 Phase 2) ─────────────
+
+class TestPickCenterAndSides:
+    async def _run(self, candidates, exclude_ids=None):
+        with patch("core.vertical_selection.stash_client.fetch_scenes", new=AsyncMock(
+            return_value={"scenes": candidates}
+        )):
+            return await vsel.pick_center_and_sides(exclude_ids=exclude_ids)
+
+    async def test_empty_library_returns_none(self):
+        assert await self._run([]) is None
+
+    async def test_single_scene_library_returns_none(self):
+        # A center with no other vertical scenes has no sides — no triptych possible.
+        only = _vscene("1")
+        assert await self._run([only]) is None
+
+    async def test_picks_a_center_and_two_sides(self):
+        scenes = [_vscene(str(i), performers=[{"id": "10", "name": "Jane"}]) for i in range(1, 4)]
+        result = await self._run(scenes)
+        assert result is not None
+        center, sides = result
+        assert center["id"] in {"1", "2", "3"}
+        assert len(sides) == 2
+
+    async def test_excluded_ids_avoid_repeat_center_when_possible(self):
+        scenes = [_vscene(str(i), performers=[{"id": "10", "name": "Jane"}]) for i in range(1, 4)]
+        # Exclude everything but "3" as a candidate center.
+        result = await self._run(scenes, exclude_ids={"1", "2"})
+        assert result is not None
+        center, _sides = result
+        assert center["id"] == "3"
+
+    async def test_excluding_every_scene_falls_back_to_full_pool(self):
+        # If the exclusion set would leave nothing to pick a center from, it's
+        # dropped rather than failing the round.
+        scenes = [_vscene(str(i), performers=[{"id": "10", "name": "Jane"}]) for i in range(1, 4)]
+        result = await self._run(scenes, exclude_ids={"1", "2", "3"})
+        assert result is not None
+        center, sides = result
+        assert center["id"] in {"1", "2", "3"}
+        assert len(sides) == 2

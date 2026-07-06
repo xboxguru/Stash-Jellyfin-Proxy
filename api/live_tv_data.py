@@ -136,7 +136,42 @@ def _live_tv_enabled() -> bool:
     """True if any Live TV source is enabled and the master switch is on."""
     if not getattr(config, "ENABLE_LIVE_TV", False):
         return False
-    return getattr(config, "ENABLE_TUNARR", False) or getattr(config, "ENABLE_STASH_CHANNELS", False)
+    return (getattr(config, "ENABLE_TUNARR", False)
+            or getattr(config, "ENABLE_STASH_CHANNELS", False)
+            or _vertical_tv_enabled())
+
+
+def _vertical_tv_enabled() -> bool:
+    """True if the always-on Vertical TV channel (Feature 1 Phase 2) should exist.
+
+    Piggybacks on the Dynamic Stash Channels family (same FFmpeg manager,
+    PlaybackInfo, and stream-serving wiring) and additionally requires the
+    Vertical Multi-View library/selection algorithm to be enabled, since the
+    channel is just that same compositor run continuously.
+    """
+    return (getattr(config, "ENABLE_STASH_CHANNELS", False)
+            and getattr(config, "ENABLE_VERTICAL_TV_CHANNEL", False)
+            and getattr(config, "ENABLE_VERTICAL_MULTI", False))
+
+
+def _build_vertical_tv_channel() -> dict:
+    """Synthetic channel entry for the always-on Vertical TV channel.
+
+    Unlike tag/filter/shorts channels, this isn't part of channels.json — it has
+    no fixed scene lineup to schedule (center/sides are chosen live, fresh, every
+    round by the feeder — see api/live_tv_engine.py `_feeder_vertical`), so there
+    is nothing for the channel-editor CRUD to store or reorder. It's a single
+    config-gated toggle instead.
+    """
+    return {
+        "tvg_id": "vertical_tv",
+        "name": "Vertical TV",
+        "number": str(getattr(config, "VERTICAL_TV_CHANNEL_NUMBER", 9000)),
+        "logo": "",
+        "stash_type": "vertical_tv",
+        "source_ids": [],
+        "stash_id": "",
+    }
 
 
 def _schedule_path() -> str:
@@ -823,6 +858,9 @@ async def _get_stash_channels() -> list[dict]:
         }
         channels.append(ch)
 
+    if _vertical_tv_enabled():
+        channels.append(_build_vertical_tv_channel())
+
     _stash_channels_cache["data"] = channels
     _stash_channels_cache["ts"] = now
 
@@ -850,6 +888,10 @@ async def _rebuild_stash_schedules():
         new_schedule: dict[str, list] = {}
 
         for ch in channels:
+            if ch.get("stash_type") == "vertical_tv":
+                # No fixed lineup to schedule — centers/sides are chosen live,
+                # fresh, every round (see live_tv_engine._feeder_vertical).
+                continue
             tvg_id = ch["tvg_id"]
             try:
                 if ch.get("stash_type") == "shorts":
@@ -897,6 +939,8 @@ async def _run_maintenance_update():
         changed   = False
 
         for ch in channels:
+            if ch.get("stash_type") == "vertical_tv":
+                continue
             tvg_id   = ch["tvg_id"]
             existing = _stash_schedule.get(tvg_id, [])
             try:
@@ -1022,6 +1066,12 @@ async def _build_stash_channel_playlist(ch: dict) -> tuple[list[dict], float] | 
     """
     tvg_id = ch["tvg_id"]
     now = time.time()
+
+    if ch.get("stash_type") == "vertical_tv":
+        # No fixed lineup — the feeder picks a fresh center+sides every round
+        # (live_tv_engine._feeder_vertical), so there's nothing to schedule.
+        # Always "airing"; seek 0 since there's no meaningful position to resume.
+        return [], 0.0
 
     if ch.get("stash_type") == "shorts":
         # Flatten the segments stored in each block into a single schedule and

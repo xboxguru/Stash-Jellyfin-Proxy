@@ -1,32 +1,15 @@
 # Vertical Multi-View ("Triptych")
 
-A specialized, toggleable library of vertical (portrait) videos. In later phases, pressing
-play composites the selected clip (center) with two auto-selected looping side clips into a
-single 16:9 HLS stream, with audio from the center clip only. The full feature plan lives in
-`PLANNED_FEATURES.md` § Feature 1 (local planning doc, not tracked in git).
+A specialized, toggleable library of vertical (portrait) videos. Pressing play composites the
+selected clip (center) with two auto-selected looping side clips into a single 16:9 HLS stream,
+audio from the center clip only. The same compositor also powers an optional always-on "Vertical
+TV" Live TV channel that cycles fresh triptychs continuously.
 
-## Implementation Progress
+This document covers the whole feature end to end: library filtering → side-clip selection →
+compositor → hardware encoding → the Vertical TV channel. It's written for a developer picking
+this up cold — the *why* behind each non-obvious choice matters as much as the *what*.
 
-| Phase | Scope | Status |
-|---|---|---|
-| **Phase 0** | Library + filtering: vertical predicate, config toggle, settings UI, home-screen tile, browse (scenes play normally) | ✅ Done |
-| **Phase 1a** | Side-clip selection algorithm (pure logic, no FFmpeg) | ✅ Done |
-| **Phase 1b** | VOD compositor (CPU): `vertical_engine` (Shape A), PlaybackInfo transcode wiring, center seek, idle teardown | ✅ Done |
-| **Phase 1.5** | Hardware **encoders** (NVENC/QSV/VAAPI) + startup probe, jellyfin-ffmpeg7 base image | ✅ Done |
-| Phase 2 | "Vertical TV" continuous Live TV channel reusing the compositor | — |
-
-**Phase 1.5 scope note:** the hardware *encoder* selection + probe and the jellyfin-ffmpeg7
-image shipped. GPU **decode/scale** (moving the 3-input decode + `hstack` off the CPU) is
-deliberately **deferred** — it's the one path that pulls the CUDA runtime, and the encode is
-the expensive part we needed off the CPU first. See § Hardware encoding below.
-
-**Phase 0 orientation-filter decision:** hybrid. Stash's scene filter *can* express
-orientation server-side (`orientation: {value: [PORTRAIT]}`, available since Stash v0.24,
-Feb 2024) but has no aspect-ratio criterion — so the `height > width` half of the predicate
-runs in Stash and the `height/width >= VERTICAL_ASPECT_MIN` half is refined client-side on
-each fetched page. We did **not** over-fetch the whole library.
-
-## How it works (Phase 0)
+## Library and filtering
 
 ### The vertical predicate — `core/vertical.py`
 
@@ -45,8 +28,8 @@ can't prove a file is vertical, it doesn't belong in the library.
   `config.VERTICAL_ASPECT_MIN` at call time so a settings change applies without restart.
 - `filter_vertical_scenes(scenes)` — list refinement used by the browse path.
 
-This module is deliberately tiny and framework-free: Phase 1's side-clip selection will
-reuse the same predicate for candidate filtering.
+This module is deliberately tiny and framework-free: the side-clip selection algorithm and the
+Vertical TV channel both reuse the same predicate for candidate filtering.
 
 ### Library tile and browse routing
 
@@ -63,8 +46,9 @@ reuse the same predicate for candidate filtering.
      scenes passes through `filter_vertical_scenes()` before mapping to Jellyfin items
      (both the standard/random-sort path and the alphabet-bar path).
 
-Playback is untouched in Phase 0 — a scene played from the Vertical library direct-plays
-exactly like anywhere else. The compositor arrives in Phase 1.
+A scene played from the Vertical library composites (see below); the same scene played from a
+normal library direct-plays like anything else — the trigger is the *library it was played
+from*, not something intrinsic to the scene (see "The `vscene-` id namespace" below).
 
 ### Why per-page client refinement (and its tradeoff)
 
@@ -82,50 +66,19 @@ way the alphabet-sort path already does.
 `findScenes` errors and the Vertical library renders empty (the GraphQL error is logged by
 `stash_client`). No fallback is implemented — the proxy targets current Stash.
 
-### Config
+## Side-clip selection — `core/vertical_selection.py`
 
-Both keys follow the "all four places" convention in `config.py` (defaults block,
-`save_config()` `keys_to_save`, `_coerce_config_value()` type bucket, `_supported_keys`):
-
-| Key | Default | Type | Meaning |
-|---|---|---|---|
-| `ENABLE_VERTICAL_MULTI` | `false` | bool | Show the "Vertical Multi-View" home-screen tile |
-| `VERTICAL_ASPECT_MIN` | `1.3` | float | Minimum height÷width to count as vertical |
-
-`VERTICAL_ASPECT_MIN` is the codebase's first **float** config key — a new float bucket was
-added to `_coerce_config_value()`, and the settings form's numeric submit path
-(`templates/components/scripts.html`) now picks `parseFloat` over `parseInt` when a key's
-`DEFAULTS` entry is non-integer (previously `parseInt("1.3")` would have silently saved `1`).
-
-### Settings GUI
-
-`templates/components/tab_settings.html`, Library tab → "Vertical Multi-View" card: a
-toggle for `ENABLE_VERTICAL_MULTI` and a `step="0.05"` number input for
-`VERTICAL_ASPECT_MIN`. No custom JS needed — `/api/config` exposes every uppercase config
-var, and the generic fetch/populate/save flow matches inputs by `name`.
-
-### Tests
-
-- `tests/test_vertical.py` — predicate boundaries (16:9, square, 1.2 portrait, exact
-  threshold), config-driven vs. explicit `aspect_min`, missing/zero/None dimensions,
-  primary-file-only judgment, and the list filter.
-- `tests/test_config.py` — bool coercion for `ENABLE_VERTICAL_MULTI`, float coercion for
-  `VERTICAL_ASPECT_MIN` (including invalid → `None`), and a full
-  `save_config()` → `load_config_file()` round-trip preserving values and types.
-
-## How it works (Phase 1a) — Side-clip selection
-
-`core/vertical_selection.py` picks the 2 looping side clips for a chosen center scene.
-It's pure selection logic — no FFmpeg, no session state — so `api/vertical_engine.py`
-(Phase 1b) can call `select_side_clips(center_scene)` without pulling in the playout
+Picks the 2 looping side clips for a chosen center scene. It's pure selection logic — no
+FFmpeg, no session state — so both `api/vertical_engine.py` (VOD compositor) and
+`api/live_tv_engine.py` (Vertical TV channel) can call it without pulling in the playout
 stack, and the algorithm is unit-testable in isolation.
 
 ### The weighting model
 
 Candidates are drawn from a single vertical-only fetch (`stash_client.fetch_scenes`
 with the same `orientation: PORTRAIT` filter as the library browse path, `per_page: -1`,
-refined through `core.vertical.filter_vertical_scenes` — see Phase 0 above). From that
-pool, four **category pools** are built against the center scene:
+refined through `core.vertical.filter_vertical_scenes`). From that pool, four **category
+pools** are built against the center scene:
 
 | Category | Membership | Candidate weight (within pool) |
 |---|---|---|
@@ -147,9 +100,9 @@ Only **non-empty** pools count. For each of the 2 side slots:
    much as strongly-related ones.
 
 Pools are **rebuilt from scratch for slot 2** with the slot-1 pick added to the exclusion
-set. This is what makes the "next-heaviest category" fallback (§1.6.4) happen for free:
-if slot 1 exhausted the only candidate in, say, Tags, slot 2 naturally re-normalizes over
-whatever's left rather than needing special-cased retry logic.
+set. This is what makes the "next-heaviest category" fallback happen for free: if slot 1
+exhausted the only candidate in, say, Tags, slot 2 naturally re-normalizes over whatever's
+left rather than needing special-cased retry logic.
 
 ### Fallback ordering, and why
 
@@ -161,40 +114,44 @@ whatever's left rather than needing special-cased retry logic.
    *some* vertical clip than to fail the whole selection because metadata is sparse.
 3. **No eligible candidates left at all** (`"no_eligible_candidates"`) → that slot picks
    nothing.
-4. **Only 1 distinct eligible side existed across both slots** → §1.2.5's tiny-library
+4. **Only 1 distinct eligible side existed across both slots** → the tiny-library
    rule: repeat that one clip for both slots rather than fail. A repeated side is a much
-   smaller UX hit than not offering multi-view at all for a library that's still
-   growing.
+   smaller UX hit than not offering multi-view at all for a library that's still growing.
 5. **No other vertical scenes exist besides the center** → `select_side_clips` returns
-   `[]`. This is the one case selection *can't* paper over — the caller (Phase 1b) is
-   expected to fall back to normal single-video playback and log a warning, per §1.2.5.
+   `[]`. This is the one case selection *can't* paper over — the caller is expected to
+   fall back to normal single-video playback (VOD) or retry after a delay (Vertical TV)
+   and log a warning.
 
 Every pick and fallback logs which path was taken (category name, or one of the fallback
 labels above) so a thin library's behavior is diagnosable from the logs alone.
 
-### Tests
+### Picking a center — `pick_center_and_sides()`
 
-`tests/test_vertical_selection.py` — each category pool builder (membership, weighting,
-ranking, window truncation, boundary days); `_pick_side`'s category re-normalization
-(verified by spying on `random.choices`' weights argument) and both fallback paths;
-`select_side_clips` end-to-end for the 2-distinct-sides case, the tiny-library repeat,
-the single-video empty-list case, and that non-vertical candidates returned by a raw
-`fetch_scenes` result get filtered out before picking.
+The VOD path always has an explicit center (the scene the user pressed play on). The
+Vertical TV channel doesn't — it needs to invent one every round. `pick_center_and_sides
+(exclude_ids=None)` fetches the same vertical candidate pool, picks a random scene as
+center (excluding `exclude_ids` when that still leaves candidates — dropped rather than
+failing the round if it wouldn't), and then calls `select_side_clips` on it exactly like
+the VOD path. Returns `(center_scene, [left_id, right_id])`, or `None` if the library
+can't support a triptych at all. One function, reused by both playout paths — the fallback
+behavior above works identically whether the center was chosen by a user or by the channel
+feeder.
 
-## How it works (Phase 1b) — Compositor
+## The VOD compositor — `api/vertical_engine.py` + `api/vertical_routes.py`
 
-The VOD compositor turns a chosen center clip + its two selected sides into one
-16:9 HLS stream. It lives in `api/vertical_engine.py` (`_VerticalSessionManager`)
-and `api/vertical_routes.py` (the HTTP surface), and deliberately **reuses the Live
-TV playout spine** rather than reinventing it.
+Turns a chosen center clip + its two selected sides into one 16:9 HLS stream. Deliberately
+**reuses the Live TV playout spine** (`api/live_tv_engine.py`) rather than reinventing it: a
+long-lived master FFmpeg process encoding a uniform 1920×1080 / yuv420p / 30 fps + s16le
+48 kHz stereo raw stream, fed over a pipe backend (`_FifoPipeBackend` on Linux,
+`_TcpRelayPipeBackend` on Windows), into an HLS ladder.
 
 ### Triggering: the `vscene-` id namespace
 
-Jellyfin playback is context-free — `PlaybackInfo`/`stream` receive only an item id,
-and the *same* scene has the same id in every library. To honor "multi-view fires
-**only** from the Vertical library" (decision 9) without a parallel id scheme rippling
-through images/metadata/userdata/streams, Vertical-library items are minted with a
-**`vscene-`** prefix instead of `scene-` (`format_jellyfin_item(scene, vertical=True)`):
+Jellyfin playback is context-free — `PlaybackInfo`/`stream` receive only an item id, and
+the *same* scene has the same id in every library. To honor "multi-view fires only from the
+Vertical library" without a parallel id scheme rippling through images/metadata/userdata/
+streams, Vertical-library items are minted with a **`vscene-`** prefix instead of `scene-`
+(`format_jellyfin_item(scene, vertical=True)`):
 
 - `jellyfin_mapper.decode_id()` transparently strips the leading `v` → `scene-11`, so
   **every existing consumer** (images, metadata, userdata, resume, subtitles, raw
@@ -234,8 +191,7 @@ center-audio sub (center clip only)  ── a pipe ─▶┘
 ```
 
 The master is byte-for-byte the Live TV master: two raw pipes (rawvideo 1920×1080
-yuv420p 30 fps + s16le 48 kHz stereo) fed over the shared pipe backend
-(`_FifoPipeBackend` on Linux, `_TcpRelayPipeBackend` on Windows), encoded once to
+yuv420p 30 fps + s16le 48 kHz stereo) fed over the shared pipe backend, encoded once to
 H.264/AAC. `-probesize 32 / -analyzeduration 0` on both inputs suppresses avformat's
 stream probe — mandatory for the two-pipe design (probing input #0 reads only the video
 socket while a single interleaving sub would block on audio → deadlock).
@@ -246,14 +202,14 @@ video buffer fills, that one process blocks on the video write and can no longer
 next audio packet either, starving the master's AAC encoder into a permanent deadlock
 (documented and verified in `live_tv_engine._feed_one_scene`). Splitting video and audio
 into separate processes gives each an independent backpressure path. The compositor keeps
-this split exactly.
+this split exactly — and so does the Vertical TV channel (below).
 
 On the TCP (Windows) backend the attach ordering is preserved: master claims the video
 endpoint first, the composite sub connects second (producer), then the master attaches to
 the audio endpoint (only possible after `find_stream_info()` on the video input completes,
 which needs the composite sub already writing), then the audio sub connects.
 
-### Filtergraph geometry (Shape A, §1.5)
+### Filtergraph geometry (Shape A)
 
 ```
 -re -stream_loop -1 -i <left>        # side, loops forever
@@ -273,24 +229,32 @@ center stream ends. Audio is the center clip only, normalized with the same
 `aresample/aformat` chain as Live TV (`-map 0:a:0?` so a silent center doesn't fail).
 Inputs are read with `-re` so the client can never outrun the encoder.
 
+`build_composite_cmd()` and `build_audio_cmd()` (module-level functions in
+`api/vertical_engine.py`) are the single source of truth for this filtergraph — both the
+VOD `_VerticalSessionManager` and the Vertical TV channel feeder call them, so there is
+exactly one place that knows the lane geometry.
+
+("Shape B" — three separate lane pipes with the master doing the `hstack`, which would
+enable live side swap-in — was considered and rejected as unnecessary complexity since
+sides just loop; Shape A above is what shipped.)
+
 ### Center seek = full session relaunch
 
 A center seek (client re-requesting the manifest with a different `StartTimeTicks`, or an
 explicit `POST /vertical/{session}/seek`) is a **full session relaunch** with the new
 `-ss` on the center input only — the sides just keep looping from their own start. The
 manager reuses the session's cached sides on relaunch, so scrubbing never re-rolls them.
-This is Phase 1's deliberately simple approach (§1.5); re-pointing only the center feeder
-is a later optimization if scrubbing feels heavy. Backward seeks within the
-already-encoded range work natively because the master uses `hls_playlist_type=event`
-(the full segment list is retained and `EXT-X-ENDLIST` is written when the center ends),
-so a relaunch is only needed to jump ahead of the live encode edge.
+This is the deliberately simple approach; re-pointing only the center feeder is a later
+optimization if scrubbing feels heavy. Backward seeks within the already-encoded range
+work natively because the master uses `hls_playlist_type=event` (the full segment list is
+retained and `EXT-X-ENDLIST` is written when the center ends), so a relaunch is only needed
+to jump ahead of the live encode edge.
 
 ### Encoders, concurrency, idle teardown
 
 - **Encoder:** selected by `VERTICAL_HWACCEL` (`none|nvenc|qsv|vaapi|auto`) through the shared
-  probe (§ Hardware encoding below). Phase 1b was CPU-only; Phase 1.5 makes the setting real —
-  the master's `-c:v` block (plus any device-init / `hwupload` filter) is now supplied by the
-  probed encoder. Decode + `hstack` still run on CPU.
+  probe (see § Hardware encoding below). The master's `-c:v` block (plus any device-init /
+  `hwupload` filter) is supplied by the probed encoder. Decode + `hstack` still run on CPU.
 - **Concurrency:** `VERTICAL_MAX_SESSIONS` (default 2). A launch that would exceed the cap
   is refused (logged), and the caller falls back to single-video playback. 3 decodes + 1
   encode is heavy — the cap is a safety rail (Stash is single-user).
@@ -298,19 +262,7 @@ so a relaunch is only needed to jump ahead of the live encode edge.
   session with no manifest/segment requests past the timeout, killing the subs + master,
   closing the pipe backend, and deleting the session temp dir.
 
-### Config (all four places + GUI)
-
-| Key | Default | Type | Meaning |
-|---|---|---|---|
-| `VERTICAL_IDLE_TIMEOUT` | `60` | int | Seconds of no requests before a session is torn down |
-| `VERTICAL_MAX_SESSIONS` | `2` | int | Concurrent composites; over cap → single-video fallback |
-| `VERTICAL_HWACCEL` | `auto` | enum | `none/nvenc/qsv/vaapi/auto` — encoder select (§ Hardware encoding) |
-
-Surfaced in the settings GUI under the "Vertical Multi-View" card → **Compositor**
-(`tab_settings.html`); the three keys are in `DEFAULTS` (`scripts.html`) so the generic
-save flow types them correctly.
-
-### Logging (§1.8)
+### Logging
 
 Per-session FFmpeg logs rotate at `{LOG_DIR}/vertical_ffmpeg/{session}.log` (same 10 MB
 rotation as Live TV). The engine logs session lifecycle (center + sides + encoder +
@@ -318,27 +270,7 @@ backend + seek; teardown reason), full master/composite/audio commands at DEBUG,
 readiness gate, seek relaunches (old→new position), concurrency refusals, and the
 single-video fallback with its reason.
 
-### Tests
-
-- `tests/test_stream_routes.py` — PlaybackInfo advertises the HLS compositor transcode
-  (direct play off, `/vertical/…/master.m3u8`, `{scene}-{nonce}` PlaySessionId) for a
-  `vscene-` item; single-video fallback when the compositor is unavailable; a disabled
-  feature flag plays normally; and the `endpoint_stream` guard 302-redirects a
-  `vscene-` stream URL to a composite session. (The FFmpeg manager is mocked — no real
-  sub-processes in tests.)
-- `tests/test_config.py` — int coercion for the two numeric keys, enum coercion +
-  invalid→`auto` for `VERTICAL_HWACCEL`, and a `save_config()`→`load_config_file()`
-  round-trip preserving values and types.
-
-### Watch-items
-
-- Client seek behavior through a custom HLS transcode is client-dependent; the
-  `StartTimeTicks`-triggered relaunch + `event` playlist is the mechanism, but real
-  scrubbing/resume should be verified against Wholphin/ExoPlayer on a device.
-- Full relaunch on every scrub may feel heavy — optimize to re-point only the center
-  feeder later if needed.
-
-## How it works (Phase 1.5) — Hardware encoding
+## Hardware encoding — `core/hw_encoder.py`
 
 `VERTICAL_HWACCEL` (`none|nvenc|qsv|vaapi|auto`) picks the master's H.264 **encoder**.
 The selection logic is a small, framework-free, engine-agnostic helper in
@@ -369,7 +301,7 @@ effective encoder is logged before the first play, and the result is cached per
 `(mode, ffmpeg_bin)` — per-session launches never re-probe. Because the probe test-encodes
 (and blocks), the engine runs it off the event loop via `run_in_executor`.
 
-### Encoder-only this phase (decode stays on CPU)
+### Encoder-only (decode stays on CPU)
 
 The 3-input decode, per-lane scale/crop, and `hstack` still run on the CPU; only the final
 encode moves to the GPU. The raw `yuv420p` frames reaching the master are already in system
@@ -381,11 +313,10 @@ memory, so:
   frames onto the GPU right before the encoder. `EncoderConfig` bundles those three arg groups
   (`input_args` / `vfilter` / `output_args`) so the master command just splices them in.
 
-**Why not GPU decode/scale too (deferred):** full-GPU decode is what pulls the CUDA *runtime*
-(hundreds of MB → GB in the image), and the *encode* is the CPU-heavy part we most needed to
-offload for `3 decodes + 1 encode`. Encoder-only banks most of the CPU win at ~0 extra image
-size. GPU decode/scale is a future optimization, revisited if the concurrency cap still feels
-tight.
+**Why not GPU decode/scale too:** full-GPU decode is what pulls the CUDA *runtime* (hundreds
+of MB → GB in the image), and the *encode* is the CPU-heavy part most needed offloaded for
+`3 decodes + 1 encode`. Encoder-only banks most of the CPU win at ~0 extra image size. GPU
+decode/scale is a possible future optimization if the concurrency cap still feels tight.
 
 ### Image: why jellyfin-ffmpeg, and the size tradeoff
 
@@ -403,7 +334,7 @@ problems than hand-assembling apt driver packages.
 | **Net over the old apt-ffmpeg image** | **+150–300 MB** (mostly the Intel stack) | per-encoder, above |
 
 NVENC rides the host driver essentially for free; the ~+150–300 MB is the one-time cost of the
-bundled Intel stack. Because decode stays on CPU this phase, we avoid pulling the CUDA runtime.
+bundled Intel stack. Because decode stays on CPU, we avoid pulling the CUDA runtime.
 
 ### Docker prerequisites (operator)
 
@@ -411,11 +342,159 @@ bundled Intel stack. Because decode stays on CPU this phase, we avoid pulling th
 - **Intel QSV / VAAPI** — `--device /dev/dri:/dev/dri` passthrough.
 - **CPU** — nothing; it's the automatic fallback when no GPU is available or the probe fails.
 
+## Vertical TV channel — `api/live_tv_engine.py`
+
+An optional always-on Live TV channel that runs the compositor continuously, cycling fresh
+center/side clips forever instead of playing one chosen scene. It's a genuinely new *Live TV
+channel type*, not a new engine: it reuses the Dynamic Stash Channels' FFmpeg manager
+(`_FFmpegChannelManager`), the same PlaybackInfo/stream-serving code, and — critically — the
+exact filtergraph the VOD compositor uses (`build_composite_cmd`/`build_audio_cmd` in
+`api/vertical_engine.py`). There is no second compositor implementation anywhere.
+
+### Why it fits as a channel, not a session
+
+Live TV channels and VOD compositor sessions solve different problems that happen to share a
+playout spine:
+
+- A **VOD session** (`_VerticalSessionManager`) is keyed by `{scene_id}-{nonce}` and exists
+  once per *play* — it ends when the center ends, sides are picked once and stay fixed for
+  that play, and there's a concurrency cap per Jellyfin session.
+- A **channel** (`_FFmpegChannelManager`) is keyed by channel id and exists once *total* —
+  every viewer of "Vertical TV" shares the same running FFmpeg process, and it's expected to
+  run indefinitely with no viewer-driven lifecycle beyond idle teardown.
+
+Because the Vertical TV channel has no single "play" to key sessions by (it cycles rounds
+forever), it belongs on the channel side of that split, sharing infrastructure with the Stash
+tag/filter/shorts channels rather than the VOD manager.
+
+### The channel is synthetic, not a channels.json entry
+
+Tag/filter/shorts channels are user-created rows in `channels.json` (`_channels_config`),
+each with a fixed scene lineup that the schedule builder turns into `_stash_schedule[tvg_id]`
+EPG entries. Vertical TV has **no fixed lineup at all** — center and sides are picked live,
+fresh, every round — so there is nothing for the channel-editor CRUD or the schedule builder
+to store, edit, or reorder.
+
+Instead, `api/live_tv_data.py`'s `_get_stash_channels()` appends one synthetic channel dict
+(`_build_vertical_tv_channel()`, `stash_type: "vertical_tv"`) whenever
+`_vertical_tv_enabled()` is true, right alongside the persisted tag/filter/shorts channels
+from `channels.json`. It's registered into the same `_channel_info_map`/`_stash_channel_map`
+lookups as every other channel, so `get_channel_by_jellyfin_id`, PlaybackInfo dispatch,
+guide listings, and "now playing" all work for it without any new code path — they already
+branch on `ch.get("stash_type")` being truthy, and `"vertical_tv"` satisfies that the same way
+`"tag"`/`"filter"`/`"shorts"` do.
+
+`_rebuild_stash_schedules` / `_run_maintenance_update` explicitly skip `vertical_tv` channels
+(nothing to build), and `_build_stash_channel_playlist` short-circuits to `([], 0.0)` for them
+— always "airing", seek always 0 since there's no meaningful position to resume into a channel
+that never repeats the same content.
+
+### Gating — `ENABLE_VERTICAL_TV_CHANNEL`
+
+Three flags must all be true for the channel to appear:
+
+| Flag | Why required |
+|---|---|
+| `ENABLE_STASH_CHANNELS` | Vertical TV reuses the Dynamic Stash Channels plumbing wholesale — PlaybackInfo, stream serving, the FFmpeg manager. |
+| `ENABLE_VERTICAL_MULTI` | The compositor and side-selection algorithm are the Vertical Multi-View feature; the channel is just that feature run continuously. |
+| `ENABLE_VERTICAL_TV_CHANNEL` | The channel-specific toggle. |
+
+`ENABLE_LIVE_TV` (the master Live TV switch) still gates everything as usual —
+`_live_tv_enabled()` now also returns true when Vertical TV alone is configured, so the
+channel works even if a deployment has neither Tunarr nor plain Stash tag/filter channels
+enabled.
+
+`VERTICAL_TV_CHANNEL_NUMBER` (default 9000) sets its channel number; picked well above the
+default Stash channel start number (5001) so operators using both don't have to think about
+collisions.
+
+### The feeder: `_feeder_vertical` / `_feed_one_vertical_round`
+
+`_FFmpegChannelManager._feeder` is normally the scheduled-scene loop that walks
+`_stash_schedule` one entry at a time. For a `vertical_tv` channel it dispatches instead to
+`_feeder_vertical`, which loops forever:
+
+1. `core.vertical_selection.pick_center_and_sides(exclude_ids=recent_centers)` — a fresh
+   random center + 2 sides, excluding the last 5 centers played so the channel doesn't
+   immediately repeat itself. If the vertical library can't support a triptych at all
+   (`None`), it logs a warning and retries in 10 s rather than spinning.
+2. Records the round in `_current_scene[cid]` (same shape the scheduled feeder uses) so the
+   existing "now playing" endpoint (`endpoint_channel_now_playing`) works unmodified for this
+   channel too.
+3. `_feed_one_vertical_round(cid, center_id, sides, backend)` spawns exactly the two subs a
+   VOD play would — a composite video sub (`build_composite_cmd`: 3 HTTP inputs, hstack, into
+   the channel's video pipe) and a center-only audio sub (`build_audio_cmd`) — using the
+   channel's already-established pipe backend and master (set up once in `_launch`, shared
+   across every round the same way one master is shared across every scene in a normal
+   channel). The round ends when the composite's own `-shortest` ends it (center finishes),
+   then the loop picks a new round.
+
+This mirrors `_feed_one_scene`'s spawn ordering exactly (video sub first, wait for the
+master's audio-endpoint attach, then the audio sub) — the same TCP-backend handshake
+constraint applies here as everywhere else in this file.
+
+**Silent-center safety net:** unlike a VOD play — where a silent center just makes that one
+session's audio track empty — a channel that stalls on a silent center stalls *every current
+viewer* indefinitely, since the parent holds a keepalive writer FD on the audio pipe and the
+master never sees EOF to react to. `_feed_one_vertical_round` carries the same fast-fail
+pattern `_feed_one_scene` established for scheduled scenes: if the audio sub exits within 2 s
+(no audio stream), it's replaced with an `lavfi` silence filler so the round still completes
+in roughly the center's duration instead of hanging the channel.
+
+**Master encoder:** the Vertical TV channel uses the Live TV master's existing CPU
+(`libx264`) encode path unmodified — `VERTICAL_HWACCEL` only affects the VOD compositor's
+master. Giving the channel GPU encoding too is a reasonable future addition (the channel
+already reuses everything else), left out of this phase to keep the master's command
+construction (shared by every Live TV channel type) untouched.
+
+**Concurrency:** none needed beyond what already exists — like any Live TV channel, one
+FFmpeg pipeline serves every simultaneous viewer of "Vertical TV", so there's no per-viewer
+resource multiplication to cap. Running the VOD compositor and the Vertical TV channel at the
+same time does add up on the host (each is a comparable "3 decodes + 1 encode" workload) —
+worth watching if both are heavily used concurrently, but not coordinated between the two
+managers in this phase.
+
+**Idle teardown:** the channel is torn down by the same generic idle watchdog every Live TV
+channel uses (`LIVE_TV_IDLE_TIMEOUT`), restarting a fresh round on the next play request.
+
 ### Tests
 
-- `tests/test_hw_encoder.py` — `resolve_h264_encoder` (none/unknown → CPU with no probe; `auto`
-  preference order NVENC→QSV→VAAPI including fall-through; explicit-mode success and CPU
-  fallback that never tries a different GPU; per-`(mode, bin)` caching), and `probe_encoder`
-  (libx264 short-circuit, command construction with device-init + `hwupload` + codec, and
-  non-zero-exit / `OSError` / timeout all → unavailable). `subprocess.run` is mocked — no real
-  ffmpeg or GPU in tests.
+`tests/test_live_tv_vertical.py` — gating (`_vertical_tv_enabled`/`_live_tv_enabled`, all
+three flags required), channel-list assembly (`_get_stash_channels` appends the synthetic
+channel only when fully enabled, and never persists it to `channels.json`), the
+`_build_stash_channel_playlist` short-circuit, feeder dispatch, `_feeder_vertical`'s
+round-picking and "now playing" tracking, and `_feed_one_vertical_round`'s sub-spawning
+(success, composite-spawn failure, audio-attach timeout, and the silence-filler fallback).
+The FFmpeg manager is mocked — no real ffmpeg or subprocesses in tests, matching the VOD
+compositor's own test approach. `tests/test_vertical_selection.py` covers
+`pick_center_and_sides` (empty/single-scene library, center exclusion, and the
+drop-exclusion-rather-than-fail fallback). `tests/test_config.py` covers the two new config
+keys' coercion, env-override, and save/load round-trip.
+
+## Config reference
+
+All keys follow the "all four places" convention in `config.py` (defaults block,
+`save_config()` `keys_to_save`, `_coerce_config_value()` type bucket, `_supported_keys`), and
+are surfaced in the settings GUI (`templates/components/tab_settings.html`, Library tab →
+"Vertical Multi-View" card and Live TV tab → "Dynamic Stash Channels" card).
+
+| Key | Default | Type | Meaning |
+|---|---|---|---|
+| `ENABLE_VERTICAL_MULTI` | `false` | bool | Show the "Vertical Multi-View" home-screen tile |
+| `VERTICAL_ASPECT_MIN` | `1.3` | float | Minimum height÷width to count as vertical |
+| `VERTICAL_WEIGHT_PERFORMER` | `50` | int | Side-selection weight: shares a performer with center |
+| `VERTICAL_WEIGHT_TAGS` | `25` | int | Side-selection weight: shares ≥1 tag with center |
+| `VERTICAL_WEIGHT_STUDIO` | `15` | int | Side-selection weight: same studio as center |
+| `VERTICAL_WEIGHT_DATE` | `10` | int | Side-selection weight: close in date to center |
+| `VERTICAL_TAG_WINDOW` | `30` | int | Keep top-N tag-pool candidates ranked by shared-tag count |
+| `VERTICAL_DATE_WINDOW_DAYS` | `30` | int | Date-proximity pool: ± this many days of center's date |
+| `VERTICAL_IDLE_TIMEOUT` | `60` | int | Seconds of no VOD manifest/segment requests before tearing a session down |
+| `VERTICAL_MAX_SESSIONS` | `2` | int | Concurrent VOD composite sessions; over cap → single-video fallback |
+| `VERTICAL_HWACCEL` | `"auto"` | enum | VOD master encoder: `none/nvenc/qsv/vaapi/auto` |
+| `ENABLE_VERTICAL_TV_CHANNEL` | `false` | bool | Enable the always-on Vertical TV Live TV channel |
+| `VERTICAL_TV_CHANNEL_NUMBER` | `9000` | int | Channel number for Vertical TV |
+
+`VERTICAL_ASPECT_MIN` is the codebase's first **float** config key — a float bucket was
+added to `_coerce_config_value()`, and the settings form's numeric submit path
+(`templates/components/scripts.html`) picks `parseFloat` over `parseInt` when a key's
+`DEFAULTS` entry is non-integer (previously `parseInt("1.3")` would have silently saved `1`).

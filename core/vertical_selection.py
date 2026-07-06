@@ -185,3 +185,26 @@ async def select_side_clips(center_scene: dict) -> list:
         f"Vertical selection: no other vertical scenes besides center {center_id} — falling back to single-video playback"
     )
     return []
+
+
+async def pick_center_and_sides(exclude_ids: set | None = None) -> tuple:
+    """Pick a random center scene plus its 2 sides — one full triptych round.
+
+    Used by the Vertical TV Live TV channel (api/live_tv_engine.py) to cycle fresh
+    triptychs continuously, the same way a human would keep pressing play on a new
+    Vertical Multi-View clip. `exclude_ids` lets the caller avoid an immediate
+    repeat of the last few centers played; if excluding everything would leave no
+    candidates, the exclusion is dropped rather than failing the round.
+
+    Returns (center_scene, [left_id, right_id]), or None if the vertical library
+    doesn't have enough distinct scenes to compose a triptych at all.
+    """
+    candidates = await _fetch_vertical_candidates()
+    if not candidates:
+        return None
+    pool = [s for s in candidates if str(s.get("id")) not in (exclude_ids or set())] or candidates
+    center = random.choice(pool)
+    sides = await select_side_clips(center)
+    if not sides:
+        return None
+    return center, sides

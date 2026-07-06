@@ -543,6 +543,20 @@
                     <label class="form-label">Shorts Max Length (minutes)</label>
                     <input type="number" class="form-input" name="SHORTS_MAX_MINUTES" placeholder="5">
                 </div>
+                <div class="toggle-row" style="margin-top: 16px; margin-bottom: 12px;">
+                    <label class="toggle-switch">
+                        <input type="checkbox" name="ENABLE_VERTICAL_TV_CHANNEL">
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <div>
+                        <div class="toggle-label">Enable Vertical TV Channel</div>
+                        <div class="toggle-hint">Always-on channel that runs the Vertical Multi-View compositor continuously, cycling fresh center/side clips. Requires Vertical Multi-View enabled above.</div>
+                    </div>
+                </div>
+                <div class="form-group" style="max-width: 220px;">
+                    <label class="form-label">Vertical TV Channel Number</label>
+                    <input type="number" class="form-input" name="VERTICAL_TV_CHANNEL_NUMBER" placeholder="9000">
+                </div>
                 <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);">
                     <button type="button" id="btn-rebuild-schedule" class="btn" style="background: var(--warning, #b45309); color: #fff;">Regenerate Schedule</button>
                     <div class="form-hint" style="margin-top: 6px;">Wipes the current EPG schedule and builds a fresh randomized one for all Stash channels. Takes a few seconds.</div>

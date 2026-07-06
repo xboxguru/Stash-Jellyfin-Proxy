@@ -374,6 +374,10 @@ class _FFmpegChannelManager:
         until the master process is stopped (this task is cancelled by
         _stop_locked).
         """
+        if ch.get("stash_type") == "vertical_tv":
+            await self._feeder_vertical(cid, backend)
+            return
+
         stash_base = config.get_stash_base()
         api_key    = getattr(config, "STASH_API_KEY", "")
         ffmpeg_bin = getattr(config, "FFMPEG_PATH", "ffmpeg")
@@ -450,6 +454,163 @@ class _FFmpegChannelManager:
             raise
         except Exception:
             logger.error(f"LiveTV feeder: crashed for {cid!r}", exc_info=True)
+
+    async def _feeder_vertical(self, cid: str, backend: "_PipeBackend") -> None:
+        """Feeder for the Vertical TV channel (Feature 1 Phase 2).
+
+        There's no fixed schedule to walk — instead of the next scheduled scene,
+        every round picks a fresh random center + 2 side clips from the Vertical
+        Multi-View library (`core.vertical_selection`, the exact algorithm the
+        VOD compositor uses) and composites them via `_feed_one_vertical_round`
+        until the center ends, then picks a new round.  Runs until cancelled by
+        _stop_locked, exactly like the scheduled `_feeder`.
+        """
+        from core.vertical_selection import pick_center_and_sides
+
+        recent_centers: list[str] = []
+        rounds_played = 0
+        logger.info(f"Vertical TV: feeder started for channel {cid!r}")
+        try:
+            while True:
+                picked = await pick_center_and_sides(exclude_ids=set(recent_centers))
+                if picked is None:
+                    logger.warning(
+                        f"Vertical TV: channel {cid!r} has no eligible vertical scenes "
+                        f"for a triptych — retrying in 10s"
+                    )
+                    await asyncio.sleep(10)
+                    continue
+                center, sides = picked
+                center_id = str(center.get("id"))
+                recent_centers.append(center_id)
+                del recent_centers[:-5]  # avoid immediate repeats without tracking full history
+
+                files = center.get("files") or []
+                duration = float(files[0].get("duration") or 0) if files else 0.0
+                self._current_scene[cid] = {
+                    "scene_id":     center_id,
+                    "title":        center.get("title", ""),
+                    "duration_sec": duration,
+                    "scene_seek":   0.0,
+                    "started_at":   time.time(),
+                }
+
+                t0 = time.time()
+                logger.info(
+                    f"Vertical TV: channel {cid!r} round #{rounds_played+1} "
+                    f"center={center_id} sides={sides} dur={duration:.1f}s"
+                )
+                ok = await self._feed_one_vertical_round(cid, center_id, sides, backend)
+                logger.info(
+                    f"Vertical TV: channel {cid!r} round center={center_id} "
+                    f"finished ok={ok} elapsed={time.time()-t0:.1f}s"
+                )
+                rounds_played += 1
+        except asyncio.CancelledError:
+            logger.info(f"Vertical TV: feeder cancelled for {cid!r} after {rounds_played} round(s)")
+            raise
+        except Exception:
+            logger.error(f"Vertical TV: feeder crashed for {cid!r}", exc_info=True)
+
+    async def _feed_one_vertical_round(self, cid: str, center_id: str, sides: list,
+                                        backend: "_PipeBackend") -> bool:
+        """Spawn ONE composite round: a 3-input hstack video sub (2 looping sides
+        + center) and a center-only audio sub — the same pair
+        `api.vertical_engine._VerticalSessionManager` spawns per VOD play, reused
+        here via its command builders so the compositor's filtergraph lives in
+        one place (see docs/Triptych.md § Vertical TV).  Ends (both subs exit)
+        when the center clip ends (`-shortest` in the composite filtergraph).
+        """
+        from api.vertical_engine import build_composite_cmd, build_audio_cmd
+
+        ffmpeg_bin = getattr(config, "FFMPEG_PATH", "ffmpeg")
+        sub_out_v, sub_out_a = backend.sub_outputs()
+        left_id, right_id = sides[0], sides[1]
+
+        composite_cmd = build_composite_cmd(ffmpeg_bin, left_id, center_id, right_id, 0.0, sub_out_v)
+        logger.debug(f"Vertical TV: composite sub cmd for {cid!r}: {' '.join(composite_cmd)}")
+        try:
+            sub_v = await asyncio.create_subprocess_exec(
+                *composite_cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except Exception as exc:
+            logger.error(f"Vertical TV: could not spawn composite sub for {cid!r} center={center_id}: {exc}")
+            return False
+        logger.info(f"Vertical TV: channel {cid!r} center={center_id} composite pid={sub_v.pid}")
+        asyncio.create_task(self._drain_sub_stderr(sub_v, cid, f"{center_id}/composite"))
+
+        # Master can only attach to the audio endpoint after find_stream_info() on
+        # the video input completes — which needs the composite sub already writing
+        # (identical constraint to the scheduled feeder's _feed_one_scene).
+        a_ready = await backend.wait_master_audio_attached(timeout=15.0)
+        if not a_ready:
+            logger.error(
+                f"Vertical TV: master never attached to audio endpoint for {cid!r} "
+                f"center={center_id} — killing composite sub and skipping round"
+            )
+            try: sub_v.terminate()
+            except Exception: pass
+            await sub_v.wait()
+            return False
+
+        audio_cmd = build_audio_cmd(ffmpeg_bin, center_id, 0.0, sub_out_a)
+        logger.debug(f"Vertical TV: audio sub cmd for {cid!r}: {' '.join(audio_cmd)}")
+        try:
+            sub_a = await asyncio.create_subprocess_exec(
+                *audio_cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except Exception as exc:
+            logger.error(f"Vertical TV: could not spawn audio sub for {cid!r} center={center_id}: {exc}")
+            try: sub_v.terminate()
+            except Exception: pass
+            await sub_v.wait()
+            return False
+        logger.info(f"Vertical TV: channel {cid!r} center={center_id} audio pid={sub_a.pid}")
+        asyncio.create_task(self._drain_sub_stderr(sub_a, cid, f"{center_id}/audio"))
+
+        # Same fast-fail safety net as _feed_one_scene: a center with no audio
+        # stream exits sub_a almost immediately, which would otherwise starve the
+        # master's audio input indefinitely (it has no EOF to react to — the
+        # parent holds a keepalive writer FD open) and stall the whole channel,
+        # not just one VOD play.  Replace with lavfi silence so the round still
+        # completes in roughly the center's duration.
+        try:
+            rc_a_fast = await asyncio.wait_for(asyncio.shield(sub_a.wait()), timeout=2.0)
+            if rc_a_fast != 0:
+                # Duration unknown here without re-fetching the scene; fall back
+                # to a generous fixed silence window — the composite's own
+                # `-shortest` (bounded by the center's video track) is what
+                # actually ends the round, this just keeps the audio pipe fed
+                # until then.
+                silence_cmd = [
+                    ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "warning",
+                    "-f", "lavfi", "-i", "aevalsrc=0:c=stereo:s=48000",
+                    "-t", "7200",
+                    "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le",
+                    "-f", "s16le", sub_out_a,
+                ]
+                sub_a = await asyncio.create_subprocess_exec(
+                    *silence_cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                logger.info(
+                    f"Vertical TV: channel {cid!r} center={center_id} has no audio "
+                    f"— spawned silence filler pid={sub_a.pid}"
+                )
+        except asyncio.TimeoutError:
+            pass  # sub_a still running after 2 s — has audio, proceed normally
+
+        rc_v, rc_a = await asyncio.gather(sub_v.wait(), sub_a.wait())
+        if rc_v != 0:
+            logger.warning(f"Vertical TV: composite sub for {cid!r} center={center_id} exited rc={rc_v}")
+        if rc_a != 0:
+            logger.debug(f"Vertical TV: audio sub for {cid!r} center={center_id} exited rc={rc_a}")
+        return rc_v == 0
 
     async def _feed_one_scene(self, cid: str, scene_id: str,
                                backend: "_PipeBackend",
