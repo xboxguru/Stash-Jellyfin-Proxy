@@ -237,7 +237,7 @@
                             <option value="qsv">Intel QSV</option>
                             <option value="vaapi">VAAPI</option>
                         </select>
-                        <div class="form-hint">Hardware encoders land in Phase 1.5 — every option runs on CPU (libx264) for now.</div>
+                        <div class="form-hint">Auto probes NVENC → QSV → VAAPI at startup and falls back to CPU (libx264) if none initialize. Needs a jellyfin-ffmpeg image + GPU passthrough — see docs.</div>
                     </div>
                     <div class="form-group">
                         <label class="form-label">Max Concurrent Sessions</label>

@@ -199,6 +199,15 @@ async def lifespan(app):
     if getattr(config, "ENABLE_STASH_CHANNELS", False):
         _live_tv_data._load_schedule()
         await _live_tv_data.start_maintenance_task()
+    # Probe the vertical compositor's encoder once at startup so the effective
+    # H.264 encoder (or CPU fallback) is logged early and the result is warm-cached
+    # for the first play. Skipped when the feature is off — no probe cost incurred.
+    if getattr(config, "ENABLE_VERTICAL_MULTI", False):
+        from core.hw_encoder import resolve_h264_encoder
+        resolve_h264_encoder(
+            getattr(config, "VERTICAL_HWACCEL", "auto"),
+            getattr(config, "FFMPEG_PATH", "ffmpeg"),
+        )
     yield
     await _live_tv_data.stop_maintenance_task()
     logger.info("Shutting down global HTTP connection pools...")

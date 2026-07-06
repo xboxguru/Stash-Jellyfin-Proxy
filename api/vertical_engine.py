@@ -29,6 +29,7 @@ import time
 from datetime import datetime, timezone
 
 import config
+from core.hw_encoder import EncoderConfig, resolve_h264_encoder
 from core.vertical_selection import select_side_clips
 # Reuse the Live TV pipe backends + platform probes verbatim — the byte-forwarding
 # plumbing is identical; only the FFmpeg graph feeding it differs.
@@ -165,13 +166,19 @@ class _VerticalSessionManager:
             url += f"?apikey={api_key}"
         return url
 
-    @staticmethod
-    def _effective_encoder() -> tuple[str, str]:
-        """(requested, effective) encoder.  Phase 1b is CPU-only — every mode
-        resolves to libx264; VERTICAL_HWACCEL is honored from Phase 1.5 on.
+    async def _resolve_encoder(self) -> EncoderConfig:
+        """Resolve VERTICAL_HWACCEL to a probed-working encoder (Phase 1.5).
+
+        Delegates to the shared ``core.hw_encoder`` probe: ``none`` → libx264,
+        ``auto`` → first of NVENC/QSV/VAAPI that initializes, an explicit encoder
+        → that one or a logged CPU fallback.  The probe test-encodes a frame, which
+        blocks, so it's run off the event loop; the result is cached after the
+        first call (usually the startup probe) so per-session launches are cheap.
         """
-        requested = str(getattr(config, "VERTICAL_HWACCEL", "auto")).lower()
-        return requested, "libx264"
+        mode = str(getattr(config, "VERTICAL_HWACCEL", "auto")).lower()
+        ffmpeg_bin = getattr(config, "FFMPEG_PATH", "ffmpeg")
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, resolve_h264_encoder, mode, ffmpeg_bin)
 
     async def _launch(self, sid: str, center_scene: dict, seek: float,
                        sides: list | None = None) -> bool:
@@ -239,13 +246,7 @@ class _VerticalSessionManager:
         master_in_v, master_in_a = backend.master_inputs()
         sub_out_v, sub_out_a = backend.sub_outputs()
 
-        requested_enc, effective_enc = self._effective_encoder()
-        if requested_enc not in ("none", "auto", "libx264"):
-            logger.info(
-                f"Vertical: encoder {requested_enc!r} requested but hardware paths land "
-                f"in Phase 1.5 — using {effective_enc} (CPU) for session {sid!r}"
-            )
-
+        enc = await self._resolve_encoder()
         ffmpeg_bin = getattr(config, "FFMPEG_PATH", "ffmpeg")
         seg_tmpl = os.path.join(d, "seg%05d.ts")
         manifest = os.path.join(d, "stream.m3u8")
@@ -256,8 +257,12 @@ class _VerticalSessionManager:
         # VOD framing: hls_playlist_type=event keeps the full segment list and
         # writes EXT-X-ENDLIST when the center ends, so the client gets a proper
         # seekable VOD manifest rather than a rolling live window.
+        # Hardware encoders (VAAPI/QSV) need device-init before the inputs and an
+        # hwupload -vf on the raw frames; NVENC/libx264 take system frames as-is.
+        # `enc` supplies each group so decode + hstack stay on CPU (this phase).
         master_cmd = [
             ffmpeg_bin, "-y", "-hide_banner",
+            *enc.input_args,
             "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", "1920x1080", "-r", "30",
             "-probesize", "32", "-analyzeduration", "0", "-thread_queue_size", "1024",
             "-i", master_in_v,
@@ -265,7 +270,8 @@ class _VerticalSessionManager:
             "-probesize", "32", "-analyzeduration", "0", "-thread_queue_size", "1024",
             "-i", master_in_a,
             "-map", "0:v:0", "-map", "1:a:0",
-            "-c:v", effective_enc, "-preset", "veryfast", "-crf", "23",
+            *(["-vf", enc.vfilter] if enc.vfilter else []),
+            *enc.output_args,
             "-force_key_frames", "expr:gte(t,n_forced*4)",
             "-c:a", "aac", "-b:a", "192k",
             "-hls_time", "4",
@@ -278,7 +284,7 @@ class _VerticalSessionManager:
 
         logger.info(
             f"Vertical FFmpeg: launching session {sid!r} — center={center_id} "
-            f"sides={sides} backend={backend.kind} encoder={effective_enc} seek={seek:.1f}s"
+            f"sides={sides} backend={backend.kind} encoder={enc.codec} seek={seek:.1f}s"
         )
         logger.debug(f"Vertical FFmpeg master cmd: {' '.join(master_cmd)}")
 
@@ -311,7 +317,7 @@ class _VerticalSessionManager:
         self._stderr[sid] = []
         self._launch_info[sid] = {
             "seek": seek, "sides": sides, "center": center_id,
-            "pid": proc.pid, "start_ts": time.time(), "encoder": effective_enc,
+            "pid": proc.pid, "start_ts": time.time(), "encoder": enc.codec,
         }
         logger.info(f"Vertical FFmpeg: session {sid!r} master pid={proc.pid}")
         asyncio.create_task(self._drain_stderr(proc, sid))

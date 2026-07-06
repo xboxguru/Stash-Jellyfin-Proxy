@@ -12,8 +12,13 @@ single 16:9 HLS stream, with audio from the center clip only. The full feature p
 | **Phase 0** | Library + filtering: vertical predicate, config toggle, settings UI, home-screen tile, browse (scenes play normally) | ✅ Done |
 | **Phase 1a** | Side-clip selection algorithm (pure logic, no FFmpeg) | ✅ Done |
 | **Phase 1b** | VOD compositor (CPU): `vertical_engine` (Shape A), PlaybackInfo transcode wiring, center seek, idle teardown | ✅ Done |
-| Phase 1.5 | Hardware encoders (NVENC/QSV/VAAPI), jellyfin-ffmpeg base image, GPU decode/scale | — |
+| **Phase 1.5** | Hardware **encoders** (NVENC/QSV/VAAPI) + startup probe, jellyfin-ffmpeg7 base image | ✅ Done |
 | Phase 2 | "Vertical TV" continuous Live TV channel reusing the compositor | — |
+
+**Phase 1.5 scope note:** the hardware *encoder* selection + probe and the jellyfin-ffmpeg7
+image shipped. GPU **decode/scale** (moving the 3-input decode + `hstack` off the CPU) is
+deliberately **deferred** — it's the one path that pulls the CUDA runtime, and the encode is
+the expensive part we needed off the CPU first. See § Hardware encoding below.
 
 **Phase 0 orientation-filter decision:** hybrid. Stash's scene filter *can* express
 orientation server-side (`orientation: {value: [PORTRAIT]}`, available since Stash v0.24,
@@ -282,9 +287,10 @@ so a relaunch is only needed to jump ahead of the live encode edge.
 
 ### Encoders, concurrency, idle teardown
 
-- **Encoder:** Phase 1b is **CPU-only** (`libx264`). `VERTICAL_HWACCEL`
-  (`none|nvenc|qsv|vaapi|auto`) is surfaced now but every value resolves to libx264 and is
-  logged as such; the NVENC/QSV/VAAPI paths + jellyfin-ffmpeg base image land in Phase 1.5.
+- **Encoder:** selected by `VERTICAL_HWACCEL` (`none|nvenc|qsv|vaapi|auto`) through the shared
+  probe (§ Hardware encoding below). Phase 1b was CPU-only; Phase 1.5 makes the setting real —
+  the master's `-c:v` block (plus any device-init / `hwupload` filter) is now supplied by the
+  probed encoder. Decode + `hstack` still run on CPU.
 - **Concurrency:** `VERTICAL_MAX_SESSIONS` (default 2). A launch that would exceed the cap
   is refused (logged), and the caller falls back to single-video playback. 3 decodes + 1
   encode is heavy — the cap is a safety rail (Stash is single-user).
@@ -298,7 +304,7 @@ so a relaunch is only needed to jump ahead of the live encode edge.
 |---|---|---|---|
 | `VERTICAL_IDLE_TIMEOUT` | `60` | int | Seconds of no requests before a session is torn down |
 | `VERTICAL_MAX_SESSIONS` | `2` | int | Concurrent composites; over cap → single-video fallback |
-| `VERTICAL_HWACCEL` | `auto` | enum | `none/nvenc/qsv/vaapi/auto` — CPU-only until Phase 1.5 |
+| `VERTICAL_HWACCEL` | `auto` | enum | `none/nvenc/qsv/vaapi/auto` — encoder select (§ Hardware encoding) |
 
 Surfaced in the settings GUI under the "Vertical Multi-View" card → **Compositor**
 (`tab_settings.html`); the three keys are in `DEFAULTS` (`scripts.html`) so the generic
@@ -331,3 +337,85 @@ single-video fallback with its reason.
   scrubbing/resume should be verified against Wholphin/ExoPlayer on a device.
 - Full relaunch on every scrub may feel heavy — optimize to re-point only the center
   feeder later if needed.
+
+## How it works (Phase 1.5) — Hardware encoding
+
+`VERTICAL_HWACCEL` (`none|nvenc|qsv|vaapi|auto`) picks the master's H.264 **encoder**.
+The selection logic is a small, framework-free, engine-agnostic helper in
+`core/hw_encoder.py` (`resolve_h264_encoder`) so Live TV can adopt the identical
+CPU/NVENC/QSV/VAAPI path later without duplicating it (DRY).
+
+### Probe / fallback behavior
+
+Being *compiled into* a build (jellyfin-ffmpeg carries all four) is not proof an encoder
+will *initialize* — there may be no GPU, no `/dev/dri`, or no host driver. So selection is a
+real **one-frame test-encode**, not an `-encoders` string match:
+
+```
+ffmpeg -hide_banner <device-init> -f lavfi -i color=black:320x240 -frames:v 1 \
+       [-vf <hwupload>] -c:v <encoder> <rate-control> -f null -
+```
+
+Only an encoder that actually produced a frame (clean exit) is chosen. The resolution:
+
+- **`none`** → `libx264`, no probe.
+- **`auto`** → probe **NVENC → QSV → VAAPI** in order; take the first that passes, else CPU.
+- **`nvenc` / `qsv` / `vaapi`** → that encoder if it probes OK, else a **logged CPU fallback**
+  (an unavailable explicit choice never silently tries a *different* GPU encoder).
+- unknown value → `libx264`.
+
+The probe runs **once at startup** (main.py lifespan, only when `ENABLE_VERTICAL_MULTI`) so the
+effective encoder is logged before the first play, and the result is cached per
+`(mode, ffmpeg_bin)` — per-session launches never re-probe. Because the probe test-encodes
+(and blocks), the engine runs it off the event loop via `run_in_executor`.
+
+### Encoder-only this phase (decode stays on CPU)
+
+The 3-input decode, per-lane scale/crop, and `hstack` still run on the CPU; only the final
+encode moves to the GPU. The raw `yuv420p` frames reaching the master are already in system
+memory, so:
+
+- **NVENC / libx264** ingest system frames directly — just a `-c:v` swap.
+- **VAAPI / QSV** can't take system frames, so their `EncoderConfig` adds device-init before
+  the inputs (`-vaapi_device …` / `-init_hw_device qsv=hw`) and an `hwupload` `-vf` to push the
+  frames onto the GPU right before the encoder. `EncoderConfig` bundles those three arg groups
+  (`input_args` / `vfilter` / `output_args`) so the master command just splices them in.
+
+**Why not GPU decode/scale too (deferred):** full-GPU decode is what pulls the CUDA *runtime*
+(hundreds of MB → GB in the image), and the *encode* is the CPU-heavy part we most needed to
+offload for `3 decodes + 1 encode`. Encoder-only banks most of the CPU win at ~0 extra image
+size. GPU decode/scale is a future optimization, revisited if the concurrency cap still feels
+tight.
+
+### Image: why jellyfin-ffmpeg, and the size tradeoff
+
+The Docker image is based on **jellyfin-ffmpeg7** (a `.deb` from the jellyfin-ffmpeg releases)
+instead of the apt `ffmpeg` package, with `FFMPEG_PATH=/usr/lib/jellyfin-ffmpeg/ffmpeg`. One
+maintained binary carries NVENC + QSV + VAAPI + AMF with the matching Intel drivers bundled —
+purpose-built for exactly this transcoding workload, and far fewer "why won't QSV initialize"
+problems than hand-assembling apt driver packages.
+
+| Encoder | Added to image | Runtime requirement |
+|---|---|---|
+| NVENC (encode only) | ~0 MB (host driver injected) | NVIDIA Container Toolkit + `--gpus all` |
+| Intel QSV / VAAPI | bundled in jellyfin-ffmpeg | `--device /dev/dri:/dev/dri` passthrough |
+| CPU (`libx264`) | — | nothing (the automatic fallback) |
+| **Net over the old apt-ffmpeg image** | **+150–300 MB** (mostly the Intel stack) | per-encoder, above |
+
+NVENC rides the host driver essentially for free; the ~+150–300 MB is the one-time cost of the
+bundled Intel stack. Because decode stays on CPU this phase, we avoid pulling the CUDA runtime.
+
+### Docker prerequisites (operator)
+
+- **NVENC** — NVIDIA Container Toolkit + `--gpus all` + a host NVIDIA driver.
+- **Intel QSV / VAAPI** — `--device /dev/dri:/dev/dri` passthrough.
+- **CPU** — nothing; it's the automatic fallback when no GPU is available or the probe fails.
+
+### Tests
+
+- `tests/test_hw_encoder.py` — `resolve_h264_encoder` (none/unknown → CPU with no probe; `auto`
+  preference order NVENC→QSV→VAAPI including fall-through; explicit-mode success and CPU
+  fallback that never tries a different GPU; per-`(mode, bin)` caching), and `probe_encoder`
+  (libx264 short-circuit, command construction with device-init + `hwupload` + codec, and
+  non-zero-exit / `OSError` / timeout all → unavailable). `subprocess.run` is mocked — no real
+  ffmpeg or GPU in tests.

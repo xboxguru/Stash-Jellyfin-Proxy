@@ -15,9 +15,28 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
+# jellyfin-ffmpeg7 instead of the apt `ffmpeg` package: one maintained binary
+# carrying NVENC + QSV + VAAPI + AMF with the matching Intel drivers bundled —
+# purpose-built for this transcoding workload (see docs/Triptych.md → Hardware
+# encoding). Adds ~150–300 MB (mostly the Intel stack); NVENC rides the host
+# driver for free.
+#
+# Runtime prerequisites the operator must supply per encoder (VERTICAL_HWACCEL):
+#   • NVENC       → NVIDIA Container Toolkit + `--gpus all` + host NVIDIA driver
+#   • Intel QSV / VAAPI → `--device /dev/dri:/dev/dri` passthrough
+#   • CPU (libx264)     → nothing; the automatic fallback when no GPU is present
+ARG JELLYFIN_FFMPEG_VERSION=7.1.1-3
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    bash curl gosu tzdata ffmpeg && \
+        bash curl gosu tzdata ca-certificates && \
+    arch="$(dpkg --print-architecture)" && \
+    curl -fsSL -o /tmp/jellyfin-ffmpeg.deb \
+        "https://github.com/jellyfin/jellyfin-ffmpeg/releases/download/v${JELLYFIN_FFMPEG_VERSION}/jellyfin-ffmpeg7_${JELLYFIN_FFMPEG_VERSION}-bookworm_${arch}.deb" && \
+    apt-get install -y --no-install-recommends /tmp/jellyfin-ffmpeg.deb && \
+    rm -f /tmp/jellyfin-ffmpeg.deb && \
     rm -rf /var/lib/apt/lists/*
+
+# Point the app at the jellyfin-ffmpeg binary (overridable via env / config).
+ENV FFMPEG_PATH=/usr/lib/jellyfin-ffmpeg/ffmpeg
 
 RUN mkdir -p /app /config && chmod 755 /app /config
 
