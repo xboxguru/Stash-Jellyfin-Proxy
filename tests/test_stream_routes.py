@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from core.jellyfin_mapper import encode_id
 from tests.conftest import make_scene
 from api.stream_routes import _requires_transcode
+from api.vertical_engine import _vertical_manager
 
 
 # ── _requires_transcode (pure function) ──────────────────────────────────────
@@ -110,6 +111,65 @@ class TestPlaybackInfo:
             data = client.post(f"/items/{encoded}/playbackinfo").json()
         ms = data["MediaSources"][0]
         assert ms["SupportsDirectPlay"] is False
+
+
+# ── Vertical Multi-View ("Triptych") compositor wiring ────────────────────────
+
+class TestVerticalPlaybackInfo:
+    """PlaybackInfo for a 'vscene-' (vertical-library) item drives the compositor."""
+
+    def test_vertical_item_advertises_hls_transcode(self, client, monkeypatch):
+        monkeypatch.setattr("config.ENABLE_VERTICAL_MULTI", True)
+        scene = make_scene(scene_id="123", video_codec="h264", fmt="mp4")
+        encoded = encode_id("vscene", "123")  # minted by the Vertical library browse
+        with patch("core.stash_client.get_scene", new=AsyncMock(return_value=scene)), \
+             patch.object(_vertical_manager, "ensure", new=AsyncMock(return_value=True)), \
+             patch.object(_vertical_manager, "touch", new=MagicMock()):
+            data = client.post(f"/items/{encoded}/playbackinfo").json()
+        ms = data["MediaSources"][0]
+        # Direct play disabled + HLS transcode advertised → client uses our compositor.
+        assert ms["SupportsDirectPlay"] is False
+        assert ms["TranscodingSubProtocol"] == "hls"
+        assert ms["TranscodingUrl"].startswith("/vertical/")
+        assert ms["TranscodingUrl"].endswith("/master.m3u8")
+        assert data["PlaySessionId"].startswith("123-")  # {scene_id}-{nonce}
+
+    def test_vertical_falls_back_to_single_video_when_compositor_unavailable(self, client, monkeypatch):
+        # Cap hit or no side clips → ensure() returns False → normal single-video source.
+        monkeypatch.setattr("config.ENABLE_VERTICAL_MULTI", True)
+        scene = make_scene(scene_id="123", video_codec="h264", fmt="mp4")
+        encoded = encode_id("vscene", "123")
+        with patch("core.stash_client.get_scene", new=AsyncMock(return_value=scene)), \
+             patch.object(_vertical_manager, "ensure", new=AsyncMock(return_value=False)):
+            data = client.post(f"/items/{encoded}/playbackinfo").json()
+        ms = data["MediaSources"][0]
+        assert ms["SupportsDirectPlay"] is True  # single-video direct play
+        assert "/vertical/" not in ms.get("TranscodingUrl", "")
+
+    def test_vertical_disabled_flag_plays_normally(self, client, monkeypatch):
+        # Feature off → a stray vscene- id decodes to scene- and plays as normal video.
+        monkeypatch.setattr("config.ENABLE_VERTICAL_MULTI", False)
+        scene = make_scene(scene_id="123", video_codec="h264", fmt="mp4")
+        encoded = encode_id("vscene", "123")
+        with patch("core.stash_client.get_scene", new=AsyncMock(return_value=scene)):
+            data = client.post(f"/items/{encoded}/playbackinfo").json()
+        ms = data["MediaSources"][0]
+        assert ms["SupportsDirectPlay"] is True
+
+
+class TestVerticalStreamGuard:
+    """A /videos/{vscene-id}/stream built straight from the id redirects to a session."""
+
+    def test_vertical_stream_redirects_to_composite(self, client, monkeypatch):
+        monkeypatch.setattr("config.ENABLE_VERTICAL_MULTI", True)
+        scene = make_scene(scene_id="123", video_codec="h264", fmt="mp4")
+        encoded = encode_id("vscene", "123")
+        with patch("core.stash_client.get_scene", new=AsyncMock(return_value=scene)), \
+             patch.object(_vertical_manager, "ensure", new=AsyncMock(return_value=True)):
+            r = client.get(f"/videos/{encoded}/stream", follow_redirects=False)
+        assert r.status_code == 302
+        loc = r.headers.get("location", "")
+        assert loc.startswith("/vertical/") and loc.endswith("/master.m3u8")
 
 
 # ── GET /videos/{id}/stream ───────────────────────────────────────────────────

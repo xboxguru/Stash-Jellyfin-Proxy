@@ -95,6 +95,10 @@ VERTICAL_WEIGHT_STUDIO = 15       # weight: side is from the same studio as the 
 VERTICAL_WEIGHT_DATE = 10         # weight: side is close in date to the center clip
 VERTICAL_TAG_WINDOW = 30          # keep top-N tag-pool candidates ranked by shared-tag count
 VERTICAL_DATE_WINDOW_DAYS = 30    # date-proximity pool: +/- this many days of the center's date
+# Compositor (Phase 1b) — VOD triptych playout
+VERTICAL_IDLE_TIMEOUT = 60        # seconds of no manifest/segment requests before tearing a session down
+VERTICAL_MAX_SESSIONS = 2         # concurrent composite sessions; over cap -> single-video fallback + warn
+VERTICAL_HWACCEL = "auto"         # encoder select: none|nvenc|qsv|vaapi|auto (CPU-only until Phase 1.5)
 
 config_defined_keys = set()
 env_overrides = []
@@ -136,6 +140,7 @@ def save_config():
         "ENABLE_VERTICAL_MULTI", "VERTICAL_ASPECT_MIN",
         "VERTICAL_WEIGHT_PERFORMER", "VERTICAL_WEIGHT_TAGS", "VERTICAL_WEIGHT_STUDIO", "VERTICAL_WEIGHT_DATE",
         "VERTICAL_TAG_WINDOW", "VERTICAL_DATE_WINDOW_DAYS",
+        "VERTICAL_IDLE_TIMEOUT", "VERTICAL_MAX_SESSIONS", "VERTICAL_HWACCEL",
     ]
 
     try:
@@ -166,7 +171,8 @@ def _coerce_config_value(key, val):
                 "LIVE_TV_HLS_LIST_SIZE", "LIVE_TV_SEG_RETENTION",
                 "HANDY_HSP_BUFFER_MIN_S", "HANDY_HSP_BUFFER_MAX_S", "HANDY_HSP_POLL_INTERVAL_S",
                 "VERTICAL_WEIGHT_PERFORMER", "VERTICAL_WEIGHT_TAGS", "VERTICAL_WEIGHT_STUDIO", "VERTICAL_WEIGHT_DATE",
-                "VERTICAL_TAG_WINDOW", "VERTICAL_DATE_WINDOW_DAYS"]:
+                "VERTICAL_TAG_WINDOW", "VERTICAL_DATE_WINDOW_DAYS",
+                "VERTICAL_IDLE_TIMEOUT", "VERTICAL_MAX_SESSIONS"]:
         try: return int(val)
         except ValueError: return None
     elif key in ["VERTICAL_ASPECT_MIN"]:
@@ -186,6 +192,9 @@ def _coerce_config_value(key, val):
     elif key == "HANDY_SYNC_MODE":
         v = str(val).strip().lower()
         return v if v in ("auto", "hosted", "local") else "auto"
+    elif key == "VERTICAL_HWACCEL":
+        v = str(val).strip().lower()
+        return v if v in ("none", "nvenc", "qsv", "vaapi", "auto") else "auto"
     return val
 
 # --- 3. ROBUST LOAD FUNCTION ---
@@ -236,6 +245,7 @@ _supported_keys = [
     "ENABLE_VERTICAL_MULTI", "VERTICAL_ASPECT_MIN",
     "VERTICAL_WEIGHT_PERFORMER", "VERTICAL_WEIGHT_TAGS", "VERTICAL_WEIGHT_STUDIO", "VERTICAL_WEIGHT_DATE",
     "VERTICAL_TAG_WINDOW", "VERTICAL_DATE_WINDOW_DAYS",
+    "VERTICAL_IDLE_TIMEOUT", "VERTICAL_MAX_SESSIONS", "VERTICAL_HWACCEL",
 ]
 
 for k in _supported_keys:

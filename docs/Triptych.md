@@ -11,7 +11,7 @@ single 16:9 HLS stream, with audio from the center clip only. The full feature p
 |---|---|---|
 | **Phase 0** | Library + filtering: vertical predicate, config toggle, settings UI, home-screen tile, browse (scenes play normally) | ✅ Done |
 | **Phase 1a** | Side-clip selection algorithm (pure logic, no FFmpeg) | ✅ Done |
-| Phase 1b | VOD compositor (CPU): `vertical_engine` (Shape A), PlaybackInfo transcode wiring, center seek, idle teardown | — |
+| **Phase 1b** | VOD compositor (CPU): `vertical_engine` (Shape A), PlaybackInfo transcode wiring, center seek, idle teardown | ✅ Done |
 | Phase 1.5 | Hardware encoders (NVENC/QSV/VAAPI), jellyfin-ffmpeg base image, GPU decode/scale | — |
 | Phase 2 | "Vertical TV" continuous Live TV channel reusing the compositor | — |
 
@@ -175,3 +175,159 @@ ranking, window truncation, boundary days); `_pick_side`'s category re-normaliza
 `select_side_clips` end-to-end for the 2-distinct-sides case, the tiny-library repeat,
 the single-video empty-list case, and that non-vertical candidates returned by a raw
 `fetch_scenes` result get filtered out before picking.
+
+## How it works (Phase 1b) — Compositor
+
+The VOD compositor turns a chosen center clip + its two selected sides into one
+16:9 HLS stream. It lives in `api/vertical_engine.py` (`_VerticalSessionManager`)
+and `api/vertical_routes.py` (the HTTP surface), and deliberately **reuses the Live
+TV playout spine** rather than reinventing it.
+
+### Triggering: the `vscene-` id namespace
+
+Jellyfin playback is context-free — `PlaybackInfo`/`stream` receive only an item id,
+and the *same* scene has the same id in every library. To honor "multi-view fires
+**only** from the Vertical library" (decision 9) without a parallel id scheme rippling
+through images/metadata/userdata/streams, Vertical-library items are minted with a
+**`vscene-`** prefix instead of `scene-` (`format_jellyfin_item(scene, vertical=True)`):
+
+- `jellyfin_mapper.decode_id()` transparently strips the leading `v` → `scene-11`, so
+  **every existing consumer** (images, metadata, userdata, resume, subtitles, raw
+  stream) works unchanged.
+- `jellyfin_mapper.is_vertical_id()` is the one predicate that inspects the id *before*
+  normalization; only the compositor-wiring spots call it (PlaybackInfo, `endpoint_stream`
+  guard, item-details, MediaSources). The same clip browsed from a normal library keeps
+  its `scene-` id and plays as a plain single video.
+
+`_build_media_sources(..., vertical=True)` disables direct play and advertises an HLS
+`TranscodingUrl`; `endpoint_item_details` re-derives the flag from the requested id so
+the detail view keeps the compositor source.
+
+### Playback wiring (mirrors Live TV)
+
+1. `endpoint_playback_info` sees a `vscene-` id → `vertical_routes.vertical_playback_info`.
+   It mints a **play-session id** `{scene_id}-{nonce}`, pre-warms the FFmpeg session
+   (so segments exist by the client's first manifest fetch), and advertises a
+   session-scoped `TranscodingUrl=/vertical/{session}/master.m3u8` (`SubProtocol=hls`,
+   direct play off), `PlaySessionId={session}`. The source is a **finite** VOD
+   (`RunTimeTicks` = center length, `IsLive=false`) so the client shows a scrub bar.
+2. `endpoint_stream` has a guard mirroring the Live TV one: a `vscene-` id built straight
+   into `/Videos/{id}/stream` (client bypassing PlaybackInfo) 302-redirects to a fresh
+   composite session.
+3. `/vertical/{session}/master.m3u8` and `/vertical/{session}/seg/{name}` serve the
+   composite manifest (segment lines rewritten to absolute proxy URLs) and segments;
+   `/seek` and `/stop` give explicit session control. The nonce is stable for a play, so
+   every manifest/segment request within it hits the same session; a fresh play re-rolls
+   the nonce (and therefore the sides).
+
+### Pipe topology and the video/audio split
+
+```
+composite sub (3 HTTP inputs, hstack) ── v pipe ─▶┐
+                                                  ├─▶ master FFmpeg ─▶ HLS ladder
+center-audio sub (center clip only)  ── a pipe ─▶┘
+```
+
+The master is byte-for-byte the Live TV master: two raw pipes (rawvideo 1920×1080
+yuv420p 30 fps + s16le 48 kHz stereo) fed over the shared pipe backend
+(`_FifoPipeBackend` on Linux, `_TcpRelayPipeBackend` on Windows), encoded once to
+H.264/AAC. `-probesize 32 / -analyzeduration 0` on both inputs suppresses avformat's
+stream probe — mandatory for the two-pipe design (probing input #0 reads only the video
+socket while a single interleaving sub would block on audio → deadlock).
+
+**Why two sub-processes, not one with two outputs:** raw 1080p30 video (~746 Mbps) and
+raw PCM (~1.5 Mbps) have a ~500× bandwidth gap. In a single sub, the instant the master's
+video buffer fills, that one process blocks on the video write and can no longer emit the
+next audio packet either, starving the master's AAC encoder into a permanent deadlock
+(documented and verified in `live_tv_engine._feed_one_scene`). Splitting video and audio
+into separate processes gives each an independent backpressure path. The compositor keeps
+this split exactly.
+
+On the TCP (Windows) backend the attach ordering is preserved: master claims the video
+endpoint first, the composite sub connects second (producer), then the master attaches to
+the audio endpoint (only possible after `find_stream_info()` on the video input completes,
+which needs the composite sub already writing), then the audio sub connects.
+
+### Filtergraph geometry (Shape A, §1.5)
+
+```
+-re -stream_loop -1 -i <left>        # side, loops forever
+-re [-ss S]         -i <center>      # the clock; -ss applies here only
+-re -stream_loop -1 -i <right>       # side, loops forever
+-filter_complex
+  [0:v]scale=-2:1080,crop=608:1080,setsar=1[l];
+  [1:v]scale=-2:1080,crop=608:1080,setsar=1[c];
+  [2:v]scale=-2:1080,crop=608:1080,setsar=1[r];
+  [l][c][r]hstack=inputs=3,pad=1920:1080:(ow-iw)/2:0:black,fps=30,format=yuv420p[v]
+-map "[v]" -shortest -f rawvideo <v pipe>
+```
+
+Each 1080-tall lane is cropped to **608×1080**; `hstack` → 1824×1080; `pad` centers to
+exactly 1920×1080. Sides loop infinitely; `-shortest` ends the composite when the finite
+center stream ends. Audio is the center clip only, normalized with the same
+`aresample/aformat` chain as Live TV (`-map 0:a:0?` so a silent center doesn't fail).
+Inputs are read with `-re` so the client can never outrun the encoder.
+
+### Center seek = full session relaunch
+
+A center seek (client re-requesting the manifest with a different `StartTimeTicks`, or an
+explicit `POST /vertical/{session}/seek`) is a **full session relaunch** with the new
+`-ss` on the center input only — the sides just keep looping from their own start. The
+manager reuses the session's cached sides on relaunch, so scrubbing never re-rolls them.
+This is Phase 1's deliberately simple approach (§1.5); re-pointing only the center feeder
+is a later optimization if scrubbing feels heavy. Backward seeks within the
+already-encoded range work natively because the master uses `hls_playlist_type=event`
+(the full segment list is retained and `EXT-X-ENDLIST` is written when the center ends),
+so a relaunch is only needed to jump ahead of the live encode edge.
+
+### Encoders, concurrency, idle teardown
+
+- **Encoder:** Phase 1b is **CPU-only** (`libx264`). `VERTICAL_HWACCEL`
+  (`none|nvenc|qsv|vaapi|auto`) is surfaced now but every value resolves to libx264 and is
+  logged as such; the NVENC/QSV/VAAPI paths + jellyfin-ffmpeg base image land in Phase 1.5.
+- **Concurrency:** `VERTICAL_MAX_SESSIONS` (default 2). A launch that would exceed the cap
+  is refused (logged), and the caller falls back to single-video playback. 3 decodes + 1
+  encode is heavy — the cap is a safety rail (Stash is single-user).
+- **Idle teardown:** `VERTICAL_IDLE_TIMEOUT` (default 60 s) — a 20 s watchdog reaps any
+  session with no manifest/segment requests past the timeout, killing the subs + master,
+  closing the pipe backend, and deleting the session temp dir.
+
+### Config (all four places + GUI)
+
+| Key | Default | Type | Meaning |
+|---|---|---|---|
+| `VERTICAL_IDLE_TIMEOUT` | `60` | int | Seconds of no requests before a session is torn down |
+| `VERTICAL_MAX_SESSIONS` | `2` | int | Concurrent composites; over cap → single-video fallback |
+| `VERTICAL_HWACCEL` | `auto` | enum | `none/nvenc/qsv/vaapi/auto` — CPU-only until Phase 1.5 |
+
+Surfaced in the settings GUI under the "Vertical Multi-View" card → **Compositor**
+(`tab_settings.html`); the three keys are in `DEFAULTS` (`scripts.html`) so the generic
+save flow types them correctly.
+
+### Logging (§1.8)
+
+Per-session FFmpeg logs rotate at `{LOG_DIR}/vertical_ffmpeg/{session}.log` (same 10 MB
+rotation as Live TV). The engine logs session lifecycle (center + sides + encoder +
+backend + seek; teardown reason), full master/composite/audio commands at DEBUG, the
+readiness gate, seek relaunches (old→new position), concurrency refusals, and the
+single-video fallback with its reason.
+
+### Tests
+
+- `tests/test_stream_routes.py` — PlaybackInfo advertises the HLS compositor transcode
+  (direct play off, `/vertical/…/master.m3u8`, `{scene}-{nonce}` PlaySessionId) for a
+  `vscene-` item; single-video fallback when the compositor is unavailable; a disabled
+  feature flag plays normally; and the `endpoint_stream` guard 302-redirects a
+  `vscene-` stream URL to a composite session. (The FFmpeg manager is mocked — no real
+  sub-processes in tests.)
+- `tests/test_config.py` — int coercion for the two numeric keys, enum coercion +
+  invalid→`auto` for `VERTICAL_HWACCEL`, and a `save_config()`→`load_config_file()`
+  round-trip preserving values and types.
+
+### Watch-items
+
+- Client seek behavior through a custom HLS transcode is client-dependent; the
+  `StartTimeTicks`-triggered relaunch + `event` playlist is the mechanism, but real
+  scrubbing/resume should be verified against Wholphin/ExoPlayer on a device.
+- Full relaunch on every scrub may feel heavy — optimize to re-point only the center
+  feeder later if needed.

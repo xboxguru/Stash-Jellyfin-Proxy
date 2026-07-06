@@ -19,6 +19,7 @@ from api import (
     stream_routes,
     ui_routes,
     userdata_routes,
+    vertical_routes,
 )
 
 logger = logging.getLogger(__name__)
@@ -245,6 +246,12 @@ routes = [
     Route("/livetv/channels/{channel_id}/tunarr-relay.m3u8", live_tv_routes.endpoint_tunarr_relay_stream, methods=["GET"]),
     Route("/livetv/channels/{channel_id}/stream.m3u8", live_tv_routes.endpoint_channel_m3u8, methods=["GET"]),
     Route("/livetv/channels/{channel_id}/stream", live_tv_routes.endpoint_channel_stream, methods=["GET"]),
+
+    # Vertical Multi-View ("Triptych") compositor — session-scoped HLS
+    Route("/vertical/{session_id}/master.m3u8", vertical_routes.endpoint_vertical_manifest, methods=["GET", "HEAD"]),
+    Route("/vertical/{session_id}/seg/{seg_name}", vertical_routes.endpoint_vertical_segment, methods=["GET"]),
+    Route("/vertical/{session_id}/seek", vertical_routes.endpoint_vertical_seek, methods=["GET", "POST"]),
+    Route("/vertical/{session_id}/stop", vertical_routes.endpoint_vertical_stop, methods=["POST"]),
 
     Route("/livestreams/open", live_tv_routes.endpoint_live_streams_open, methods=["POST"]),
     Route("/livestreams/close", live_tv_routes.endpoint_live_streams_close, methods=["POST"]),

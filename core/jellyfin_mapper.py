@@ -55,12 +55,40 @@ def encode_id(prefix: str, raw_id: str) -> str:
 def decode_id(encoded_id: str) -> str:
     clean_id = encoded_id.replace("-", "")
     if clean_id.startswith("scene") or clean_id.startswith("person") or clean_id.startswith("studio"): return encoded_id
+    # Vertical Multi-View items are minted with a 'vscene-' prefix so is_vertical_id()
+    # can tell the compositor to trigger; normalize the leading 'v' away here so every
+    # other consumer (images, metadata, userdata, streams) sees the plain 'scene-' id
+    # and needs no changes.  Handle both the already-decoded and hex-encoded forms.
+    if clean_id.startswith("vscene"):
+        return "scene-" + encoded_id.split("-", 1)[1] if "-" in encoded_id else encoded_id
     try:
         decoded_str = bytes.fromhex(clean_id).decode('utf-8').replace("\x00", "").strip()
+        if decoded_str.startswith("vscene-"):
+            return decoded_str[1:]  # "vscene-11" -> "scene-11"
         if any(prefix in decoded_str for prefix in ["scene-", "person-", "studio-", "tag-", "root-", "filter-", "year-", "ch-", "channel-"]):
             return decoded_str
     except Exception: pass
     return encoded_id
+
+def is_vertical_id(encoded_id: str) -> bool:
+    """True if this encoded item id was minted for the Vertical Multi-View library.
+
+    Vertical library items carry a 'vscene-' prefix (vs. the normal 'scene-') so the
+    compositor triggers only for clips launched from the Vertical library, while
+    decode_id() transparently normalizes them back to 'scene-' for every other
+    consumer.  The same scene browsed from a normal library keeps its 'scene-' id
+    and plays normally (Feature 1 decision 9).
+    """
+    if not encoded_id:
+        return False
+    clean_id = encoded_id.replace("-", "")
+    if clean_id.startswith("vscene"):
+        return True
+    try:
+        decoded = bytes.fromhex(clean_id).decode("utf-8").replace("\x00", "").strip()
+        return decoded.startswith("vscene-")
+    except Exception:
+        return False
 
 def generate_sort_name(title: str) -> str:
     """Sanitizes titles for strict Android TV / Wholphin alphabet grouping."""
@@ -137,7 +165,7 @@ def _build_subtitle_streams(item_id: str, captions: list) -> list:
         })
     return streams
 
-def _build_media_sources(item_id: str, path: str, files: list, runtime_ticks: int, title: str, captions: list = None) -> list:
+def _build_media_sources(item_id: str, path: str, files: list, runtime_ticks: int, title: str, captions: list = None, vertical: bool = False) -> list:
     if not path or not files: return []
     file_data = files[0]
     v_codec = str(file_data.get("video_codec") or "h264").lower()
@@ -159,7 +187,14 @@ def _build_media_sources(item_id: str, path: str, files: list, runtime_ticks: in
         "IgnoreDts": False, "IgnoreIndex": False, "GenPtsInput": False, "IsInfiniteStream": False, "RequiresOpening": False, "RequiresClosing": False, "RequiresLooping": False, "HasSegments": False
     }
 
-    if needs_transcode:
+    if vertical:
+        # Vertical Multi-View: always drive the triptych compositor.  Advertise an
+        # HLS transcode and disable direct play so the client fetches our composite
+        # manifest instead of the raw file (mirrors the Live TV channel wiring).
+        # endpoint_stream detects the vscene- id and redirects to a fresh session;
+        # PlaybackInfo overrides this with a session-scoped URL when it runs first.
+        media_source.update({"SupportsDirectPlay": False, "SupportsDirectStream": False, "TranscodingUrl": f"/Videos/{item_id}/master.m3u8", "TranscodingSubProtocol": "hls", "TranscodingContainer": "ts"})
+    elif needs_transcode:
         media_source.update({"SupportsDirectPlay": False, "SupportsDirectStream": False, "TranscodingUrl": f"/Videos/{item_id}/master.m3u8", "TranscodingSubProtocol": "hls", "TranscodingContainer": "ts"})
     else:
         media_source.update({"SupportsDirectPlay": True, "SupportsDirectStream": True, "DirectStreamUrl": f"/Videos/{item_id}/stream", "TranscodingSubProtocol": "http"})
@@ -219,9 +254,11 @@ def _build_studios(studio_obj: dict, cache_version: int, fake_blurhash: str) -> 
         studio_item.update({"PrimaryImageTag": s_tag, "ImageTags": {"Primary": s_tag}, "ImageBlurHashes": {"Primary": {s_tag: fake_blurhash}}})
     return [studio_item]
 
-def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[str, Any]:
+def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None, vertical: bool = False) -> Dict[str, Any]:
     raw_id = str(scene.get("id"))
-    item_id = encode_id("scene", raw_id)
+    # Vertical-library items get a 'vscene-' id so playback triggers the compositor;
+    # decode_id() normalizes it back to 'scene-' everywhere else (see is_vertical_id).
+    item_id = encode_id("vscene" if vertical else "scene", raw_id)
     cache_version = getattr(config, "CACHE_VERSION", 0)
     fake_blurhash = "LKO2?U%2Tw=w]~RBVZRi};RPxuwH"
     files = scene.get("files") or []
@@ -253,7 +290,7 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None) -> Dict[s
         "ImageBlurHashes": {"Primary": {primary_tag: fake_blurhash}, "Thumb": {primary_tag: fake_blurhash}, "Backdrop": {backdrop_tag: fake_blurhash}},
         "RunTimeTicks": runtime_ticks, "Width": (files[0].get("width") or 0) if files else 0, "Height": (files[0].get("height") or 0) if files else 0,
         "Trickplay": _build_trickplay_dict(item_id, runtime_ticks, files),
-        "MediaSources": _build_media_sources(item_id, path, files, runtime_ticks, title, scene.get("captions")),
+        "MediaSources": _build_media_sources(item_id, path, files, runtime_ticks, title, scene.get("captions"), vertical=vertical),
         "People": _build_people(scene.get("performers") or [], cache_version, fake_blurhash),
         "Studios": _build_studios(scene.get("studio"), cache_version, fake_blurhash),
         "UserData": {

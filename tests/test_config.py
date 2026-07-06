@@ -71,6 +71,26 @@ class TestCoerceConfigValue:
     def test_vertical_aspect_min_invalid_returns_none(self):
         assert config._coerce_config_value("VERTICAL_ASPECT_MIN", "not_a_number") is None
 
+    # Compositor keys (Phase 1b)
+    @pytest.mark.parametrize("key,raw,expected", [
+        ("VERTICAL_IDLE_TIMEOUT", "60", 60),
+        ("VERTICAL_MAX_SESSIONS", "2", 2),
+    ])
+    def test_vertical_compositor_int_keys(self, key, raw, expected):
+        result = config._coerce_config_value(key, raw)
+        assert result == expected
+        assert isinstance(result, int)
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("none", "none"), ("nvenc", "nvenc"), ("qsv", "qsv"),
+        ("vaapi", "vaapi"), ("auto", "auto"), ("AUTO", "auto"),
+    ])
+    def test_vertical_hwaccel_valid_enum(self, raw, expected):
+        assert config._coerce_config_value("VERTICAL_HWACCEL", raw) == expected
+
+    def test_vertical_hwaccel_invalid_defaults_to_auto(self):
+        assert config._coerce_config_value("VERTICAL_HWACCEL", "garbage") == "auto"
+
     # List keys
     @pytest.mark.parametrize("key", [
         "TAG_GROUPS",
@@ -115,6 +135,27 @@ class TestVerticalConfigRoundTrip:
         # _supported_keys gates both env overrides and UI saves (api_post_config)
         assert "ENABLE_VERTICAL_MULTI" in config._supported_keys
         assert "VERTICAL_ASPECT_MIN" in config._supported_keys
+
+    def test_compositor_keys_are_env_overridable(self):
+        for key in ("VERTICAL_IDLE_TIMEOUT", "VERTICAL_MAX_SESSIONS", "VERTICAL_HWACCEL"):
+            assert key in config._supported_keys
+
+    def test_compositor_round_trip_preserves_values_and_types(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "CONFIG_FILE", str(tmp_path / "compositor.conf"))
+        monkeypatch.setattr(config, "VERTICAL_IDLE_TIMEOUT", 90)
+        monkeypatch.setattr(config, "VERTICAL_MAX_SESSIONS", 3)
+        monkeypatch.setattr(config, "VERTICAL_HWACCEL", "nvenc")
+        config.save_config()
+
+        config.VERTICAL_IDLE_TIMEOUT = 60
+        config.VERTICAL_MAX_SESSIONS = 2
+        config.VERTICAL_HWACCEL = "auto"
+        config.load_config_file()
+
+        assert config.VERTICAL_IDLE_TIMEOUT == 90
+        assert config.VERTICAL_MAX_SESSIONS == 3
+        assert config.VERTICAL_HWACCEL == "nvenc"
+        assert isinstance(config.VERTICAL_IDLE_TIMEOUT, int)
 
 
 class TestGetStashBase:

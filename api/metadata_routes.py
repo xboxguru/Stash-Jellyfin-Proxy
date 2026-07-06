@@ -179,7 +179,7 @@ async def _handle_performer_details(decoded_id: str, item_id: str, server_id: st
     })
 
 
-async def _handle_scene_details(decoded_id: str) -> JSONResponse:
+async def _handle_scene_details(decoded_id: str, vertical: bool = False) -> JSONResponse:
     number_match = re.search(r'\d+', decoded_id)
     if not number_match:
         logger.warning(f"Invalid ID format requested: {decoded_id}")
@@ -187,7 +187,7 @@ async def _handle_scene_details(decoded_id: str) -> JSONResponse:
 
     scene = await stash_client.get_scene(number_match.group())
     if scene:
-        return JSONResponse(jellyfin_mapper.format_jellyfin_item(scene))
+        return JSONResponse(jellyfin_mapper.format_jellyfin_item(scene, vertical=vertical))
 
     logger.debug(f"Item not found in Stash: {decoded_id}")
     return JSONResponse({"error": "Item not found"}, status_code=404)
@@ -234,7 +234,11 @@ async def endpoint_item_details(request: Request):
         logger.debug(f"Metadata Request -> Opaque ID not found anywhere, returning 404: {item_id}")
         return Response(status_code=404)
 
-    return await _handle_scene_details(decoded_id)
+    # Preserve Vertical Multi-View context: a 'vscene-' item keeps its vertical id and
+    # compositor MediaSource in the detail view, so clicking play still triptychs
+    # rather than reverting to the plain 'scene-' id.
+    vertical = jellyfin_mapper.is_vertical_id(item_id) and getattr(config, "ENABLE_VERTICAL_MULTI", False)
+    return await _handle_scene_details(decoded_id, vertical=vertical)
 
 
 async def endpoint_tags(request: Request):

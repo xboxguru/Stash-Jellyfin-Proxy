@@ -5,7 +5,7 @@ from starlette.requests import Request
 from starlette.background import BackgroundTask
 import config
 from core import stash_client, jellyfin_mapper
-from core.jellyfin_mapper import decode_id
+from core.jellyfin_mapper import decode_id, is_vertical_id
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,14 @@ async def endpoint_playback_info(request: Request):
 
     if not scene:
         return JSONResponse({"error": "Item not found"}, status_code=404)
+
+    # Feature 1 — a vertical-context item (played from the Vertical Multi-View library,
+    # carrying a 'vscene-' id) drives the triptych compositor: select side clips,
+    # advertise a session-scoped HLS transcode with direct play disabled.  A normal
+    # library keeps the plain 'scene-' id and never reaches this branch.
+    if is_vertical_id(raw_item_id) and getattr(config, "ENABLE_VERTICAL_MULTI", False):
+        from api import vertical_routes
+        return await vertical_routes.vertical_playback_info(scene, raw_id, request)
 
     # Feature 3 — pre-upload the funscript now (best-effort) so Handy activation on the first
     # /sessions/playing event reuses the cached URL instead of preparing it inline.
@@ -178,6 +186,13 @@ async def endpoint_stream(request: Request):
             f"req={request.url.path}?{request.url.query} → redirect {target}"
         )
         return RedirectResponse(url=target, status_code=302)
+
+    # Feature 1 — a vertical-context id built straight into a /Videos/{id}/stream or
+    # master.m3u8 URL (client bypassing PlaybackInfo) is redirected to a fresh
+    # composite session, mirroring the Live TV guard above.
+    if is_vertical_id(raw_item_id) and getattr(config, "ENABLE_VERTICAL_MULTI", False):
+        from api import vertical_routes
+        return await vertical_routes.redirect_to_composite(raw_item_id, request)
 
     item_id = decode_id(raw_item_id)
     raw_id = item_id.replace("scene-", "")

@@ -421,14 +421,14 @@ async def _handle_library_browse(request: Request, query: JellyfinItemQuery):
         for scene in filtered_scenes:
             if "IsResumable" in filter_list and (not scene.get("resume_time") or scene.get("resume_time") <= 0): continue
             try:
-                item = jellyfin_mapper.format_jellyfin_item(scene, parent_id=query.parent_id or safe_root)
+                item = jellyfin_mapper.format_jellyfin_item(scene, parent_id=query.parent_id or safe_root, vertical=is_vertical_browse)
                 if serve_as_episodes:
                     item["Type"] = "Episode"
                     item["SeriesId"] = query.parent_id
                     item["SeasonId"] = query.parent_id
                 jellyfin_items.append(item)
             except Exception: pass
-            
+
         return JSONResponse({"Items": jellyfin_items, "TotalRecordCount": total_count, "StartIndex": query.start_index})
 
     if query.original_limit == 0 and not query.search_term and "IsResumable" not in filter_list:
@@ -485,7 +485,7 @@ async def _handle_library_browse(request: Request, query: JellyfinItemQuery):
         if "IsResumable" in filter_list and (not scene.get("resume_time") or scene.get("resume_time") <= 0):
             continue
         try:
-            item = jellyfin_mapper.format_jellyfin_item(scene, parent_id=query.parent_id or safe_root)
+            item = jellyfin_mapper.format_jellyfin_item(scene, parent_id=query.parent_id or safe_root, vertical=is_vertical_browse)
             if serve_as_episodes:
                 item["Type"] = "Episode"
                 item["SeriesId"] = query.parent_id

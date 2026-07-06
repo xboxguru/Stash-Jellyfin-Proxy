@@ -225,6 +225,31 @@
                         <div class="form-hint">± days around the center clip's date.</div>
                     </div>
                 </div>
+
+                <h4 style="margin: 20px 0 10px;">Compositor</h4>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Encoder</label>
+                        <select class="form-input" name="VERTICAL_HWACCEL">
+                            <option value="auto">Auto</option>
+                            <option value="none">CPU (libx264)</option>
+                            <option value="nvenc">NVENC</option>
+                            <option value="qsv">Intel QSV</option>
+                            <option value="vaapi">VAAPI</option>
+                        </select>
+                        <div class="form-hint">Hardware encoders land in Phase 1.5 — every option runs on CPU (libx264) for now.</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Max Concurrent Sessions</label>
+                        <input type="number" min="1" class="form-input" name="VERTICAL_MAX_SESSIONS" placeholder="2">
+                        <div class="form-hint">Over this many live composites, extra plays fall back to single video.</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Idle Timeout (seconds)</label>
+                        <input type="number" min="10" class="form-input" name="VERTICAL_IDLE_TIMEOUT" placeholder="60">
+                        <div class="form-hint">Tear a session down after this long with no playback requests.</div>
+                    </div>
+                </div>
             </div>
 
             <div class="card">
