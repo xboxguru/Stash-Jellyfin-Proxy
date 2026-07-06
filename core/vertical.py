@@ -5,8 +5,28 @@ Phase 0 ships the orientation predicate that decides which scenes belong in the
 of the predicate server-side (orientation: PORTRAIT == height > width), but has no
 aspect-ratio criterion, so the "tall enough" half (height/width >= VERTICAL_ASPECT_MIN)
 is applied here, client-side, on the scenes Stash returns.
+
+Also home to `vdebug()`, the feature's verbose-diagnostics logger used by the
+selection algorithm, the VOD compositor, and the Vertical TV channel feeder.
 """
+import logging
+
 import config
+
+
+def vdebug(logger: logging.Logger, msg: str) -> None:
+    """Log a Vertical Multi-View diagnostic line, gated by ``VERTICAL_DEBUG``.
+
+    With the flag on, the line is emitted at INFO so it shows up under the
+    default ``LOG_LEVEL=INFO``; with it off, at DEBUG (visible only under a
+    global ``LOG_LEVEL=DEBUG``).  Choosing the level per call is deliberate:
+    hypercorn's serve() runs logging.config.dictConfig() at startup, which
+    resets any per-logger setLevel() — so a "vertical loggers at DEBUG"
+    approach would silently stop working (see main.py
+    _SuppressLibraryDebugFilter for the same constraint).
+    """
+    level = logging.INFO if getattr(config, "VERTICAL_DEBUG", False) else logging.DEBUG
+    logger.log(level, msg)
 
 
 def _primary_dimensions(scene: dict) -> tuple[int, int]:

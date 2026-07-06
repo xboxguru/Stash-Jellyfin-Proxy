@@ -101,6 +101,7 @@ VERTICAL_DATE_WINDOW_DAYS = 30    # date-proximity pool: +/- this many days of t
 VERTICAL_IDLE_TIMEOUT = 60        # seconds of no manifest/segment requests before tearing a session down
 VERTICAL_MAX_SESSIONS = 2         # concurrent composite sessions; over cap -> single-video fallback + warn
 VERTICAL_HWACCEL = "auto"         # encoder select: none|nvenc|qsv|vaapi|auto (CPU-only until Phase 1.5)
+VERTICAL_DEBUG = False            # verbose vertical diagnostics at INFO (selection pools, FFmpeg cmds, session lifecycle)
 
 config_defined_keys = set()
 env_overrides = []
@@ -143,7 +144,7 @@ def save_config():
         "ENABLE_VERTICAL_MULTI", "VERTICAL_ASPECT_MIN",
         "VERTICAL_WEIGHT_PERFORMER", "VERTICAL_WEIGHT_TAGS", "VERTICAL_WEIGHT_STUDIO", "VERTICAL_WEIGHT_DATE",
         "VERTICAL_TAG_WINDOW", "VERTICAL_DATE_WINDOW_DAYS",
-        "VERTICAL_IDLE_TIMEOUT", "VERTICAL_MAX_SESSIONS", "VERTICAL_HWACCEL",
+        "VERTICAL_IDLE_TIMEOUT", "VERTICAL_MAX_SESSIONS", "VERTICAL_HWACCEL", "VERTICAL_DEBUG",
     ]
 
     try:
@@ -186,7 +187,7 @@ def _coerce_config_value(key, val):
                  "STASH_VERIFY_TLS", "TRUST_PROXY_HEADERS", "UI_PUBLIC_STATUS_ENDPOINT",
                  "UI_CSRF_PROTECTION", "ENABLE_LIVE_TV", "ENABLE_TUNARR", "ENABLE_STASH_CHANNELS",
                  "ENABLE_SHORTS_CHANNEL", "ENABLE_VERTICAL_TV_CHANNEL",
-                 "ENABLE_HANDY_SYNC", "ENABLE_VERTICAL_MULTI"]:
+                 "ENABLE_HANDY_SYNC", "ENABLE_VERTICAL_MULTI", "VERTICAL_DEBUG"]:
         return str(val).lower() in ['true', '1', 'yes', 'on']
     elif key in ["TAG_GROUPS", "LATEST_GROUPS", "TRUSTED_PROXY_IPS", "CORS_ALLOWED_ORIGINS", "UI_ALLOWED_IPS"]:
         return [x.strip() for x in str(val).split(",") if x.strip()]
@@ -251,7 +252,7 @@ _supported_keys = [
     "ENABLE_VERTICAL_MULTI", "VERTICAL_ASPECT_MIN",
     "VERTICAL_WEIGHT_PERFORMER", "VERTICAL_WEIGHT_TAGS", "VERTICAL_WEIGHT_STUDIO", "VERTICAL_WEIGHT_DATE",
     "VERTICAL_TAG_WINDOW", "VERTICAL_DATE_WINDOW_DAYS",
-    "VERTICAL_IDLE_TIMEOUT", "VERTICAL_MAX_SESSIONS", "VERTICAL_HWACCEL",
+    "VERTICAL_IDLE_TIMEOUT", "VERTICAL_MAX_SESSIONS", "VERTICAL_HWACCEL", "VERTICAL_DEBUG",
 ]
 
 for k in _supported_keys:

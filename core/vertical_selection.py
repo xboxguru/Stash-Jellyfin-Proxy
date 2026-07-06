@@ -14,7 +14,7 @@ import random
 import datetime
 import config
 from core import stash_client
-from core.vertical import filter_vertical_scenes
+from core.vertical import filter_vertical_scenes, vdebug
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +132,11 @@ def _pick_side(center: dict, candidates: list, excluded_ids: set) -> tuple:
         for name in pools
     ]
     weighted_categories = [(name, w) for name, w in weighted_categories if w > 0]
+    vdebug(logger, (
+        f"Vertical selection: center {center.get('id')} — eligible={len(eligible)}, "
+        f"pools={{{', '.join(f'{n}: {len(p)}' for n, p in pools.items()) or 'none'}}}, "
+        f"category weights in play={weighted_categories or 'none'}"
+    ))
 
     if not weighted_categories:
         chosen = _weighted_choice([(s, 1.0) for s in eligible])
@@ -160,6 +165,7 @@ async def select_side_clips(center_scene: dict) -> list:
     """
     center_id = str(center_scene.get("id"))
     candidates = await _fetch_vertical_candidates()
+    vdebug(logger, f"Vertical selection: center {center_id} — {len(candidates)} vertical candidate(s) fetched")
     excluded_ids = {center_id}
     sides = []
 
@@ -202,7 +208,15 @@ async def pick_center_and_sides(exclude_ids: set | None = None) -> tuple:
     candidates = await _fetch_vertical_candidates()
     if not candidates:
         return None
-    pool = [s for s in candidates if str(s.get("id")) not in (exclude_ids or set())] or candidates
+    pool = [s for s in candidates if str(s.get("id")) not in (exclude_ids or set())]
+    exclusion_dropped = not pool
+    if exclusion_dropped:
+        pool = candidates
+    vdebug(logger, (
+        f"Vertical selection: picking center from {len(pool)} candidate(s) "
+        f"({len(candidates)} total, {len(exclude_ids or ())} excluded"
+        f"{'; exclusion dropped — it would leave no candidates' if exclusion_dropped else ''})"
+    ))
     center = random.choice(pool)
     sides = await select_side_clips(center)
     if not sides:

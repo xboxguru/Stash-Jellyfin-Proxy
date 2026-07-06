@@ -244,6 +244,10 @@ A center seek (client re-requesting the manifest with a different `StartTimeTick
 explicit `POST /vertical/{session}/seek`) is a **full session relaunch** with the new
 `-ss` on the center input only — the sides just keep looping from their own start. The
 manager reuses the session's cached sides on relaunch, so scrubbing never re-rolls them.
+A request that carries **no** position at all is steady-state: it never relaunches, so a
+client polling the manifest without query params can't accidentally reset a sought
+session back to 0 — "no position given" and "seek to 0" are distinct (`None` vs `0.0`
+through `_seek_seconds` → `ensure`).
 This is the deliberately simple approach; re-pointing only the center feeder is a later
 optimization if scrubbing feels heavy. Backward seeks within the already-encoded range
 work natively because the master uses `hls_playlist_type=event` (the full segment list is
@@ -265,10 +269,26 @@ to jump ahead of the live encode edge.
 ### Logging
 
 Per-session FFmpeg logs rotate at `{LOG_DIR}/vertical_ffmpeg/{session}.log` (same 10 MB
-rotation as Live TV). The engine logs session lifecycle (center + sides + encoder +
-backend + seek; teardown reason), full master/composite/audio commands at DEBUG, the
-readiness gate, seek relaunches (old→new position), concurrency refusals, and the
-single-video fallback with its reason.
+rotation as Live TV); each session log starts with the full master/composite/audio
+commands, then carries all three processes' stderr (`[composite]` / `[audio]` prefixes).
+The engine logs session lifecycle at INFO (center + sides + encoder + backend + seek;
+teardown **with reason** on every path — idle, explicit stop, seek relaunch, launch
+failure, shutdown), the readiness gate, seek relaunches (old→new position), concurrency
+refusals (with the ids of the sessions holding the slots), and the single-video fallback
+with its reason. A session that fails the readiness gate is torn down immediately rather
+than left encoding orphaned.
+
+Stderr draining splits on `\r` as well as `\n`: FFmpeg's periodic progress line is
+`\r`-terminated on a pipe, and newline-only reading would grow one "line" until the
+StreamReader limit killed the drain task — after which the OS stderr pipe fills and
+FFmpeg itself blocks (see `_iter_stderr_lines` in `api/live_tv_engine.py`, shared with
+Live TV).
+
+Diagnostics beyond the lifecycle INFO lines (selection pool sizes and weights, full
+FFmpeg commands, pipe-backend attach steps, per-request session decisions) go through
+`core.vertical.vdebug()`: DEBUG normally, **promoted to INFO when `VERTICAL_DEBUG` is
+on** — see § Debugging / logs below for how to flip it and why it's a config flag
+rather than a logger level.
 
 ## Hardware encoding — `core/hw_encoder.py`
 
@@ -469,7 +489,9 @@ The FFmpeg manager is mocked — no real ffmpeg or subprocesses in tests, matchi
 compositor's own test approach. `tests/test_vertical_selection.py` covers
 `pick_center_and_sides` (empty/single-scene library, center exclusion, and the
 drop-exclusion-rather-than-fail fallback). `tests/test_config.py` covers the two new config
-keys' coercion, env-override, and save/load round-trip.
+keys' coercion, env-override, and save/load round-trip. `tests/test_vertical_engine.py`
+covers the VOD manager's seek semantics (no-position vs. new-seek vs. steady-state),
+session-id validation, and the `VERTICAL_DEBUG` level gating.
 
 ## Config reference
 
@@ -491,6 +513,7 @@ are surfaced in the settings GUI (`templates/components/tab_settings.html`, Libr
 | `VERTICAL_IDLE_TIMEOUT` | `60` | int | Seconds of no VOD manifest/segment requests before tearing a session down |
 | `VERTICAL_MAX_SESSIONS` | `2` | int | Concurrent VOD composite sessions; over cap → single-video fallback |
 | `VERTICAL_HWACCEL` | `"auto"` | enum | VOD master encoder: `none/nvenc/qsv/vaapi/auto` |
+| `VERTICAL_DEBUG` | `false` | bool | Verbose diagnostics at INFO (selection pools, FFmpeg cmds, session decisions) |
 | `ENABLE_VERTICAL_TV_CHANNEL` | `false` | bool | Enable the always-on Vertical TV Live TV channel |
 | `VERTICAL_TV_CHANNEL_NUMBER` | `9000` | int | Channel number for Vertical TV |
 
@@ -498,3 +521,69 @@ are surfaced in the settings GUI (`templates/components/tab_settings.html`, Libr
 added to `_coerce_config_value()`, and the settings form's numeric submit path
 (`templates/components/scripts.html`) picks `parseFloat` over `parseInt` when a key's
 `DEFAULTS` entry is non-integer (previously `parseInt("1.3")` would have silently saved `1`).
+
+## Debugging / logs
+
+### Turning on verbose diagnostics
+
+Flip **`VERTICAL_DEBUG`** any of the usual three ways:
+
+1. **Settings UI** — Library tab → "Vertical Multi-View" card → *Verbose Diagnostics*
+   toggle → Save. **Takes effect immediately** (the flag is read at log-call time; no
+   restart).
+2. **Config file** — `VERTICAL_DEBUG = true` in `stash_jellyfin_proxy.conf` (read at
+   startup).
+3. **Env var** — `VERTICAL_DEBUG=true` on the container (read at startup; wins over the
+   file).
+
+With it on, everything the feature knows is written at INFO into the normal proxy log:
+per-slot selection decisions with pool sizes and effective weights, the fallback path
+taken and final clip ids, the full master/composite/audio FFmpeg command lines, pipe
+backend choice + both master attach confirmations, seek decisions (including "no
+position given → steady state"), concurrency count vs cap at each launch, and session
+create/teardown with the reason.
+
+**Why a config flag instead of `setLevel()`:** hypercorn's `serve()` runs
+`logging.config.dictConfig()` during startup, which resets every named logger's level —
+any "set the vertical loggers to DEBUG" call made at import time is silently wiped.
+`core.vertical.vdebug()` instead chooses the record's level per call (INFO when the
+flag is on, DEBUG otherwise), which no dictConfig reset can undo. Same constraint that
+motivated the handler-filter approach in `main.py` (`_SuppressLibraryDebugFilter`).
+
+The alternative — global `LOG_LEVEL=DEBUG` — also works (vdebug lines are plain DEBUG
+records then) but requires a restart and drowns the log in unrelated debug output.
+
+### Where the logs land
+
+| What | Where |
+|---|---|
+| Proxy log (lifecycle, selection, decisions) | `{LOG_DIR}/{LOG_FILE}` (also the UI log viewer) |
+| VOD compositor FFmpeg stderr, per session | `{LOG_DIR}/vertical_ffmpeg/{session_id}.log` (+`.old` after 10 MB) |
+| Vertical TV channel FFmpeg stderr | `{LOG_DIR}/livetv_ffmpeg/{channel_id}.log` (rounds tagged `[round center=…]`, subs `[<center>/composite]` / `[<center>/audio]`) |
+| Encoder probe result | proxy log at startup (`H.264 encoder: 'auto' → …`) |
+
+Each per-session file begins with a `===== FFmpeg session start … =====` banner carrying
+center/sides/backend/encoder/seek, then the exact master/composite/audio commands, then
+interleaved stderr (`[composite]` / `[audio]` prefixes; master lines unprefixed), and ends
+with `===== FFmpeg session end (<reason>) =====`.
+
+**`LOG_DIR` must be writable by the container user** (on the Unraid deployment it's
+`/config`) — if the `vertical_ffmpeg/` dir can't be created, the engine logs one warning
+and continues without the per-session file, so a missing file is itself a signal that
+`LOG_DIR` is wrong.
+
+### Reading a failure
+
+- **Play fell back to single video** → proxy log says why: concurrency cap (with the
+  session ids holding slots), no side clips (selection warning right above it), or a
+  launch failure (paired with the session log's stderr).
+- **Session died mid-play** → the session log's last stderr lines; the proxy log has the
+  teardown reason line (`tearing down session … (reason)`).
+- **Black/frozen lanes** → composite sub stderr (`[composite]` lines) — look for HTTP
+  reconnects against Stash or filtergraph errors.
+- **No audio** → `[audio]` lines; a silent center exits the audio sub almost immediately
+  (VOD: session plays with an empty audio track; Vertical TV: a silence filler is
+  spawned and logged).
+- **Client stalls but FFmpeg is healthy** → the per-request warnings: segment requested
+  for unknown/stopped session (stale manifest), or segment not on disk (client ahead of
+  the encoder).

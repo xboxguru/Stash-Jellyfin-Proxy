@@ -140,6 +140,17 @@ class TestVerticalConfigRoundTrip:
         for key in ("VERTICAL_IDLE_TIMEOUT", "VERTICAL_MAX_SESSIONS", "VERTICAL_HWACCEL"):
             assert key in config._supported_keys
 
+    def test_vertical_debug_is_bool_and_round_trips(self, tmp_path, monkeypatch):
+        assert config._coerce_config_value("VERTICAL_DEBUG", "true") is True
+        assert config._coerce_config_value("VERTICAL_DEBUG", "false") is False
+        assert "VERTICAL_DEBUG" in config._supported_keys
+        monkeypatch.setattr(config, "CONFIG_FILE", str(tmp_path / "vdebug.conf"))
+        monkeypatch.setattr(config, "VERTICAL_DEBUG", True)
+        config.save_config()
+        config.VERTICAL_DEBUG = False
+        config.load_config_file()
+        assert config.VERTICAL_DEBUG is True
+
     def test_compositor_round_trip_preserves_values_and_types(self, tmp_path, monkeypatch):
         monkeypatch.setattr(config, "CONFIG_FILE", str(tmp_path / "compositor.conf"))
         monkeypatch.setattr(config, "VERTICAL_IDLE_TIMEOUT", 90)

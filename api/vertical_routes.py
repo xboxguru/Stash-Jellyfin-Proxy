@@ -25,6 +25,7 @@ from starlette.responses import JSONResponse, RedirectResponse, Response, Stream
 
 from core import stash_client, jellyfin_mapper
 from core.jellyfin_mapper import decode_id
+from core.vertical import vdebug
 from api.vertical_engine import _vertical_manager
 
 logger = logging.getLogger(__name__)
@@ -32,9 +33,19 @@ logger = logging.getLogger(__name__)
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
+# `{numeric scene id}-{8-hex nonce}` — everything a session endpoint accepts.
+# Session ids come straight off the URL and end up in a log-file name and a
+# temp-dir prefix, so reject anything that doesn't match what we mint.
+_SESSION_ID_RE = re.compile(r"^\d+-[0-9a-f]{8}$")
+
+
 def _new_session_id(raw_scene_id: str) -> str:
     """`{scene_id}-{nonce}` — fresh sides per play, stable across seeks within it."""
     return f"{raw_scene_id}-{secrets.token_hex(4)}"
+
+
+def _valid_session_id(session_id: str) -> bool:
+    return bool(_SESSION_ID_RE.match(session_id))
 
 
 def _scene_id_from_session(session_id: str) -> str:
@@ -42,11 +53,15 @@ def _scene_id_from_session(session_id: str) -> str:
     return session_id.split("-", 1)[0]
 
 
-def _seek_seconds(request: Request, *, default: float = 0.0) -> float:
+def _seek_seconds(request: Request, *, default: float | None = None) -> float | None:
     """Seek position (seconds) from a request's query params.
 
     Honors Jellyfin's `StartTimeTicks` (100 ns units) and the explicit-seek
-    endpoint's `ticks` / `pos` params, case-insensitively.
+    endpoint's `ticks` / `pos` params, case-insensitively.  Returns `default`
+    (None unless overridden) when the request carries no position at all —
+    callers must distinguish "no position given" from "seek to 0", otherwise a
+    steady-state manifest poll would relaunch an explicitly-sought session
+    back to 0 (see _VerticalSessionManager.ensure).
     """
     qp = request.query_params
     def _get(*names):
@@ -135,6 +150,7 @@ async def vertical_playback_info(scene: dict, raw_id: str, request: Request) -> 
     single-video playback and logs why.
     """
     session_id = _new_session_id(raw_id)
+    vdebug(logger, f"Vertical: PlaybackInfo pre-warming session {session_id!r} for scene {raw_id}")
     ok = await _vertical_manager.ensure(session_id, scene, 0.0)
     if not ok:
         logger.info(
@@ -167,7 +183,9 @@ async def redirect_to_composite(raw_item_id: str, request: Request) -> Response:
     if not scene:
         return Response(status_code=404)
     session_id = _new_session_id(raw_id)
-    ok = await _vertical_manager.ensure(session_id, scene, _seek_seconds(request))
+    seek = _seek_seconds(request)
+    vdebug(logger, f"Vertical: stream guard for scene {raw_id} — minting session {session_id!r} seek={seek}")
+    ok = await _vertical_manager.ensure(session_id, scene, seek)
     if not ok:
         # Compositor unavailable — fall through to a normal scene stream so the
         # client still plays something (single-video fallback).
@@ -176,6 +194,7 @@ async def redirect_to_composite(raw_item_id: str, request: Request) -> Response:
         url = f"{stash_base}/scene/{raw_id}/stream" + (f"?apikey={apikey}" if apikey else "")
         logger.info(f"Vertical: stream guard for scene {raw_id} — compositor unavailable, redirecting to raw stream")
         return RedirectResponse(url=url, status_code=302)
+    _vertical_manager.touch(session_id)
     target = f"/vertical/{session_id}/master.m3u8"
     logger.info(f"Vertical: stream guard scene {raw_id} → redirect {target}")
     return RedirectResponse(url=target, status_code=302)
@@ -190,25 +209,36 @@ async def endpoint_vertical_manifest(request: Request) -> Response:
     center position triggers a full relaunch with the new `-ss` (§1.5 center seek).
     """
     session_id = request.path_params.get("session_id", "")
+    if not _valid_session_id(session_id):
+        logger.warning(f"Vertical: manifest request with malformed session id {session_id!r}")
+        return Response(status_code=404)
     raw_scene_id = _scene_id_from_session(session_id)
     scene = await stash_client.get_scene(raw_scene_id)
     if not scene:
         logger.warning(f"Vertical: manifest for unknown scene in session {session_id!r}")
         return Response(status_code=404)
 
-    seek = _seek_seconds(request)
+    seek = _seek_seconds(request)  # None = no position given → never resets the session
+    was_alive = _vertical_manager.is_alive(session_id)
     ok = await _vertical_manager.ensure(session_id, scene, seek)
     if not ok:
+        logger.warning(f"Vertical: manifest for session {session_id!r} — compositor unavailable (503)")
         return Response(status_code=503, content="Vertical compositor unavailable")
+    if not was_alive:
+        # Cold (re)build from a manifest request — e.g. first fetch after the
+        # stream-guard redirect, or a client resuming after an idle teardown.
+        vdebug(logger, f"Vertical: manifest request (re)built session {session_id!r} seek={seek}")
 
     _vertical_manager.touch(session_id)
     manifest_path = _vertical_manager.manifest_path(session_id)
     if not manifest_path:
+        logger.warning(f"Vertical: session {session_id!r} alive but manifest file missing (502)")
         return Response(status_code=502)
     try:
         with open(manifest_path, "r", encoding="utf-8") as fh:
             raw = fh.read()
-    except OSError:
+    except OSError as exc:
+        logger.warning(f"Vertical: could not read manifest for session {session_id!r}: {exc} (502)")
         return Response(status_code=502)
 
     # Rewrite relative segment filenames → absolute URLs through our proxy.
@@ -221,7 +251,7 @@ async def endpoint_vertical_manifest(request: Request) -> Response:
         else:
             out_lines.append(line)
 
-    logger.trace(f"Vertical: served composite manifest for session {session_id!r} seek={seek:.1f}s")
+    logger.trace(f"Vertical: served composite manifest for session {session_id!r} seek={seek}")
     return Response(
         "\n".join(out_lines),
         media_type="application/vnd.apple.mpegurl",
@@ -238,9 +268,17 @@ async def endpoint_vertical_segment(request: Request) -> Response:
 
     seg_dir = _vertical_manager.seg_dir(session_id)
     if not seg_dir:
+        # Session already torn down (or never existed) — the client is fetching
+        # from a stale manifest.  Worth a warning: mid-play this means the idle
+        # watchdog or an explicit stop beat the client to it.
+        logger.warning(f"Vertical: segment {seg_name} requested for unknown/stopped session {session_id!r}")
         return Response(status_code=404)
     seg_path = os.path.join(seg_dir, seg_name)
     if not os.path.exists(seg_path):
+        logger.warning(
+            f"Vertical: segment {seg_name} not on disk for session {session_id!r} "
+            f"(alive={_vertical_manager.is_alive(session_id)}) — client ahead of encoder or stale manifest"
+        )
         return Response(status_code=404)
 
     _vertical_manager.touch(session_id)
@@ -259,13 +297,17 @@ async def endpoint_vertical_segment(request: Request) -> Response:
 async def endpoint_vertical_seek(request: Request) -> Response:
     """Explicit center seek — relaunch the composite at a new position (sides loop on)."""
     session_id = request.path_params.get("session_id", "")
+    if not _valid_session_id(session_id):
+        logger.warning(f"Vertical: seek request with malformed session id {session_id!r}")
+        return Response(status_code=404)
     raw_scene_id = _scene_id_from_session(session_id)
     scene = await stash_client.get_scene(raw_scene_id)
     if not scene:
         return Response(status_code=404)
-    position = _seek_seconds(request)
+    position = _seek_seconds(request, default=0.0)  # explicit endpoint: no position = restart at 0
     ok = await _vertical_manager.seek(session_id, scene, position)
     if not ok:
+        logger.warning(f"Vertical: explicit seek to {position:.1f}s failed for session {session_id!r} (503)")
         return Response(status_code=503)
     _vertical_manager.touch(session_id)
     return Response(status_code=204)

@@ -30,12 +30,14 @@ from datetime import datetime, timezone
 
 import config
 from core.hw_encoder import EncoderConfig, resolve_h264_encoder
+from core.vertical import vdebug
 from core.vertical_selection import select_side_clips
 # Reuse the Live TV pipe backends + platform probes verbatim — the byte-forwarding
-# plumbing is identical; only the FFmpeg graph feeding it differs.
+# plumbing is identical; only the FFmpeg graph feeding it differs.  The stderr
+# line iterator is shared too (it handles FFmpeg's \r-terminated progress lines).
 from api.live_tv_engine import (
     _PipeBackend, _FifoPipeBackend, _TcpRelayPipeBackend,
-    _IS_WINDOWS, _HAS_MKFIFO,
+    _IS_WINDOWS, _HAS_MKFIFO, _iter_stderr_lines,
 )
 
 logger = logging.getLogger(__name__)
@@ -192,11 +194,14 @@ class _VerticalSessionManager:
         """Number of sessions with a live master process (for the concurrency cap)."""
         return sum(1 for p in self._procs.values() if p.returncode is None)
 
-    async def ensure(self, sid: str, center_scene: dict, seek: float = 0.0) -> bool:
+    async def ensure(self, sid: str, center_scene: dict, seek: float | None = 0.0) -> bool:
         """Start (or seek-relaunch) the composite session; True once it's serving.
 
         - Not running        → launch (selecting side clips on first launch).
-        - Running, same seek  → no-op (steady-state manifest polling).
+        - Running, seek=None  → no-op: the request carried no position at all
+          (steady-state manifest polling never resets an explicitly-sought
+          session back to 0).
+        - Running, same seek  → no-op.
         - Running, new seek   → full relaunch with the new center `-ss`, keeping
           the same side clips (§1.5 center-seek rule).
 
@@ -206,6 +211,8 @@ class _VerticalSessionManager:
         """
         async with self._lock:
             if self.is_alive(sid) and self.manifest_path(sid):
+                if seek is None:
+                    return True
                 cur_seek = float(self._launch_info.get(sid, {}).get("seek", 0.0))
                 if abs(cur_seek - seek) < 0.5:
                     return True
@@ -214,22 +221,22 @@ class _VerticalSessionManager:
                     f"— relaunching composite (sides unchanged)"
                 )
                 sides = self._sides.get(sid)
-                await self._stop_locked(sid, keep_sides=True)
+                await self._stop_locked(sid, keep_sides=True, reason="center seek relaunch")
                 return await self._launch(sid, center_scene, seek, sides=sides)
-            await self._stop_locked(sid)
-            return await self._launch(sid, center_scene, seek)
+            await self._stop_locked(sid, reason="stale session state before launch")
+            return await self._launch(sid, center_scene, seek or 0.0)
 
     async def seek(self, sid: str, center_scene: dict, position: float) -> bool:
         """Explicit center seek — thin wrapper over ensure()'s relaunch path."""
         return await self.ensure(sid, center_scene, max(0.0, position))
 
-    async def stop(self, sid: str) -> None:
+    async def stop(self, sid: str, reason: str = "explicit stop") -> None:
         async with self._lock:
-            await self._stop_locked(sid)
+            await self._stop_locked(sid, reason=reason)
 
     async def cleanup_all(self) -> None:
         for sid in list(self._procs.keys()):
-            await self.stop(sid)
+            await self.stop(sid, reason="shutdown")
 
     # ── internals ──────────────────────────────────────────────────────────────
 
@@ -272,10 +279,11 @@ class _VerticalSessionManager:
         # Concurrency cap — count OTHER live sessions; over cap → single-video fallback.
         max_sessions = int(getattr(config, "VERTICAL_MAX_SESSIONS", 2))
         active_others = [s for s in self._procs if s != sid and self.is_alive(s)]
+        vdebug(logger, f"Vertical: launching {sid!r} — {len(active_others)} other live session(s), cap {max_sessions}")
         if len(active_others) >= max_sessions:
             logger.warning(
                 f"Vertical: concurrency cap {max_sessions} reached "
-                f"({len(active_others)} active) — refusing {sid!r}; client falls back to single video"
+                f"(active: {active_others}) — refusing {sid!r}; client falls back to single video"
             )
             return False
 
@@ -294,6 +302,8 @@ class _VerticalSessionManager:
                 )
                 return False
             logger.info(f"Vertical: session {sid!r} center={center_id} sides={sides}")
+        else:
+            vdebug(logger, f"Vertical: session {sid!r} reusing cached sides {sides} (seek relaunch)")
         self._sides[sid] = sides
         left_id, right_id = sides[0], sides[1]
 
@@ -312,6 +322,7 @@ class _VerticalSessionManager:
         self._backends[sid] = backend
         master_in_v, master_in_a = backend.master_inputs()
         sub_out_v, sub_out_a = backend.sub_outputs()
+        vdebug(logger, f"Vertical FFmpeg: session {sid!r} pipe backend={backend.kind} video={master_in_v} audio={master_in_a}")
 
         enc = await self._resolve_encoder()
         ffmpeg_bin = getattr(config, "FFMPEG_PATH", "ffmpeg")
@@ -351,23 +362,28 @@ class _VerticalSessionManager:
 
         logger.info(
             f"Vertical FFmpeg: launching session {sid!r} — center={center_id} "
-            f"sides={sides} backend={backend.kind} encoder={enc.codec} seek={seek:.1f}s"
+            f"sides={sides} backend={backend.kind} encoder={enc.codec} "
+            f"(mode={getattr(config, 'VERTICAL_HWACCEL', 'auto')!r}) seek={seek:.1f}s"
         )
-        logger.debug(f"Vertical FFmpeg master cmd: {' '.join(master_cmd)}")
+        vdebug(logger, f"Vertical FFmpeg master cmd: {' '.join(master_cmd)}")
 
         fh = self._open_stderr_file(sid)
         self._stderr_fh[sid] = fh
-        if fh is not None:
-            try:
-                ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                fh.write(
-                    f"\n===== FFmpeg session start {ts} | session={sid} center={center_id} "
-                    f"sides={sides} backend={backend.kind} seek={seek:.1f}s =====\n"
-                )
-                fh.write(f"master cmd: {' '.join(master_cmd)}\n")
-                fh.flush()
-            except Exception:
-                pass
+
+        def _log_to_session_file(line: str) -> None:
+            if fh is not None:
+                try:
+                    fh.write(line + "\n")
+                    fh.flush()
+                except Exception:
+                    pass
+
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _log_to_session_file(
+            f"\n===== FFmpeg session start {ts} | session={sid} center={center_id} "
+            f"sides={sides} backend={backend.kind} encoder={enc.codec} seek={seek:.1f}s ====="
+        )
+        _log_to_session_file(f"master cmd: {' '.join(master_cmd)}")
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -393,14 +409,16 @@ class _VerticalSessionManager:
         v_ready = await backend.wait_master_video_attached(timeout=10.0)
         if not v_ready:
             logger.error(f"Vertical FFmpeg: master never attached to video endpoint for {sid!r} — aborting")
-            await self._stop_locked(sid)
+            await self._stop_locked(sid, reason="master video-endpoint attach timeout")
             return False
+        vdebug(logger, f"Vertical FFmpeg: session {sid!r} master attached to video endpoint")
 
         # ── Composite (video) sub — 3 inputs, hstack, raw video out ──
         composite_cmd = self._build_composite_cmd(
             ffmpeg_bin, left_id, center_id, right_id, seek, sub_out_v
         )
-        logger.debug(f"Vertical FFmpeg composite sub cmd: {' '.join(composite_cmd)}")
+        vdebug(logger, f"Vertical FFmpeg composite sub cmd: {' '.join(composite_cmd)}")
+        _log_to_session_file(f"composite cmd: {' '.join(composite_cmd)}")
         try:
             sub_v = await asyncio.create_subprocess_exec(
                 *composite_cmd,
@@ -409,7 +427,7 @@ class _VerticalSessionManager:
             )
         except Exception as exc:
             logger.error(f"Vertical FFmpeg: composite sub spawn failed for {sid!r}: {exc}")
-            await self._stop_locked(sid)
+            await self._stop_locked(sid, reason="composite sub spawn failed")
             return False
         logger.info(f"Vertical FFmpeg: session {sid!r} composite pid={sub_v.pid}")
         asyncio.create_task(self._drain_sub_stderr(sub_v, sid, "composite"))
@@ -421,12 +439,14 @@ class _VerticalSessionManager:
             logger.error(f"Vertical FFmpeg: master never attached to audio endpoint for {sid!r} — aborting")
             try: sub_v.terminate()
             except Exception: pass
-            await self._stop_locked(sid)
+            await self._stop_locked(sid, reason="master audio-endpoint attach timeout")
             return False
+        vdebug(logger, f"Vertical FFmpeg: session {sid!r} master attached to audio endpoint")
 
         # ── Center-audio sub — center clip only, normalized PCM out ──
         audio_cmd = self._build_audio_cmd(ffmpeg_bin, center_id, seek, sub_out_a)
-        logger.debug(f"Vertical FFmpeg audio sub cmd: {' '.join(audio_cmd)}")
+        vdebug(logger, f"Vertical FFmpeg audio sub cmd: {' '.join(audio_cmd)}")
+        _log_to_session_file(f"audio cmd: {' '.join(audio_cmd)}")
         try:
             sub_a = await asyncio.create_subprocess_exec(
                 *audio_cmd,
@@ -437,7 +457,7 @@ class _VerticalSessionManager:
             logger.error(f"Vertical FFmpeg: audio sub spawn failed for {sid!r}: {exc}")
             try: sub_v.terminate()
             except Exception: pass
-            await self._stop_locked(sid)
+            await self._stop_locked(sid, reason="audio sub spawn failed")
             return False
         logger.info(f"Vertical FFmpeg: session {sid!r} audio pid={sub_a.pid}")
         asyncio.create_task(self._drain_sub_stderr(sub_a, sid, "audio"))
@@ -446,8 +466,18 @@ class _VerticalSessionManager:
         self._monitors[sid] = asyncio.create_task(self._monitor_subs(sid, sub_v, sub_a))
 
         # Readiness gate — wait for ≥3 segments before declaring the session live,
-        # so the client's first manifest fetch isn't empty.
-        return await self._await_ready(sid, proc, manifest, min_segments=3)
+        # so the client's first manifest fetch isn't empty.  A session that never
+        # becomes ready is torn down NOW: the caller falls back to single video,
+        # and without a teardown the orphaned trio would keep encoding (and it has
+        # no _last entry yet, so the idle watchdog would never reap it).
+        ready = await self._await_ready(sid, proc, manifest, min_segments=3)
+        if not ready:
+            await self._stop_locked(sid, reason="readiness gate failed (master died or segment timeout)")
+            return False
+        # Seed the idle clock so the watchdog covers this session even if the
+        # client never fetches anything (e.g. the stream-guard redirect is dropped).
+        self.touch(sid)
+        return True
 
     def _build_composite_cmd(self, ffmpeg_bin: str, left_id: str, center_id: str,
                              right_id: str, seek: float, sub_out_v: str) -> list:
@@ -502,11 +532,8 @@ class _VerticalSessionManager:
         buf = self._stderr.get(sid)
         fh = self._stderr_fh.get(sid)
         try:
-            while True:
-                line = await sub.stderr.readline()
-                if not line:
-                    break
-                text = f"[{label}] {line.decode(errors='replace').rstrip()}"
+            async for line in _iter_stderr_lines(sub.stderr):
+                text = f"[{label}] {line.rstrip()}"
                 if buf is not None:
                     buf.append(text)
                     if len(buf) > 60:
@@ -523,11 +550,8 @@ class _VerticalSessionManager:
         buf = self._stderr.setdefault(sid, [])
         fh = self._stderr_fh.get(sid)
         try:
-            while True:
-                line = await proc.stderr.readline()
-                if not line:
-                    break
-                text = line.decode(errors="replace").rstrip()
+            async for line in _iter_stderr_lines(proc.stderr):
+                text = line.rstrip()
                 buf.append(text)
                 if len(buf) > 60:
                     buf.pop(0)
@@ -552,8 +576,14 @@ class _VerticalSessionManager:
         d = self._dirs.pop(sid, None)
         if d:
             shutil.rmtree(d, ignore_errors=True)
+        for bag in (self._stderr, self._launch_info, self._sides, self._last):
+            bag.pop(sid, None)
 
-    async def _stop_locked(self, sid: str, keep_sides: bool = False) -> None:
+    async def _stop_locked(self, sid: str, keep_sides: bool = False, reason: str = "") -> None:
+        # Log teardown (with why) only when there is actually a session to tear down —
+        # ensure() also calls this defensively on ids that have no state yet.
+        if sid in self._procs or sid in self._backends or sid in self._dirs:
+            logger.info(f"Vertical FFmpeg: tearing down session {sid!r} ({reason or 'unspecified'})")
         # Cancel the sub monitor first so it doesn't race the teardown.
         monitor = self._monitors.pop(sid, None)
         if monitor and not monitor.done():
@@ -591,7 +621,7 @@ class _VerticalSessionManager:
         fh = self._stderr_fh.pop(sid, None)
         if fh is not None:
             try:
-                fh.write("===== FFmpeg session end =====\n")
+                fh.write(f"===== FFmpeg session end ({reason or 'unspecified'}) =====\n")
                 fh.close()
             except Exception:
                 pass
@@ -601,6 +631,7 @@ class _VerticalSessionManager:
             shutil.rmtree(d, ignore_errors=True)
         self._stderr.pop(sid, None)
         self._launch_info.pop(sid, None)
+        self._last.pop(sid, None)
         if not keep_sides:
             self._sides.pop(sid, None)
 
@@ -612,8 +643,7 @@ class _VerticalSessionManager:
             idle = [sid for sid, ts in list(self._last.items())
                     if sid in self._procs and now - ts > idle_secs]
             for sid in idle:
-                logger.info(f"Vertical FFmpeg: session {sid!r} idle {idle_secs:.0f}s — shutting down")
-                await self.stop(sid)
+                await self.stop(sid, reason=f"idle {idle_secs:.0f}s (no manifest/segment requests)")
                 self._last.pop(sid, None)
 
 

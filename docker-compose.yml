@@ -30,7 +30,20 @@ services:
       # - PROXY_PORT=8096
       # - AUTH_IP_TIMEOUT_MINUTES=60
       # - TOP_PLAYED_RETENTION_DAYS=0
-      
+
+    # Optional: GPU for Vertical Multi-View hardware encoding (VERTICAL_HWACCEL).
+    # Intel QSV / VAAPI — uncomment the device passthrough:
+    # devices:
+    #   - /dev/dri:/dev/dri
+    # NVIDIA NVENC — needs the NVIDIA Container Toolkit on the host, then:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8096/System/Info/Public"]
       interval: 30s

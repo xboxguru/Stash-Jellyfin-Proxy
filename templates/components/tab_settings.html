@@ -250,6 +250,16 @@
                         <div class="form-hint">Tear a session down after this long with no playback requests.</div>
                     </div>
                 </div>
+                <div class="toggle-row" style="margin-top: 16px;">
+                    <label class="toggle-switch">
+                        <input type="checkbox" name="VERTICAL_DEBUG">
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <div>
+                        <div class="toggle-label">Verbose Diagnostics</div>
+                        <div class="toggle-hint">Log selection pools, full FFmpeg commands, and session lifecycle at INFO. Per-session FFmpeg logs land in <code>&lt;log dir&gt;/vertical_ffmpeg/</code>. Turn on when troubleshooting playback.</div>
+                    </div>
+                </div>
             </div>
 
             <div class="card">

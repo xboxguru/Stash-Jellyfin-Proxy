@@ -14,11 +14,38 @@ except ImportError:
 
 import config
 from api.live_tv_data import _next_scheduled_segment_after, _upcoming_scheduled_segments
+from core.vertical import vdebug
 
 logger = logging.getLogger(__name__)
 
 _IS_WINDOWS = platform.system().lower().startswith("win")
 _HAS_MKFIFO = hasattr(os, "mkfifo")
+
+
+async def _iter_stderr_lines(stream: asyncio.StreamReader):
+    """Yield FFmpeg stderr lines, splitting on \\n OR \\r.
+
+    FFmpeg's periodic progress line (``frame=... speed=...``) is terminated
+    with a bare ``\\r`` when stderr is a pipe, so StreamReader.readline()
+    (which only splits on ``\\n``) accumulates every progress update into one
+    ever-growing "line".  After ~5–10 minutes that exceeds the reader's 64 KiB
+    limit, readline() raises, the drain task dies, and once the OS stderr pipe
+    fills FFmpeg blocks on its next stderr write — stalling the whole playout.
+    Chunk-reading and splitting on both separators avoids both failure modes.
+    """
+    pending = b""
+    while True:
+        chunk = await stream.read(4096)
+        if not chunk:
+            break
+        pending += chunk
+        lines = pending.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n")
+        pending = lines.pop()  # partial tail — completed by the next chunk
+        for raw in lines:
+            if raw:
+                yield raw.decode(errors="replace")
+    if pending:
+        yield pending.decode(errors="replace")
 class _FFmpegChannelManager:
     """One FFmpeg HLS process per active channel, started on first play request.
 
@@ -526,9 +553,21 @@ class _FFmpegChannelManager:
         ffmpeg_bin = getattr(config, "FFMPEG_PATH", "ffmpeg")
         sub_out_v, sub_out_a = backend.sub_outputs()
         left_id, right_id = sides[0], sides[1]
+        fh = self._stderr_fh.get(cid)
+
+        def _log_cmd(label: str, cmd: list) -> None:
+            # Full command goes to the app log (VERTICAL_DEBUG promotes it to INFO)
+            # and to the per-channel FFmpeg session log next to the stderr it produces.
+            vdebug(logger, f"Vertical TV: {label} cmd for {cid!r}: {' '.join(cmd)}")
+            if fh is not None:
+                try:
+                    fh.write(f"[round center={center_id}] {label} cmd: {' '.join(cmd)}\n")
+                    fh.flush()
+                except Exception:
+                    pass
 
         composite_cmd = build_composite_cmd(ffmpeg_bin, left_id, center_id, right_id, 0.0, sub_out_v)
-        logger.debug(f"Vertical TV: composite sub cmd for {cid!r}: {' '.join(composite_cmd)}")
+        _log_cmd("composite", composite_cmd)
         try:
             sub_v = await asyncio.create_subprocess_exec(
                 *composite_cmd,
@@ -554,9 +593,10 @@ class _FFmpegChannelManager:
             except Exception: pass
             await sub_v.wait()
             return False
+        vdebug(logger, f"Vertical TV: channel {cid!r} master attached to audio endpoint")
 
         audio_cmd = build_audio_cmd(ffmpeg_bin, center_id, 0.0, sub_out_a)
-        logger.debug(f"Vertical TV: audio sub cmd for {cid!r}: {' '.join(audio_cmd)}")
+        _log_cmd("audio", audio_cmd)
         try:
             sub_a = await asyncio.create_subprocess_exec(
                 *audio_cmd,
@@ -795,12 +835,8 @@ class _FFmpegChannelManager:
         buf = self._stderr.get(cid)
         fh = self._stderr_fh.get(cid)
         try:
-            while True:
-                line = await sub.stderr.readline()
-                if not line:
-                    break
-                text = line.decode(errors="replace").rstrip()
-                tagged = f"[scene {scene_id}] {text}"
+            async for text in _iter_stderr_lines(sub.stderr):
+                tagged = f"[scene {scene_id}] {text.rstrip()}"
                 if buf is not None:
                     buf.append(tagged)
                     if len(buf) > 60:
@@ -823,11 +859,8 @@ class _FFmpegChannelManager:
         buf = self._stderr.setdefault(cid, [])
         fh = self._stderr_fh.get(cid)
         try:
-            while True:
-                line = await proc.stderr.readline()
-                if not line:
-                    break
-                text = line.decode(errors="replace").rstrip()
+            async for line in _iter_stderr_lines(proc.stderr):
+                text = line.rstrip()
                 buf.append(text)
                 if len(buf) > 60:
                     buf.pop(0)

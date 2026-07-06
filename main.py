@@ -210,6 +210,12 @@ async def lifespan(app):
         )
     yield
     await _live_tv_data.stop_maintenance_task()
+    # Kill any FFmpeg pipelines before the process exits — a UI-triggered restart
+    # re-execs this process (os.execv), so anything left running is orphaned.
+    from api.live_tv_engine import _ffmpeg_manager
+    from api.vertical_engine import _vertical_manager
+    await _ffmpeg_manager.cleanup_all()
+    await _vertical_manager.cleanup_all()
     logger.info("Shutting down global HTTP connection pools...")
     await stash_client._manager.client.aclose()
     await stream_routes.stream_client.aclose()
