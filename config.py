@@ -102,6 +102,10 @@ VERTICAL_IDLE_TIMEOUT = 60        # seconds of no manifest/segment requests befo
 VERTICAL_MAX_SESSIONS = 2         # concurrent composite sessions; over cap -> single-video fallback + warn
 VERTICAL_HWACCEL = "auto"         # encoder select: none|nvenc|qsv|vaapi|auto (CPU-only until Phase 1.5)
 VERTICAL_DEBUG = False            # verbose vertical diagnostics at INFO (selection pools, FFmpeg cmds, session lifecycle)
+# Compositor rework — full-length seek + segment cache
+VERTICAL_READRATE = 0.0           # input read-rate cap for the vertical subs; 0 = unlimited (full-speed encode)
+VERTICAL_SESSION_TTL = 1800       # seconds with no fetch before stage-2 session destroy (stage 1 = VERTICAL_IDLE_TIMEOUT)
+VERTICAL_READY_SEGMENTS = 2       # segments required on disk before PlaybackInfo returns
 
 config_defined_keys = set()
 env_overrides = []
@@ -145,6 +149,7 @@ def save_config():
         "VERTICAL_WEIGHT_PERFORMER", "VERTICAL_WEIGHT_TAGS", "VERTICAL_WEIGHT_STUDIO", "VERTICAL_WEIGHT_DATE",
         "VERTICAL_TAG_WINDOW", "VERTICAL_DATE_WINDOW_DAYS",
         "VERTICAL_IDLE_TIMEOUT", "VERTICAL_MAX_SESSIONS", "VERTICAL_HWACCEL", "VERTICAL_DEBUG",
+        "VERTICAL_READRATE", "VERTICAL_SESSION_TTL", "VERTICAL_READY_SEGMENTS",
     ]
 
     try:
@@ -177,10 +182,11 @@ def _coerce_config_value(key, val):
                 "HANDY_HSP_BUFFER_MIN_S", "HANDY_HSP_BUFFER_MAX_S", "HANDY_HSP_POLL_INTERVAL_S",
                 "VERTICAL_WEIGHT_PERFORMER", "VERTICAL_WEIGHT_TAGS", "VERTICAL_WEIGHT_STUDIO", "VERTICAL_WEIGHT_DATE",
                 "VERTICAL_TAG_WINDOW", "VERTICAL_DATE_WINDOW_DAYS",
-                "VERTICAL_IDLE_TIMEOUT", "VERTICAL_MAX_SESSIONS"]:
+                "VERTICAL_IDLE_TIMEOUT", "VERTICAL_MAX_SESSIONS",
+                "VERTICAL_SESSION_TTL", "VERTICAL_READY_SEGMENTS"]:
         try: return int(val)
         except ValueError: return None
-    elif key in ["VERTICAL_ASPECT_MIN"]:
+    elif key in ["VERTICAL_ASPECT_MIN", "VERTICAL_READRATE"]:
         try: return float(val)
         except ValueError: return None
     elif key in ["ENABLE_FILTERS", "ENABLE_TAG_FILTERS", "ENABLE_ALL_TAGS", "REQUIRE_AUTH_FOR_CONFIG",
@@ -253,6 +259,7 @@ _supported_keys = [
     "VERTICAL_WEIGHT_PERFORMER", "VERTICAL_WEIGHT_TAGS", "VERTICAL_WEIGHT_STUDIO", "VERTICAL_WEIGHT_DATE",
     "VERTICAL_TAG_WINDOW", "VERTICAL_DATE_WINDOW_DAYS",
     "VERTICAL_IDLE_TIMEOUT", "VERTICAL_MAX_SESSIONS", "VERTICAL_HWACCEL", "VERTICAL_DEBUG",
+    "VERTICAL_READRATE", "VERTICAL_SESSION_TTL", "VERTICAL_READY_SEGMENTS",
 ]
 
 for k in _supported_keys:

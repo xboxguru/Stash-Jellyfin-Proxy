@@ -91,6 +91,27 @@ class TestCoerceConfigValue:
     def test_vertical_hwaccel_invalid_defaults_to_auto(self):
         assert config._coerce_config_value("VERTICAL_HWACCEL", "garbage") == "auto"
 
+    # Compositor-rework keys (full-length seek + segment cache)
+    @pytest.mark.parametrize("key,raw,expected", [
+        ("VERTICAL_SESSION_TTL", "1800", 1800),
+        ("VERTICAL_READY_SEGMENTS", "2", 2),
+    ])
+    def test_vertical_rework_int_keys(self, key, raw, expected):
+        result = config._coerce_config_value(key, raw)
+        assert result == expected
+        assert isinstance(result, int)
+
+    @pytest.mark.parametrize("raw,expected", [
+        ("0", 0.0), ("1.5", 1.5), ("2", 2.0),
+    ])
+    def test_vertical_readrate_is_float(self, raw, expected):
+        result = config._coerce_config_value("VERTICAL_READRATE", raw)
+        assert result == expected
+        assert isinstance(result, float)
+
+    def test_vertical_readrate_invalid_returns_none(self):
+        assert config._coerce_config_value("VERTICAL_READRATE", "fast") is None
+
     # List keys
     @pytest.mark.parametrize("key", [
         "TAG_GROUPS",
@@ -137,8 +158,26 @@ class TestVerticalConfigRoundTrip:
         assert "VERTICAL_ASPECT_MIN" in config._supported_keys
 
     def test_compositor_keys_are_env_overridable(self):
-        for key in ("VERTICAL_IDLE_TIMEOUT", "VERTICAL_MAX_SESSIONS", "VERTICAL_HWACCEL"):
+        for key in ("VERTICAL_IDLE_TIMEOUT", "VERTICAL_MAX_SESSIONS", "VERTICAL_HWACCEL",
+                    "VERTICAL_READRATE", "VERTICAL_SESSION_TTL", "VERTICAL_READY_SEGMENTS"):
             assert key in config._supported_keys
+
+    def test_rework_keys_round_trip(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "CONFIG_FILE", str(tmp_path / "rework.conf"))
+        monkeypatch.setattr(config, "VERTICAL_READRATE", 1.5)
+        monkeypatch.setattr(config, "VERTICAL_SESSION_TTL", 2400)
+        monkeypatch.setattr(config, "VERTICAL_READY_SEGMENTS", 3)
+        config.save_config()
+
+        config.VERTICAL_READRATE = 0.0
+        config.VERTICAL_SESSION_TTL = 1800
+        config.VERTICAL_READY_SEGMENTS = 2
+        config.load_config_file()
+
+        assert config.VERTICAL_READRATE == 1.5
+        assert isinstance(config.VERTICAL_READRATE, float)
+        assert config.VERTICAL_SESSION_TTL == 2400
+        assert config.VERTICAL_READY_SEGMENTS == 3
 
     def test_vertical_debug_is_bool_and_round_trips(self, tmp_path, monkeypatch):
         assert config._coerce_config_value("VERTICAL_DEBUG", "true") is True

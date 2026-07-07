@@ -247,7 +247,24 @@
                     <div class="form-group">
                         <label class="form-label">Idle Timeout (seconds)</label>
                         <input type="number" min="10" class="form-input" name="VERTICAL_IDLE_TIMEOUT" placeholder="60">
-                        <div class="form-hint">Tear a session down after this long with no playback requests.</div>
+                        <div class="form-hint">Stage 1: reap the FFmpeg processes after this long with no playback requests (segments are kept on disk).</div>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Session TTL (seconds)</label>
+                        <input type="number" min="60" class="form-input" name="VERTICAL_SESSION_TTL" placeholder="1800">
+                        <div class="form-hint">Stage 2: delete the cached segments and free the session slot after this long with no requests.</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Ready Segments</label>
+                        <input type="number" min="1" class="form-input" name="VERTICAL_READY_SEGMENTS" placeholder="2">
+                        <div class="form-hint">Segments encoded before playback starts. Lower = faster start.</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Read Rate Cap</label>
+                        <input type="number" step="0.1" min="0" class="form-input" name="VERTICAL_READRATE" placeholder="0">
+                        <div class="form-hint">Caps input read speed (1 = realtime, 2 = 2×). 0 = unlimited full-speed encode. Raise off 0 only on thermally-constrained hosts.</div>
                     </div>
                 </div>
                 <div class="toggle-row" style="margin-top: 16px;">

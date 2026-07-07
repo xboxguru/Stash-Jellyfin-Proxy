@@ -26,7 +26,7 @@ from starlette.responses import JSONResponse, RedirectResponse, Response, Stream
 from core import stash_client, jellyfin_mapper
 from core.jellyfin_mapper import decode_id
 from core.vertical import vdebug
-from api.vertical_engine import _vertical_manager
+from api.vertical_engine import _vertical_manager, SEG_DURATION, total_segments_for
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +69,8 @@ def _seek_seconds(request: Request, *, default: float | None = None) -> float | 
             if k.lower() in names:
                 return v
         return None
+    # Backward-compat aliases retained: StartTimeTicks (Jellyfin) and the explicit
+    # endpoint's ticks/pos.  A seek here still relaunches, now via ensure_segment.
     ticks = _get("starttimeticks", "ticks")
     if ticks is not None:
         try:
@@ -139,6 +141,41 @@ def _composite_media_source(session_id: str, scene: dict) -> dict:
     }
 
 
+def _center_duration(scene: dict) -> float:
+    files = scene.get("files") or []
+    return float(files[0].get("duration") or 0.0) if files else 0.0
+
+
+def _build_vod_playlist(session_id: str, base: str, duration: float) -> str:
+    """Synthesize a complete `#EXT-X-PLAYLIST-TYPE:VOD` playlist covering the
+    *entire* center duration with uniform 4 s segments (the final segment declares
+    its true, shorter length).  The whole timeline is seekable immediately —
+    ExoPlayer derives its seekable range from the playlist, not RunTimeTicks — and
+    the compositor produces each referenced segment on demand via ensure_segment.
+
+    Segment names (`seg%05d.ts`) and the 4 s cadence match the master's
+    `-hls_segment_filename` / `-start_number` / `-hls_time 4`, so segment N maps
+    exactly to center time [N*4, N*4+4).
+    """
+    total = total_segments_for(duration) or 1
+    seg = SEG_DURATION
+    lines = [
+        "#EXTM3U",
+        "#EXT-X-VERSION:3",
+        f"#EXT-X-TARGETDURATION:{int(seg)}",
+        "#EXT-X-MEDIA-SEQUENCE:0",
+        "#EXT-X-PLAYLIST-TYPE:VOD",
+    ]
+    for i in range(total):
+        seg_len = seg if i < total - 1 else max(0.001, duration - seg * (total - 1))
+        if seg_len > seg:
+            seg_len = seg
+        lines.append(f"#EXTINF:{seg_len:.3f},")
+        lines.append(f"{base}/vertical/{session_id}/seg/seg{i:05d}.ts")
+    lines.append("#EXT-X-ENDLIST")
+    return "\n".join(lines) + "\n"
+
+
 # ── PlaybackInfo (called from stream_routes.endpoint_playback_info) ───────────
 
 async def vertical_playback_info(scene: dict, raw_id: str, request: Request) -> JSONResponse:
@@ -203,10 +240,13 @@ async def redirect_to_composite(raw_item_id: str, request: Request) -> Response:
 # ── composite HLS manifest + segments ─────────────────────────────────────────
 
 async def endpoint_vertical_manifest(request: Request) -> Response:
-    """Serve the composite HLS manifest, creating/relaunching the session as needed.
+    """Serve the synthetic VOD playlist for a composite session.
 
-    A `StartTimeTicks` on the request that differs from the session's current
-    center position triggers a full relaunch with the new `-ss` (§1.5 center seek).
+    The playlist is proxy-owned and covers the whole center duration with uniform
+    4 s segments, so the entire timeline is seekable from the first fetch — the
+    compositor produces each referenced segment on demand.  The session is warmed
+    (launched at 0 if cold) but a bare poll never disturbs it; a `StartTimeTicks`
+    still triggers a relaunch at that position, now via `ensure_segment`.
     """
     session_id = request.path_params.get("session_id", "")
     if not _valid_session_id(session_id):
@@ -218,6 +258,7 @@ async def endpoint_vertical_manifest(request: Request) -> Response:
         logger.warning(f"Vertical: manifest for unknown scene in session {session_id!r}")
         return Response(status_code=404)
 
+    duration = _center_duration(scene)
     seek = _seek_seconds(request)  # None = no position given → never resets the session
     was_alive = _vertical_manager.is_alive(session_id)
     ok = await _vertical_manager.ensure(session_id, scene, seek)
@@ -226,65 +267,61 @@ async def endpoint_vertical_manifest(request: Request) -> Response:
         return Response(status_code=503, content="Vertical compositor unavailable")
     if not was_alive:
         # Cold (re)build from a manifest request — e.g. first fetch after the
-        # stream-guard redirect, or a client resuming after an idle teardown.
-        vdebug(logger, f"Vertical: manifest request (re)built session {session_id!r} seek={seek}")
+        # stream-guard redirect, or a client resuming after a session teardown.
+        vdebug(logger, f"Vertical: manifest request (re)warmed session {session_id!r} seek={seek}")
 
     _vertical_manager.touch(session_id)
-    manifest_path = _vertical_manager.manifest_path(session_id)
-    if not manifest_path:
-        logger.warning(f"Vertical: session {session_id!r} alive but manifest file missing (502)")
-        return Response(status_code=502)
-    try:
-        with open(manifest_path, "r", encoding="utf-8") as fh:
-            raw = fh.read()
-    except OSError as exc:
-        logger.warning(f"Vertical: could not read manifest for session {session_id!r}: {exc} (502)")
-        return Response(status_code=502)
-
-    # Rewrite relative segment filenames → absolute URLs through our proxy.
     base = f"{request.url.scheme}://{request.url.netloc}"
-    out_lines = []
-    for line in raw.splitlines():
-        s = line.strip()
-        if s and not s.startswith("#"):
-            out_lines.append(f"{base}/vertical/{session_id}/seg/{s}")
-        else:
-            out_lines.append(line)
-
-    logger.trace(f"Vertical: served composite manifest for session {session_id!r} seek={seek}")
+    body = _build_vod_playlist(session_id, base, duration)
+    logger.trace(f"Vertical: served synthetic VOD playlist for session {session_id!r} seek={seek}")
     return Response(
-        "\n".join(out_lines),
+        body,
         media_type="application/vnd.apple.mpegurl",
         headers={"Cache-Control": "no-cache, no-store", "Access-Control-Allow-Origin": "*"},
     )
 
 
 async def endpoint_vertical_segment(request: Request) -> Response:
-    """Serve one composite HLS segment from the session's temp dir."""
+    """Serve one composite HLS segment, producing it on demand if it isn't cached.
+
+    Cached-hit is the common path (the full-speed encoder runs ahead of the
+    client).  A miss — forward seek past the encode head, backward seek into an
+    unfilled gap, or a resume after a stage-1 reap — routes through the session's
+    single `ensure_segment` recovery path, which respins the encoder at this
+    segment and waits for it.
+    """
     session_id = request.path_params.get("session_id", "")
     seg_name = request.path_params.get("seg_name", "")
     if not re.match(r"^seg\d+\.ts$", seg_name):
         return Response(status_code=400)
+    if not _valid_session_id(session_id):
+        logger.warning(f"Vertical: segment request with malformed session id {session_id!r}")
+        return Response(status_code=404)
+    index = int(seg_name[3:-3])
 
+    # Fast path: already cached — serve without touching the encoder or Stash.
     seg_dir = _vertical_manager.seg_dir(session_id)
-    if not seg_dir:
-        # Session already torn down (or never existed) — the client is fetching
-        # from a stale manifest.  Worth a warning: mid-play this means the idle
-        # watchdog or an explicit stop beat the client to it.
-        logger.warning(f"Vertical: segment {seg_name} requested for unknown/stopped session {session_id!r}")
-        return Response(status_code=404)
-    seg_path = os.path.join(seg_dir, seg_name)
-    if not os.path.exists(seg_path):
-        logger.warning(
-            f"Vertical: segment {seg_name} not on disk for session {session_id!r} "
-            f"(alive={_vertical_manager.is_alive(session_id)}) — client ahead of encoder or stale manifest"
-        )
-        return Response(status_code=404)
+    seg_path = os.path.join(seg_dir, seg_name) if seg_dir else None
+    if not (seg_path and os.path.exists(seg_path)):
+        # Miss: recover via ensure_segment (needs the center scene to launch/respin).
+        scene = await stash_client.get_scene(_scene_id_from_session(session_id))
+        if not scene:
+            logger.warning(f"Vertical: segment {seg_name} for unknown scene in session {session_id!r}")
+            return Response(status_code=404)
+        ok = await _vertical_manager.ensure_segment(session_id, index, scene)
+        seg_dir = _vertical_manager.seg_dir(session_id)
+        seg_path = os.path.join(seg_dir, seg_name) if seg_dir else None
+        if not ok or not (seg_path and os.path.exists(seg_path)):
+            logger.warning(
+                f"Vertical: segment {seg_name} unavailable for session {session_id!r} "
+                f"(alive={_vertical_manager.is_alive(session_id)}) — client retries"
+            )
+            return Response(status_code=404)
 
     _vertical_manager.touch(session_id)
 
-    async def _iter():
-        with open(seg_path, "rb") as fh:
+    async def _iter(path=seg_path):
+        with open(path, "rb") as fh:
             while chunk := fh.read(65536):
                 yield chunk
 

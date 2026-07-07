@@ -176,11 +176,12 @@ the detail view keeps the compositor source.
 2. `endpoint_stream` has a guard mirroring the Live TV one: a `vscene-` id built straight
    into `/Videos/{id}/stream` (client bypassing PlaybackInfo) 302-redirects to a fresh
    composite session.
-3. `/vertical/{session}/master.m3u8` and `/vertical/{session}/seg/{name}` serve the
-   composite manifest (segment lines rewritten to absolute proxy URLs) and segments;
-   `/seek` and `/stop` give explicit session control. The nonce is stable for a play, so
-   every manifest/segment request within it hits the same session; a fresh play re-rolls
-   the nonce (and therefore the sides).
+3. `/vertical/{session}/master.m3u8` serves a **proxy-synthesized VOD playlist** covering
+   the entire center duration (not FFmpeg's own playlist — see § Full-length seek + segment
+   cache); `/vertical/{session}/seg/{name}` serves each segment, producing it on demand if
+   it isn't already cached. `/seek` and `/stop` give explicit session control. The nonce is
+   stable for a play, so every manifest/segment request within it hits the same session; a
+   fresh play re-rolls the nonce (and therefore the sides).
 
 **Auth carve-out (resolved):** the manifest/segment fetch is issued by the player's HLS
 stack directly against the `TranscodingUrl`, headerless — it carries no `api_key` query
@@ -228,9 +229,9 @@ which needs the composite sub already writing), then the audio sub connects.
 ### Filtergraph geometry (Shape A)
 
 ```
--re -stream_loop -1 -i <left>        # side, loops forever
--re [-ss S]         -i <center>      # the clock; -ss applies here only
--re -stream_loop -1 -i <right>       # side, loops forever
+[pace] -stream_loop -1 [-ss Ls] -i <left>    # side, loops forever; -ss phases it (see below)
+[pace]              [-ss S]      -i <center>  # the clock; center -ss = seek position
+[pace] -stream_loop -1 [-ss Rs] -i <right>   # side, loops forever; -ss phases it
 -filter_complex
   [0:v]scale=-2:1080,crop=608:1080,setsar=1[l];
   [1:v]scale=-2:1080,crop=608:1080,setsar=1[c];
@@ -243,61 +244,120 @@ Each 1080-tall lane is cropped to **608×1080**; `hstack` → 1824×1080; `pad` 
 exactly 1920×1080. Sides loop infinitely; `-shortest` ends the composite when the finite
 center stream ends. Audio is the center clip only, normalized with the same
 `aresample/aformat` chain as Live TV (`-map 0:a:0?` so a silent center doesn't fail).
-Inputs are read with `-re` so the client can never outrun the encoder.
+
+`[pace]` is the per-input pacing token. The **VOD compositor runs full-speed** (no `-re`,
+optionally `-readrate VERTICAL_READRATE`) — the client reads static files off disk and the
+encoder outruns it, so there is no client-paced backpressure to preserve (see § Full-length
+seek + segment cache). The **Vertical TV channel keeps `-re`** (realtime pacing) because a
+channel is genuinely live. The side `-ss` offsets (`Ls`/`Rs`) phase the looping sides to the
+timeline on a relaunch (§ Full-length seek).
 
 `build_composite_cmd()` and `build_audio_cmd()` (module-level functions in
 `api/vertical_engine.py`) are the single source of truth for this filtergraph — both the
 VOD `_VerticalSessionManager` and the Vertical TV channel feeder call them, so there is
-exactly one place that knows the lane geometry.
+exactly one place that knows the lane geometry. `pace_args` defaults to `("-re",)`, so the
+Vertical TV channel's call (which omits it) is byte-identical to before; the VOD path passes
+the readrate-derived tokens instead.
 
 ("Shape B" — three separate lane pipes with the master doing the `hstack`, which would
 enable live side swap-in — was considered and rejected as unnecessary complexity since
 sides just loop; Shape A above is what shipped.)
 
-### Center seek = full session relaunch
+### Full-length seek + segment cache
 
-A center seek (client re-requesting the manifest with a different `StartTimeTicks`, or an
-explicit `POST /vertical/{session}/seek`) is a **full session relaunch** with the new
-`-ss` on the center input only — the sides just keep looping from their own start. The
-manager reuses the session's cached sides on relaunch, so scrubbing never re-rolls them.
-A request that carries **no** position at all is steady-state: it never relaunches, so a
-client polling the manifest without query params can't accidentally reset a sought
-session back to 0 — "no position given" and "seek to 0" are distinct (`None` vs `0.0`
-through `_seek_seconds` → `ensure`).
-This is the deliberately simple approach; re-pointing only the center feeder is a later
-optimization if scrubbing feels heavy. Backward seeks within the already-encoded range
-work natively because the master uses `hls_playlist_type=event` (the full segment list is
-retained and `EXT-X-ENDLIST` is written when the center ends), so a relaunch is only needed
-to jump ahead of the live encode edge.
+The whole center timeline is seekable the instant playback starts, and spin-up is fast,
+because of five interlocking pieces:
 
-### Encoders, concurrency, idle teardown
+**1. Synthetic VOD playlist (proxy-owned).** `/vertical/{session}/master.m3u8` does *not*
+relay FFmpeg's playlist. The proxy synthesizes a complete `#EXT-X-PLAYLIST-TYPE:VOD`
+playlist (`_build_vod_playlist` in `api/vertical_routes.py`) covering the *entire* center
+duration with uniform 4 s segments (the final segment declares its true, shorter length),
+ended by `EXT-X-ENDLIST`. ExoPlayer derives its seekable range from the playlist, not the
+advertised `RunTimeTicks`, so the full timeline is seekable from the first fetch. The
+segment↔time contract is exact: the master forces keyframes with
+`force_key_frames expr:gte(t,n_forced*4)` and cuts at `-hls_time 4`, so segment *N* always
+covers center time `[N*4, N*4+4)`. `SEG_DURATION`, `hls_time`, and that expression must stay
+in lockstep.
+
+**2. Full-speed encode.** The vertical subs drop `-re` (the Live TV pacing flag) — the client
+reads static files off disk, the encoder outruns it, and there is no client-paced
+backpressure in the chain. The video/audio process split stays (that is the actual deadlock
+protection; see § Pipe topology). With `-shortest` against the looping sides, the pipeline
+exits on its own once the center is fully encoded, and the session degrades to pure static
+files. `VERTICAL_READRATE` (float, default `0` = unlimited) optionally caps the burst via
+`-readrate N` for thermally-constrained hosts.
+
+**3. Segment range tracker + `ensure_segment(index)` — the single recovery path.** The
+session tracks which segment indexes exist on disk (produced ranges; seeks leave holes).
+A request for a missing segment calls `ensure_segment(index)`, which either **waits** (the
+live encode head is within `_SEG_WAIT_LOOKAHEAD` segments — a momentary client-ahead-of-
+encoder miss resolves in well under a second at full speed) or **relaunches** the subs with
+`-ss index*4` on the center and `-start_number index` on the master, into the *same* session
+dir (old segments stay valid). That one path serves **seek past the encode head**, **seek
+back into an unfilled gap**, and **resume after a process reap** identically. A respin never
+counts against `VERTICAL_MAX_SESSIONS` — it's the same session. Relaunches are debounced by
+the session lock: a newer target re-decides after the previous respin lands rather than
+stacking a second one. A request that carries **no** position (`None` vs `0.0` through
+`_seek_seconds` → `ensure`) is steady-state and never disturbs the running encode.
+
+**4. Sides are phased to the timeline, not to watch time.** Cached segments bake the side
+pixels in: the segment at position *T* necessarily shows the sides at `T mod side_duration`
+(the phase of a continuous start-to-finish encode). Relaunches therefore start each side at
+`seek_seconds mod side_duration` (`_phase`, using side durations fetched once at launch) so
+re-encoded content is byte-compatible with what the continuous encode would have produced —
+cache-coherent and deterministic, and identical timeline positions always render the same.
+
+**5. Background gap backfill.** When a run reaches the center end and the session hasn't been
+explicitly stopped or reaped, `_schedule_backfill` relaunches at the earliest gap (created by
+forward seeks) and lets it run to the end, so backward seeking always cache-hits eventually.
+Backfill runs one relaunch at a time, defers to any live user-driven run (`ensure_segment`
+wins), stops on a stall (a gap that made no progress), and is skipped after a stage-1 reap.
+
+### Encoders, concurrency, two-stage teardown
 
 - **Encoder:** selected by `VERTICAL_HWACCEL` (`none|nvenc|qsv|vaapi|auto`) through the shared
   probe (see § Hardware encoding below). The master's `-c:v` block (plus any device-init /
   `hwupload` filter) is supplied by the probed encoder. Decode + `hstack` still run on CPU.
 - **Concurrency:** `VERTICAL_MAX_SESSIONS` (default 2). A launch that would exceed the cap
-  is refused (logged), and the caller falls back to single-video playback. 3 decodes + 1
-  encode is heavy — the cap is a safety rail (Stash is single-user).
-- **Idle teardown:** `VERTICAL_IDLE_TIMEOUT` (default 60 s) — a 20 s watchdog reaps any
-  session with no manifest/segment requests past the timeout, killing the subs + master,
-  closing the pipe backend, and deleting the session temp dir.
+  is refused (logged), and the caller falls back to single-video playback. A session holds
+  its slot from launch until stage-2 destroy (so a reaped-but-cached session still counts);
+  a respin is the *same* session and never consumes a second slot. 3 decodes + 1 encode is
+  heavy — the cap is a safety rail (Stash is single-user).
+- **Disk guardrail:** a session renders the *full* center clip (~1–2 GB per 30 min at
+  1080p30). Before launch the engine checks free space on the HLS temp volume and refuses
+  below a 2 GB floor (falling back to single-video playback, logged).
+- **Two-stage teardown:** a 20 s watchdog runs two clocks off the last fetch.
+  **Stage 1 — process reap** at `VERTICAL_IDLE_TIMEOUT` (default 60 s): kill the subs +
+  master, close the pipe backend, but **keep the cached segments** (a no-op if the encode
+  already finished). **Stage 2 — session destroy** at `VERTICAL_SESSION_TTL` (default
+  1800 s), or an explicit `/stop`: delete the temp dir and free the cap slot. A segment fetch
+  is the liveness signal and resets both clocks; a client that unpauses after a reap
+  transparently respins via `ensure_segment`. Expected first-frame latency with `-re` gone is
+  ~3–5 s on the reference hardware (vs 15–20 s under realtime pacing) — the readiness gate
+  waits for `VERTICAL_READY_SEGMENTS` (default 2) segment files.
 
 ### Logging
 
 Per-session FFmpeg logs rotate at `{LOG_DIR}/vertical_ffmpeg/{session}.log` (same 10 MB
-rotation as Live TV); each session log starts with the full master/composite/audio
-commands, then carries all three processes' stderr (`[composite]` / `[audio]` prefixes).
+rotation as Live TV). The file spans the whole session (a session can span multiple runs —
+initial encode, seek respins, backfill): a `===== FFmpeg session start … =====` banner, then
+per run a `----- run start start_index=N … -----` marker with that run's master/composite/
+audio commands, the three processes' stderr (`[composite]` / `[audio]` prefixes; master
+unprefixed), and a `----- run end (reason) -----` marker, closed by `===== FFmpeg session
+end (reason) =====` at stage-2 destroy.
 The composite/audio sub commands carry the Stash `apikey` in their HTTP input URL
 (`/scene/{id}/stream?apikey=...`); `core.vertical.redact_apikey()` masks it before any
 command line is logged (proxy log and per-session file alike), and the Live TV feeder's
 own scene-sub command logging uses the same helper — so a shared log file is safe to hand
 to someone else for debugging without leaking the Stash key.
-The engine logs session lifecycle at INFO (center + sides + encoder + backend + seek;
-teardown **with reason** on every path — idle, explicit stop, seek relaunch, launch
-failure, shutdown), the readiness gate, seek relaunches (old→new position), concurrency
-refusals (with the ids of the sessions holding the slots), and the single-video fallback
-with its reason. A session that fails the readiness gate is torn down immediately rather
-than left encoding orphaned.
+The engine logs session lifecycle at INFO: launch (center + sides + side durations + encoder
++ backend + total segments), the readiness gate, **every relaunch** with its trigger
+(`back-seek/gap` / `resume/gap` / `seek-past-head`), old→new `start_index`, and the produced
+range summary, **backfill** start/finish, **stage-1 process reap vs stage-2 destroy** each
+with reason, concurrency refusals (with the ids of the sessions holding the slots), the
+disk-guardrail refusal (with free space vs floor), and the single-video fallback with its
+reason. A session that fails the readiness gate is torn down immediately rather than left
+encoding orphaned.
 
 Stderr draining splits on `\r` as well as `\n`: FFmpeg's periodic progress line is
 `\r`-terminated on a pipe, and newline-only reading would grow one "line" until the
@@ -511,7 +571,12 @@ compositor's own test approach. `tests/test_vertical_selection.py` covers
 `pick_center_and_sides` (empty/single-scene library, center exclusion, and the
 drop-exclusion-rather-than-fail fallback). `tests/test_config.py` covers the two new config
 keys' coercion, env-override, and save/load round-trip. `tests/test_vertical_engine.py`
-covers the VOD manager's seek semantics (no-position vs. new-seek vs. steady-state),
+covers the synthetic VOD playlist (segment count + uniform/final durations), the segment
+range tracker (produced indexes, first gap, run head/coverage, range summary, side phasing),
+the `ensure_segment` trigger cases (cache hit, near-head wait, seek-past-head, back-seek gap,
+post-reap resume, cold launch) and relaunch debounce, the two-stage teardown (stage-1 reap
+keeps segments, stage-2 destroy frees the slot) and fetch liveness reset, backfill scheduling
+and preemption, the pacing invariant (Live TV keeps `-re`, VOD drops it / adds `-readrate`),
 session-id validation, and the `VERTICAL_DEBUG` level gating.
 
 ## Config reference
@@ -531,17 +596,22 @@ are surfaced in the settings GUI (`templates/components/tab_settings.html`, Libr
 | `VERTICAL_WEIGHT_DATE` | `10` | int | Side-selection weight: close in date to center |
 | `VERTICAL_TAG_WINDOW` | `30` | int | Keep top-N tag-pool candidates ranked by shared-tag count |
 | `VERTICAL_DATE_WINDOW_DAYS` | `30` | int | Date-proximity pool: ± this many days of center's date |
-| `VERTICAL_IDLE_TIMEOUT` | `60` | int | Seconds of no VOD manifest/segment requests before tearing a session down |
+| `VERTICAL_IDLE_TIMEOUT` | `60` | int | Stage-1: seconds of no fetches before the FFmpeg processes are reaped (segments kept) |
+| `VERTICAL_SESSION_TTL` | `1800` | int | Stage-2: seconds of no fetches before the cached segments are deleted and the slot freed |
+| `VERTICAL_READY_SEGMENTS` | `2` | int | Segment files encoded before PlaybackInfo returns |
+| `VERTICAL_READRATE` | `0.0` | float | Input read-rate cap for the VOD subs; `0` = unlimited full-speed encode |
 | `VERTICAL_MAX_SESSIONS` | `2` | int | Concurrent VOD composite sessions; over cap → single-video fallback |
 | `VERTICAL_HWACCEL` | `"auto"` | enum | VOD master encoder: `none/nvenc/qsv/vaapi/auto` |
 | `VERTICAL_DEBUG` | `false` | bool | Verbose diagnostics at INFO (selection pools, FFmpeg cmds, session decisions) |
 | `ENABLE_VERTICAL_TV_CHANNEL` | `false` | bool | Enable the always-on Vertical TV Live TV channel |
 | `VERTICAL_TV_CHANNEL_NUMBER` | `9000` | int | Channel number for Vertical TV |
 
-`VERTICAL_ASPECT_MIN` is the codebase's first **float** config key — a float bucket was
-added to `_coerce_config_value()`, and the settings form's numeric submit path
+`VERTICAL_ASPECT_MIN` and `VERTICAL_READRATE` are the **float** config keys — a float
+bucket in `_coerce_config_value()`, and the settings form's numeric submit path
 (`templates/components/scripts.html`) picks `parseFloat` over `parseInt` when a key's
 `DEFAULTS` entry is non-integer (previously `parseInt("1.3")` would have silently saved `1`).
+`VERTICAL_READRATE` is a float whose default is `0` (an integer to JS), so it's listed
+explicitly in the form's `FLOAT_KEYS` set to force `parseFloat`.
 
 ## Debugging / logs
 
@@ -599,12 +669,12 @@ and continues without the per-session file, so a missing file is itself a signal
   session ids holding slots), no side clips (selection warning right above it), or a
   launch failure (paired with the session log's stderr).
 - **Session died mid-play** → the session log's last stderr lines; the proxy log has the
-  teardown reason line (`tearing down session … (reason)`).
+  teardown reason line (stage-1 reap / stage-2 destroy, each with its reason).
 - **Black/frozen lanes** → composite sub stderr (`[composite]` lines) — look for HTTP
   reconnects against Stash or filtergraph errors.
 - **No audio** → `[audio]` lines; a silent center exits the audio sub almost immediately
   (VOD: session plays with an empty audio track; Vertical TV: a silence filler is
   spawned and logged).
-- **Client stalls but FFmpeg is healthy** → the per-request warnings: segment requested
-  for unknown/stopped session (stale manifest), or segment not on disk (client ahead of
-  the encoder).
+- **Client stalls after a seek** → the relaunch line for that segment (trigger + old→new
+  `start_index` + produced ranges); if the segment stays unavailable the per-request warning
+  `segment … unavailable … client retries` fires (the respin didn't produce it in time).
