@@ -60,7 +60,14 @@ CPU = EncoderConfig(
 
 _NVENC = EncoderConfig(
     codec="h264_nvenc",  # ingests system frames directly — no upload filter needed
-    output_args=("-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "23"),
+    # -forced-idr 1: make `-force_key_frames` emit real IDR frames, not plain
+    # I-frames.  Without it NVENC's forced keyframe isn't an IDR, so the HLS muxer's
+    # `independent_segments` won't split there — a short clip whose only forced
+    # keyframe is its segment boundary lands entirely in seg0 (1 segment where the
+    # playlist declares 2), and the relaunch to force the missing tail segment
+    # encodes zero frames → readiness fails → single-video fallback.  libx264
+    # inserts IDRs on `-force_key_frames` natively; this brings NVENC in line.
+    output_args=("-c:v", "h264_nvenc", "-forced-idr", "1", "-preset", "p5", "-rc", "vbr", "-cq", "23"),
 )
 
 _QSV = EncoderConfig(
