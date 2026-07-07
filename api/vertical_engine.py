@@ -118,14 +118,21 @@ def _in_seek(seconds: float) -> list:
 def build_composite_cmd(ffmpeg_bin: str, left_id: str, center_id: str,
                         right_id: str, seek: float, sub_out_v: str, *,
                         left_seek: float = 0.0, right_seek: float = 0.0,
-                        pace_args: tuple = ("-re",)) -> list:
+                        pace_args: tuple = ("-re",), duration: float | None = None) -> list:
     """Shape A composite: 3 HTTP inputs → per-lane scale/crop → hstack → pad → raw video.
 
-    Sides loop forever (`-stream_loop -1`); the center is the clock — `-shortest`
-    ends the composite when the center ends.  `-ss seek` (input seek) applies to
-    the center; `left_seek`/`right_seek` phase the looping sides so a relaunch at
-    a mid-timeline position renders the sides exactly as the continuous
-    start-to-finish encode would have (side phase = seek mod side_duration).
+    Sides loop forever (`-stream_loop -1`); the center is the clock.  `-ss seek`
+    (input seek) applies to the center; `left_seek`/`right_seek` phase the looping
+    sides so a relaunch at a mid-timeline position renders the sides exactly as the
+    continuous start-to-finish encode would have (side phase = seek mod side_dur).
+
+    `duration` (center length minus seek) bounds the output with `-t`.  This is
+    load-bearing: `-shortest` is a *no-op* here because the filtergraph has a
+    single output stream, so at center EOF `hstack` just stalls on the ended input
+    and the composite hangs forever (frozen a couple frames short of the final
+    segment → readiness never completes, and long clips never end).  `-t` forces a
+    clean exit at the center duration.  Callers that omit it (the Vertical TV
+    channel) keep the previous, un-bounded behavior byte-for-byte.
     Lane geometry: 1080-high scale, crop to 608×1080, hstack→1824×1080, pad to
     exactly 1920×1080.
 
@@ -171,17 +178,19 @@ def build_composite_cmd(ffmpeg_bin: str, left_id: str, center_id: str,
         "[2:v]scale=608:1080:force_original_aspect_ratio=increase:force_divisible_by=2,crop=608:1080,setsar=1[r];"
         "[l][c][r]hstack=inputs=3,pad=1920:1080:(ow-iw)/2:0:black,fps=30,format=yuv420p[v]",
         "-map", "[v]", "-shortest",
+        *(["-t", f"{duration:.3f}"] if duration and duration > 0 else []),
         "-pix_fmt", "yuv420p", "-f", "rawvideo", sub_out_v,
     ]
 
 
 def build_audio_cmd(ffmpeg_bin: str, center_id: str, seek: float, sub_out_a: str,
-                    *, pace_args: tuple = ("-re",)) -> list:
+                    *, pace_args: tuple = ("-re",), duration: float | None = None) -> list:
     """Center-only audio, normalized to 48 kHz stereo PCM (reuses the Live TV
     normalization). `-map 0:a:0?` keeps a silent center from failing the sub.
 
     `pace_args` matches `build_composite_cmd` — default realtime `-re` for the
-    Vertical TV channel; the VOD compositor passes the readrate tokens.
+    Vertical TV channel; the VOD compositor passes the readrate tokens.  `duration`
+    bounds the sub with `-t` so it ends with the composite (kept in lockstep).
     """
     center_url = _stash_stream_url(center_id)
     common_pre = [
@@ -196,6 +205,7 @@ def build_audio_cmd(ffmpeg_bin: str, center_id: str, seek: float, sub_out_a: str
         "aresample=async=1000:first_pts=0,"
         "aformat=sample_rates=48000:channel_layouts=stereo",
         "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le",
+        *(["-t", f"{duration:.3f}"] if duration and duration > 0 else []),
         "-f", "s16le", sub_out_a,
     ]
 
@@ -330,14 +340,36 @@ class _VerticalSessionManager:
         concurrency cap is hit, side selection finds no other vertical scenes,
         the center has no duration, disk is low, or FFmpeg fails to start.
         """
+        idx = int(max(0.0, seek or 0.0) // SEG_DURATION)
         async with self._lock:
-            if sid not in self._dirs:
-                idx = int((seek or 0.0) // SEG_DURATION)
-                return await self._launch(sid, center_scene, idx)
+            fresh_launch = sid not in self._dirs
+            if fresh_launch and not await self._launch(sid, center_scene, idx):
+                return False
+        if fresh_launch:
+            # Readiness gate runs OUTSIDE the lock: the run monitor needs the lock
+            # to terminate the master (which finalizes a short clip's last segment),
+            # and a slow launch shouldn't block other sessions for the whole wait.
+            if not await self._await_launch_ready(sid, idx):
+                async with self._lock:
+                    await self._destroy(sid, reason="readiness gate failed")
+                return False
+            self.touch(sid)
+            return True
         if seek is None:
             self.touch(sid)
             return True
-        return await self.ensure_segment(sid, int(max(0.0, seek) // SEG_DURATION), center_scene)
+        return await self.ensure_segment(sid, idx, center_scene)
+
+    async def _await_launch_ready(self, sid: str, start_index: int) -> bool:
+        """Post-spawn readiness wait for a fresh launch (no lock held)."""
+        proc = self._procs.get(sid)
+        if proc is None:
+            return False
+        min_ready = max(1, int(getattr(config, "VERTICAL_READY_SEGMENTS", 2)))
+        total = self.total_segments(sid)
+        if total:
+            min_ready = min(min_ready, total)
+        return await self._await_ready(sid, proc, start_index, min_ready)
 
     async def seek(self, sid: str, center_scene: dict, position: float) -> bool:
         """Explicit center seek — routed through the single `ensure_segment` path."""
@@ -603,10 +635,12 @@ class _VerticalSessionManager:
             f"total_segments={total} ====="
         )
 
-        min_ready = max(1, int(getattr(config, "VERTICAL_READY_SEGMENTS", 2)))
-        ok = await self._start_run(sid, start_index, min_ready=min_ready)
+        # Spawn only; the readiness gate runs in ensure() outside the lock (a
+        # short clip's final segment is finalized by the run monitor, which needs
+        # the lock this call holds — waiting here would deadlock).
+        ok = await self._start_run(sid, start_index, min_ready=0)
         if not ok:
-            await self._destroy(sid, reason="initial launch failed (spawn/readiness)")
+            await self._destroy(sid, reason="initial launch failed (spawn)")
             return False
         self.touch(sid)
         return True
@@ -716,11 +750,15 @@ class _VerticalSessionManager:
         # encode is a FIFO-backend (Linux) property.
         pace = ("-readrate", f"{_TCP_RELAY_READRATE:g}") if backend.kind == "tcp" else self._pace_args()
         seek_s = start_index * SEG_DURATION
+        # Bound the subs to the remaining center length so they exit at center EOF
+        # (`-shortest` alone is a no-op on the single-output composite — it would
+        # otherwise hang, and the final segment would never finalize).
+        remaining = max(0.1, self._center_dur.get(sid, 0.0) - seek_s)
         composite_cmd = build_composite_cmd(
             ffmpeg_bin, left_id, center_id, right_id, seek_s, sub_out_v,
             left_seek=self._phase(start_index, left_dur),
             right_seek=self._phase(start_index, right_dur),
-            pace_args=pace,
+            pace_args=pace, duration=remaining,
         )
         vdebug(logger, f"Vertical FFmpeg composite sub cmd: {redact_apikey(' '.join(composite_cmd))}")
         self._log_session(sid, f"composite cmd: {redact_apikey(' '.join(composite_cmd))}")
@@ -743,7 +781,7 @@ class _VerticalSessionManager:
             await self._teardown_run(sid, reason="master audio-endpoint attach timeout")
             return False
 
-        audio_cmd = build_audio_cmd(ffmpeg_bin, center_id, seek_s, sub_out_a, pace_args=pace)
+        audio_cmd = build_audio_cmd(ffmpeg_bin, center_id, seek_s, sub_out_a, pace_args=pace, duration=remaining)
         vdebug(logger, f"Vertical FFmpeg audio sub cmd: {redact_apikey(' '.join(audio_cmd))}")
         self._log_session(sid, f"audio cmd: {redact_apikey(' '.join(audio_cmd))}")
         try:
@@ -889,17 +927,23 @@ class _VerticalSessionManager:
         stall_deadline = time.time() + _READY_STALL_SECS
         have = 0
         while True:
+            # Count segments BEFORE checking the master's exit: a short clip's
+            # master exits (terminated at center EOF) right after finalizing its
+            # last segment, so "enough segments" must win over "master exited".
+            now_have = sum(1 for i in self._produced_indices(sid) if i >= start_index)
+            if now_have >= min_segments:
+                logger.info(f"Vertical FFmpeg: session {sid!r} ready ({now_have} segment(s) from seg {start_index})")
+                return True
             if proc.returncode is not None:
-                logger.error(f"Vertical FFmpeg: session {sid!r} master exited prematurely (rc={proc.returncode})")
+                logger.error(
+                    f"Vertical FFmpeg: session {sid!r} master exited (rc={proc.returncode}) with only "
+                    f"{now_have}/{min_segments} segment(s)"
+                )
                 buf = self._stderr.get(sid, [])
                 errs = [l for l in buf if not l.startswith(("ffmpeg version", "  built", "  config", "  lib"))]
                 if errs:
                     logger.error("Vertical FFmpeg stderr (errors):\n" + "\n".join(errs[-30:]))
                 return False
-            now_have = sum(1 for i in self._produced_indices(sid) if i >= start_index)
-            if now_have >= min_segments:
-                logger.info(f"Vertical FFmpeg: session {sid!r} ready ({now_have} segment(s) from seg {start_index})")
-                return True
             if now_have > have:
                 have = now_have
                 stall_deadline = time.time() + _READY_STALL_SECS  # progress → extend

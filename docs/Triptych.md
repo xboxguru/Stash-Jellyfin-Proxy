@@ -244,9 +244,13 @@ Each lane **scales to cover** the 608×1080 cell (`force_original_aspect_ratio=i
 then centre-crops to exactly **608×1080** — a plain `scale=-2:1080` would leave a source
 narrower than 608/1080 (≈0.563, i.e. taller than 9:16 — e.g. a 720×1282 clip → 606 px)
 narrower than the crop, and `crop=608:1080` then aborts the whole composite ("Invalid too
-big size for width 608"). `hstack` → 1824×1080; `pad` centers to exactly 1920×1080. Sides loop infinitely; `-shortest` ends the composite when the finite
-center stream ends. Audio is the center clip only, normalized with the same
-`aresample/aformat` chain as Live TV (`-map 0:a:0?` so a silent center doesn't fail).
+big size for width 608"). `hstack` → 1824×1080; `pad` centers to exactly 1920×1080. Sides
+loop infinitely; the composite is bounded by an explicit `-t (center_duration − seek)` so it
+exits at center EOF — `-shortest` alone is a **no-op** here (the filtergraph has a single
+output stream), so without `-t` the composite hangs on the ended center input, freezing a
+couple frames short of the final segment (which then never finalizes). Audio is the center
+clip only, normalized with the same `aresample/aformat` chain as Live TV (`-map 0:a:0?` so a
+silent center doesn't fail), bounded by the same `-t`.
 
 `[pace]` is the per-input pacing token. The **VOD compositor runs full-speed** (no `-re`,
 optionally `-readrate VERTICAL_READRATE`) — the client reads static files off disk and the
@@ -469,14 +473,17 @@ fix 4 is in the shared builder in `api/vertical_engine.py` and benefits VOD too.
    command (today `VERTICAL_HWACCEL` only wires into the VOD master — the doc's "future
    addition" is now load-bearing). All channel types benefit. Config: reuse the existing
    probe/fallback semantics; log chosen vs effective encoder per channel launch.
-2. **Rounds never self-terminate — `-shortest` is a no-op on the composite.**
+2. **Rounds never self-terminate — `-shortest` is a no-op on the composite. ✅ FIXED (VOD).**
    `-shortest` compares *output* streams and the composite has exactly one, so at center
    EOF `hstack` stalls waiting on the ended input: round #1 froze at frame 3524
-   (~117.7 s ≈ center end) and hung ~85 s until externally killed (rc=1). **Fix:** bound
-   every composite (and audio sub) with an explicit `-t (center_duration − seek)` computed
-   from Stash metadata. This is also a prerequisite for rework B's deterministic EPG —
-   block durations become exact. Apply in the shared builders so VOD relaunches
-   (`ensure_segment`) get the same bound (`-t` = remaining duration from the seek point).
+   (~117.7 s ≈ center end) and hung ~85 s until externally killed (rc=1). On the VOD path
+   this froze a couple frames short of the final segment, so a short clip's readiness gate
+   never completed (seg1 never finalized). **Fix (shipped for VOD):** `build_composite_cmd`
+   / `build_audio_cmd` take a `duration` arg emitting `-t`, and `_start_run` passes
+   `center_duration − seek` (relaunches get the remaining-from-seek bound too). **Still TODO
+   for the Vertical TV channel** — `_feed_one_vertical_round` must thread the center duration
+   into the builders (it omits `duration` today, so the round still relies on the no-op
+   `-shortest`); this is also a prerequisite for rework B's deterministic EPG.
 3. **A dying sub kills the master, and the feeder never notices — the channel wedges
    permanently.** When round #1's composite died, the TCP relay's sub-forward ended
    (`WinError 64`), both master connections closed, and the master exited. Every later

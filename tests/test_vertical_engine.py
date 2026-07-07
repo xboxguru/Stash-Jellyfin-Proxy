@@ -410,6 +410,19 @@ class TestCommandPacing:
         assert "-ss 2.000" in joined    # left side phase
         assert "-ss 3.000" in joined    # right side phase
 
+    def test_duration_bounds_subs_with_t(self):
+        # -t must bound both subs (the composite's -shortest is a no-op on a
+        # single-output filtergraph, so without -t it hangs at center EOF).
+        vcmd = build_composite_cmd("ff", "1", "2", "3", 0.0, "out", duration=7.5)
+        acmd = build_audio_cmd("ff", "2", 0.0, "out", duration=7.5)
+        assert "-t" in vcmd and vcmd[vcmd.index("-t") + 1] == "7.500"
+        assert "-t" in acmd and acmd[acmd.index("-t") + 1] == "7.500"
+
+    def test_channel_default_has_no_t_bound(self):
+        # Vertical TV channel omits duration → command unchanged (no -t).
+        assert "-t" not in build_composite_cmd("ff", "1", "2", "3", 0.0, "out")
+        assert "-t" not in build_audio_cmd("ff", "2", 0.0, "out")
+
     def test_lanes_cover_crop_not_plain_scale(self):
         # Lanes must scale-to-cover then crop, so an ultra-tall source (720×1282,
         # 1080×2340) or a near-square 1.3:1 lane never produces a frame narrower
