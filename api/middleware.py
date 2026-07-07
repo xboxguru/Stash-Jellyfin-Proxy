@@ -114,6 +114,7 @@ class AuthenticationMiddleware:
             "/images/" in path_lower
             or "/videos/" in path_lower
             or (path_lower.startswith("/livetv/channels/") and ("stream" in path_lower or "/seg/" in path_lower or "tunarr-relay" in path_lower))
+            or (path_lower.startswith("/vertical/") and ("master.m3u8" in path_lower or "/seg/" in path_lower))
         )
         if not is_media:
             return False

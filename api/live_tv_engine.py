@@ -14,7 +14,7 @@ except ImportError:
 
 import config
 from api.live_tv_data import _next_scheduled_segment_after, _upcoming_scheduled_segments
-from core.vertical import vdebug
+from core.vertical import redact_apikey, vdebug
 
 logger = logging.getLogger(__name__)
 
@@ -558,10 +558,10 @@ class _FFmpegChannelManager:
         def _log_cmd(label: str, cmd: list) -> None:
             # Full command goes to the app log (VERTICAL_DEBUG promotes it to INFO)
             # and to the per-channel FFmpeg session log next to the stderr it produces.
-            vdebug(logger, f"Vertical TV: {label} cmd for {cid!r}: {' '.join(cmd)}")
+            vdebug(logger, f"Vertical TV: {label} cmd for {cid!r}: {redact_apikey(' '.join(cmd))}")
             if fh is not None:
                 try:
-                    fh.write(f"[round center={center_id}] {label} cmd: {' '.join(cmd)}\n")
+                    fh.write(f"[round center={center_id}] {label} cmd: {redact_apikey(' '.join(cmd))}\n")
                     fh.flush()
                 except Exception:
                     pass
@@ -739,8 +739,8 @@ class _FFmpegChannelManager:
             sub_out_a,
         ]
 
-        logger.debug(f"LiveTV feeder: video sub cmd for scene {scene_id}: {' '.join(video_cmd)}")
-        logger.debug(f"LiveTV feeder: audio sub cmd for scene {scene_id}: {' '.join(audio_cmd)}")
+        logger.debug(f"LiveTV feeder: video sub cmd for scene {scene_id}: {redact_apikey(' '.join(video_cmd))}")
+        logger.debug(f"LiveTV feeder: audio sub cmd for scene {scene_id}: {redact_apikey(' '.join(audio_cmd))}")
 
         # ── 1. Spawn the video sub first ──
         # By this point in _launch we've already waited for the master to

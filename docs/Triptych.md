@@ -182,6 +182,22 @@ the detail view keeps the compositor source.
    every manifest/segment request within it hits the same session; a fresh play re-rolls
    the nonce (and therefore the sides).
 
+**Auth carve-out (resolved):** the manifest/segment fetch is issued by the player's HLS
+stack directly against the `TranscodingUrl`, headerless — it carries no `api_key` query
+param and no `X-Emby-Token`/`Authorization` header, so it can only ever pass the
+IP-based auth path in `api/middleware.py::_is_image_or_video_authorized`, never the
+strict `PROXY_API_KEY` check. That method originally recognized `/images/`, `/videos/`,
+and the Live TV `/livetv/channels/...stream|seg|tunarr-relay` paths as media eligible for
+IP auth, but not `/vertical/`, so the request 401'd even though the compositor itself was
+healthy (session pre-warmed, segments on disk, FFmpeg procs running) — Live TV worked
+only because its manifest lives under the already-allowlisted `/livetv/channels/` prefix.
+The fix mirrors that branch: `_is_image_or_video_authorized` now also matches
+`/vertical/{session}/master.m3u8` and `/vertical/{session}/seg/{name}` specifically —
+**not** a blanket `/vertical/` prefix match, since `/seek` and `/stop` are mutating
+session-control endpoints that must keep requiring the full API-key check. See
+`tests/test_middleware.py` for the authorized-IP-passes / unknown-IP-still-401s cases
+for both the manifest and segment paths, and the seek/stop non-carve-out.
+
 ### Pipe topology and the video/audio split
 
 ```
@@ -271,6 +287,11 @@ to jump ahead of the live encode edge.
 Per-session FFmpeg logs rotate at `{LOG_DIR}/vertical_ffmpeg/{session}.log` (same 10 MB
 rotation as Live TV); each session log starts with the full master/composite/audio
 commands, then carries all three processes' stderr (`[composite]` / `[audio]` prefixes).
+The composite/audio sub commands carry the Stash `apikey` in their HTTP input URL
+(`/scene/{id}/stream?apikey=...`); `core.vertical.redact_apikey()` masks it before any
+command line is logged (proxy log and per-session file alike), and the Live TV feeder's
+own scene-sub command logging uses the same helper — so a shared log file is safe to hand
+to someone else for debugging without leaking the Stash key.
 The engine logs session lifecycle at INFO (center + sides + encoder + backend + seek;
 teardown **with reason** on every path — idle, explicit stop, seek relaunch, launch
 failure, shutdown), the readiness gate, seek relaunches (old→new position), concurrency

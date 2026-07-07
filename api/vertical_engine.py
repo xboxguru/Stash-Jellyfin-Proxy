@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 
 import config
 from core.hw_encoder import EncoderConfig, resolve_h264_encoder
-from core.vertical import vdebug
+from core.vertical import redact_apikey, vdebug
 from core.vertical_selection import select_side_clips
 # Reuse the Live TV pipe backends + platform probes verbatim — the byte-forwarding
 # plumbing is identical; only the FFmpeg graph feeding it differs.  The stderr
@@ -365,7 +365,7 @@ class _VerticalSessionManager:
             f"sides={sides} backend={backend.kind} encoder={enc.codec} "
             f"(mode={getattr(config, 'VERTICAL_HWACCEL', 'auto')!r}) seek={seek:.1f}s"
         )
-        vdebug(logger, f"Vertical FFmpeg master cmd: {' '.join(master_cmd)}")
+        vdebug(logger, f"Vertical FFmpeg master cmd: {redact_apikey(' '.join(master_cmd))}")
 
         fh = self._open_stderr_file(sid)
         self._stderr_fh[sid] = fh
@@ -383,7 +383,7 @@ class _VerticalSessionManager:
             f"\n===== FFmpeg session start {ts} | session={sid} center={center_id} "
             f"sides={sides} backend={backend.kind} encoder={enc.codec} seek={seek:.1f}s ====="
         )
-        _log_to_session_file(f"master cmd: {' '.join(master_cmd)}")
+        _log_to_session_file(f"master cmd: {redact_apikey(' '.join(master_cmd))}")
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -417,8 +417,8 @@ class _VerticalSessionManager:
         composite_cmd = self._build_composite_cmd(
             ffmpeg_bin, left_id, center_id, right_id, seek, sub_out_v
         )
-        vdebug(logger, f"Vertical FFmpeg composite sub cmd: {' '.join(composite_cmd)}")
-        _log_to_session_file(f"composite cmd: {' '.join(composite_cmd)}")
+        vdebug(logger, f"Vertical FFmpeg composite sub cmd: {redact_apikey(' '.join(composite_cmd))}")
+        _log_to_session_file(f"composite cmd: {redact_apikey(' '.join(composite_cmd))}")
         try:
             sub_v = await asyncio.create_subprocess_exec(
                 *composite_cmd,
@@ -445,8 +445,8 @@ class _VerticalSessionManager:
 
         # ── Center-audio sub — center clip only, normalized PCM out ──
         audio_cmd = self._build_audio_cmd(ffmpeg_bin, center_id, seek, sub_out_a)
-        vdebug(logger, f"Vertical FFmpeg audio sub cmd: {' '.join(audio_cmd)}")
-        _log_to_session_file(f"audio cmd: {' '.join(audio_cmd)}")
+        vdebug(logger, f"Vertical FFmpeg audio sub cmd: {redact_apikey(' '.join(audio_cmd))}")
+        _log_to_session_file(f"audio cmd: {redact_apikey(' '.join(audio_cmd))}")
         try:
             sub_a = await asyncio.create_subprocess_exec(
                 *audio_cmd,

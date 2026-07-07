@@ -10,8 +10,22 @@ Also home to `vdebug()`, the feature's verbose-diagnostics logger used by the
 selection algorithm, the VOD compositor, and the Vertical TV channel feeder.
 """
 import logging
+import re
 
 import config
+
+_APIKEY_RE = re.compile(r"(apikey=)[^&\s\"']+", re.IGNORECASE)
+
+
+def redact_apikey(text: str) -> str:
+    """Masks a Stash ``apikey=...`` query param, e.g. in a logged FFmpeg command.
+
+    FFmpeg command lines carry the Stash apikey verbatim in HTTP input URLs
+    (``/scene/{id}/stream?apikey=...``); both the VOD compositor and the Live TV
+    feeder log full command lines for diagnostics, so the key must be scrubbed
+    before it hits the log file.
+    """
+    return _APIKEY_RE.sub(r"\1***REDACTED***", text)
 
 
 def vdebug(logger: logging.Logger, msg: str) -> None:
