@@ -21,6 +21,14 @@ logger = logging.getLogger(__name__)
 _IS_WINDOWS = platform.system().lower().startswith("win")
 _HAS_MKFIFO = hasattr(os, "mkfifo")
 
+# TCP-relay forwarding buffer.  Raw 1080p30 video is ~746 Mbps and a single
+# yuv420p frame is ~3 MB; asyncio's default 64 KB StreamReader limit / read size
+# forwards it in ~48 tiny chunks, and that per-chunk overhead throttles the relay
+# (composite ran at ~0.14× realtime → the readiness gate timed out).  A 4 MB
+# buffer lets a whole frame flow per iteration.  Only the TCP (Windows) backend
+# uses this; the FIFO backend forwards in-kernel.
+_RELAY_BUFSIZE = 4 * 1024 * 1024
+
 
 async def _iter_stderr_lines(stream: asyncio.StreamReader):
     """Yield FFmpeg stderr lines, splitting on \\n OR \\r.
@@ -1181,7 +1189,7 @@ class _TcpRelayPipeBackend(_PipeBackend):
         total = 0
         try:
             while state["running"]:
-                data = await reader.read(65536)
+                data = await reader.read(_RELAY_BUFSIZE)
                 if not data:
                     break
                 total += len(data)
@@ -1200,11 +1208,11 @@ class _TcpRelayPipeBackend(_PipeBackend):
         # Bind to 127.0.0.1:0 so the kernel picks a free port.
         self.v_server = await asyncio.start_server(
             lambda r, w: self._handler(self._v_state, r, w),
-            host="127.0.0.1", port=0, family=socket.AF_INET,
+            host="127.0.0.1", port=0, family=socket.AF_INET, limit=_RELAY_BUFSIZE,
         )
         self.a_server = await asyncio.start_server(
             lambda r, w: self._handler(self._a_state, r, w),
-            host="127.0.0.1", port=0, family=socket.AF_INET,
+            host="127.0.0.1", port=0, family=socket.AF_INET, limit=_RELAY_BUFSIZE,
         )
         self.v_port = self.v_server.sockets[0].getsockname()[1]
         self.a_port = self.a_server.sockets[0].getsockname()[1]

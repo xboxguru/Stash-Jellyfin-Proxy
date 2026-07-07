@@ -83,6 +83,10 @@ _FORWARD_WAIT_SEGMENTS = 24
 # How long a segment fetch waits for the encoder to produce the segment before
 # giving up (the client simply retries).
 _SEG_WAIT_TIMEOUT = 15.0
+# Readiness gate: fail only if no new segment appears within this window (a slow
+# backend can take tens of seconds per segment — see _await_ready).  Each new
+# segment resets it, so a slow-but-progressing encode is never spuriously failed.
+_READY_STALL_SECS = 45.0
 # Refuse a launch when free space on the HLS temp volume is below this floor: a
 # session renders the full center clip (~1–2 GB per 30 min at 1080p30).
 _DISK_FREE_FLOOR_BYTES = 2 * 1024 * 1024 * 1024
@@ -873,7 +877,18 @@ class _VerticalSessionManager:
 
     async def _await_ready(self, sid: str, proc: asyncio.subprocess.Process,
                            start_index: int, min_segments: int) -> bool:
-        for _ in range(120):
+        """Wait for the launch to produce `min_segments` finalized segments.
+
+        Progress-aware rather than a fixed timeout: fail fast if the master dies,
+        but otherwise keep waiting as long as segments keep appearing — a slow
+        backend (e.g. the Windows TCP relay throttling raw video) can take tens of
+        seconds per segment, and a hard cap would spuriously fail a working encode
+        and drop it to single-video.  Only a genuine *stall* (no new segment for
+        `_READY_STALL_SECS`, with none yet produced) counts as failure.
+        """
+        stall_deadline = time.time() + _READY_STALL_SECS
+        have = 0
+        while True:
             if proc.returncode is not None:
                 logger.error(f"Vertical FFmpeg: session {sid!r} master exited prematurely (rc={proc.returncode})")
                 buf = self._stderr.get(sid, [])
@@ -881,13 +896,20 @@ class _VerticalSessionManager:
                 if errs:
                     logger.error("Vertical FFmpeg stderr (errors):\n" + "\n".join(errs[-30:]))
                 return False
-            have = sum(1 for i in self._produced_indices(sid) if i >= start_index)
-            if have >= min_segments:
-                logger.info(f"Vertical FFmpeg: session {sid!r} ready ({have} segment(s) from seg {start_index})")
+            now_have = sum(1 for i in self._produced_indices(sid) if i >= start_index)
+            if now_have >= min_segments:
+                logger.info(f"Vertical FFmpeg: session {sid!r} ready ({now_have} segment(s) from seg {start_index})")
                 return True
+            if now_have > have:
+                have = now_have
+                stall_deadline = time.time() + _READY_STALL_SECS  # progress → extend
+            elif time.time() > stall_deadline:
+                logger.error(
+                    f"Vertical FFmpeg: session {sid!r} stalled — no new segment in "
+                    f"{_READY_STALL_SECS:.0f}s ({have}/{min_segments} from seg {start_index})"
+                )
+                return False
             await asyncio.sleep(0.5)
-        logger.error(f"Vertical FFmpeg: session {sid!r} timed out waiting for segments")
-        return False
 
     async def _drain_sub_stderr(self, sub: asyncio.subprocess.Process, sid: str, label: str) -> None:
         buf = self._stderr.get(sid)
