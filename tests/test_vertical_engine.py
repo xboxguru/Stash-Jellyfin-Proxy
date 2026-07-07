@@ -410,6 +410,17 @@ class TestCommandPacing:
         assert "-ss 2.000" in joined    # left side phase
         assert "-ss 3.000" in joined    # right side phase
 
+    def test_lanes_cover_crop_not_plain_scale(self):
+        # Lanes must scale-to-cover then crop, so an ultra-tall source (720×1282,
+        # 1080×2340) or a near-square 1.3:1 lane never produces a frame narrower
+        # than the 608 crop — which aborted the whole composite ("too big width").
+        fc = build_composite_cmd("ff", "1", "2", "3", 0.0, "out")[
+            build_composite_cmd("ff", "1", "2", "3", 0.0, "out").index("-filter_complex") + 1]
+        # Each of the three lanes uses cover-crop; none uses the old plain scale.
+        assert fc.count("scale=608:1080:force_original_aspect_ratio=increase") == 3
+        assert fc.count("crop=608:1080") == 3
+        assert "scale=-2:1080" not in fc
+
 
 # ── session-id validation + vdebug gating (unchanged) ───────────────────────────
 

@@ -88,15 +88,12 @@ _SEG_WAIT_TIMEOUT = 15.0
 _DISK_FREE_FLOOR_BYTES = 2 * 1024 * 1024 * 1024
 
 # Read-rate cap for the vertical subs on the Windows TCP-relay backend only.  The
+# Read-rate cap for the vertical subs on the Windows TCP-relay backend.  The
 # synthetic VOD playlist assumes the encoder outruns the client (so read-ahead
-# cache-hits), which wants a full-speed encode — but the single-threaded asyncio
-# relay can't carry full-speed raw 1080p30: a high-rate video flood in the relay's
-# tight forward loop starves the event loop's accept of the master's audio-endpoint
-# connection, so the run aborts with "master never attached to audio endpoint".
-# Empirically 1.5× is about the ceiling here (3× fails every launch); this is a
-# Windows-dev-backend limit only — the FIFO backend (Linux) runs full-speed
-# (VERTICAL_READRATE) with no relay in the path.
-_TCP_RELAY_READRATE = 1.5
+# cache-hits), which wants a fast encode; full-speed raw 1080p30 is too much for
+# the single-threaded relay, so cap it a few× above realtime.  The FIFO backend
+# (Linux) has no relay and runs full-speed (VERTICAL_READRATE).
+_TCP_RELAY_READRATE = 3.0
 
 _SEG_FILE_RE = re.compile(r"seg(\d+)\.ts$")
 
@@ -157,10 +154,17 @@ def build_composite_cmd(ffmpeg_bin: str, left_id: str, center_id: str,
         *pace, *_in_seek(seek), "-i", center_url,
         # input 2 — right side (loops), phased to the timeline
         *pace, "-stream_loop", "-1", *_in_seek(right_seek), "-i", right_url,
+        # Each lane: scale to COVER the 608×1080 cell (force_original_aspect_ratio=
+        # increase), then centre-crop to exactly 608×1080.  A plain `scale=-2:1080`
+        # leaves the width driven by aspect, so a source narrower than 608/1080
+        # (≈0.563, i.e. taller than 9:16 — e.g. a 720×1282 clip → 606 px wide)
+        # produces a frame narrower than the crop, and `crop=608:1080` aborts the
+        # whole composite ("Invalid too big size for width 608").  Cover-then-crop
+        # guarantees the scaled frame is always ≥ the crop in both dimensions.
         "-filter_complex",
-        "[0:v]scale=-2:1080,crop=608:1080,setsar=1[l];"
-        "[1:v]scale=-2:1080,crop=608:1080,setsar=1[c];"
-        "[2:v]scale=-2:1080,crop=608:1080,setsar=1[r];"
+        "[0:v]scale=608:1080:force_original_aspect_ratio=increase:force_divisible_by=2,crop=608:1080,setsar=1[l];"
+        "[1:v]scale=608:1080:force_original_aspect_ratio=increase:force_divisible_by=2,crop=608:1080,setsar=1[c];"
+        "[2:v]scale=608:1080:force_original_aspect_ratio=increase:force_divisible_by=2,crop=608:1080,setsar=1[r];"
         "[l][c][r]hstack=inputs=3,pad=1920:1080:(ow-iw)/2:0:black,fps=30,format=yuv420p[v]",
         "-map", "[v]", "-shortest",
         "-pix_fmt", "yuv420p", "-f", "rawvideo", sub_out_v,

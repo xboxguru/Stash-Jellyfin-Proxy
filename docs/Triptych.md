@@ -233,15 +233,18 @@ which needs the composite sub already writing), then the audio sub connects.
 [pace]              [-ss S]      -i <center>  # the clock; center -ss = seek position
 [pace] -stream_loop -1 [-ss Rs] -i <right>   # side, loops forever; -ss phases it
 -filter_complex
-  [0:v]scale=-2:1080,crop=608:1080,setsar=1[l];
-  [1:v]scale=-2:1080,crop=608:1080,setsar=1[c];
-  [2:v]scale=-2:1080,crop=608:1080,setsar=1[r];
+  [0:v]scale=608:1080:force_original_aspect_ratio=increase:force_divisible_by=2,crop=608:1080,setsar=1[l];
+  [1:v]scale=608:1080:force_original_aspect_ratio=increase:force_divisible_by=2,crop=608:1080,setsar=1[c];
+  [2:v]scale=608:1080:force_original_aspect_ratio=increase:force_divisible_by=2,crop=608:1080,setsar=1[r];
   [l][c][r]hstack=inputs=3,pad=1920:1080:(ow-iw)/2:0:black,fps=30,format=yuv420p[v]
 -map "[v]" -shortest -f rawvideo <v pipe>
 ```
 
-Each 1080-tall lane is cropped to **608×1080**; `hstack` → 1824×1080; `pad` centers to
-exactly 1920×1080. Sides loop infinitely; `-shortest` ends the composite when the finite
+Each lane **scales to cover** the 608×1080 cell (`force_original_aspect_ratio=increase`)
+then centre-crops to exactly **608×1080** — a plain `scale=-2:1080` would leave a source
+narrower than 608/1080 (≈0.563, i.e. taller than 9:16 — e.g. a 720×1282 clip → 606 px)
+narrower than the crop, and `crop=608:1080` then aborts the whole composite ("Invalid too
+big size for width 608"). `hstack` → 1824×1080; `pad` centers to exactly 1920×1080. Sides loop infinitely; `-shortest` ends the composite when the finite
 center stream ends. Audio is the center clip only, normalized with the same
 `aresample/aformat` chain as Live TV (`-map 0:a:0?` so a silent center doesn't fail).
 
@@ -488,14 +491,17 @@ fix 4 is in the shared builder in `api/vertical_engine.py` and benefits VOD too.
    sub exited because the center has no audio stream" from "audio sub exited because the
    pipe endpoint aborted" before spawning the silence filler (rounds #2+ misdiagnosed
    this every time).
-4. **Ultra-tall verticals crash the composite lane — VOD and channel alike.** Scene 905:
-   `[Parsed_crop_7] Invalid too big or non positive size for width '608'`. The lane chain
-   `scale=-2:1080,crop=608:1080` produces width < 608 for any source taller than
-   1080/608 ≈ 1.776:1 (e.g. 1080×2340 → 498×1080), which the vertical predicate
-   (aspect ≥ 1.3) happily admits. **Fix:** cover-crop in `build_composite_cmd`:
-   `scale=608:1080:force_original_aspect_ratio=increase,crop=608:1080,setsar=1` — scale to
-   cover the lane, then center-crop. One change, both consumers fixed. Add a unit test
-   with a 1080×2340 lane and a near-square 1.3:1 lane.
+4. **Ultra-tall verticals crash the composite lane — VOD and channel alike. ✅ FIXED.**
+   Scene 905 / scene 25527 (720×1282): `[Parsed_crop] Invalid too big or non positive size
+   for width '608'`. The lane chain `scale=-2:1080,crop=608:1080` produced width < 608 for
+   any source taller than 1080/608 ≈ 1.776:1 (e.g. 1080×2340 → 498×1080), which the vertical
+   predicate (aspect ≥ 1.3) happily admits; the composite aborted before its first frame, so
+   the master never finished probing input #0 and never attached to the audio endpoint —
+   surfacing as a "master never attached to audio endpoint" timeout + retry loop at ~0 % CPU
+   (not a relay/read-rate issue, as first suspected). **Fix (shipped):** cover-crop in
+   `build_composite_cmd` — `scale=608:1080:force_original_aspect_ratio=increase:force_divisible_by=2,crop=608:1080,setsar=1`
+   — scale to cover the lane, then centre-crop. One change, both consumers fixed. Covered by
+   a unit test with an ultra-tall (720×1282 / 1080×2340) lane and a near-square 1.3:1 lane.
 
 **Invariants:** channel `pace_args` stays `("-re",)` (live channels must not outrun wall
 clock — only the VOD manager passes readrate tokens); the video/audio sub split is
