@@ -175,6 +175,18 @@
                 </div>
             </div>
 
+            <div class="logo-modal-section">
+                <div class="logo-modal-label">Composite Playback</div>
+                <label class="picker-filter-check" style="margin-bottom:12px;">
+                    <input type="checkbox" id="add-ch-triptych" onchange="updateAddChTriptychUI()">
+                    Enable Triptych (center + 2 sides composite)
+                </label>
+                <div id="add-ch-triptych-salt-section" style="display:none;">
+                    <input type="text" id="add-ch-triptych-salt" class="form-input" placeholder="Salt (optional, for shuffling sides)" style="width:100%;">
+                    <div class="form-hint" style="margin-top:4px;">Leave empty for default, or enter any text to change side pairings.</div>
+                </div>
+            </div>
+
             <div id="add-ch-status" style="font-size:13px; min-height:16px;"></div>
 
             <div class="add-ch-footer">

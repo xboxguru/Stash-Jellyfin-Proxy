@@ -1382,6 +1382,9 @@
             document.getElementById('add-ch-source-pills').innerHTML = '';
             document.getElementById('add-ch-name').value = '';
             document.getElementById('add-ch-number').value = '';
+            document.getElementById('add-ch-triptych').checked = false;
+            document.getElementById('add-ch-triptych-salt').value = '';
+            updateAddChTriptychUI();
             document.getElementById('add-ch-status').textContent = '';
             document.getElementById('add-ch-overlay').style.display = 'flex';
             _loadAddChSources();
@@ -1456,19 +1459,28 @@
             ).join('');
         }
 
+        function updateAddChTriptychUI() {
+            const triptychCheckbox = document.getElementById('add-ch-triptych');
+            const saltSection = document.getElementById('add-ch-triptych-salt-section');
+            if (saltSection) {
+                saltSection.style.display = triptychCheckbox.checked ? 'block' : 'none';
+            }
+        }
+
         async function saveNewChannel() {
             const statusEl = document.getElementById('add-ch-status');
             const name   = document.getElementById('add-ch-name').value.trim();
             const number = document.getElementById('add-ch-number').value.trim();
+            const isTriptych = document.getElementById('add-ch-triptych').checked;
             if (!name) { statusEl.textContent = 'Channel name is required.'; statusEl.style.color = 'var(--error)'; return; }
-            if (!_chAddSources.length) { statusEl.textContent = 'Select at least one source.'; statusEl.style.color = 'var(--error)'; return; }
+            if (!isTriptych && !_chAddSources.length) { statusEl.textContent = 'Select at least one source (or enable Triptych).'; statusEl.style.color = 'var(--error)'; return; }
             statusEl.textContent = 'Creating…';
             statusEl.style.color = 'var(--text-secondary)';
             try {
                 const res = await fetch('/api/livetv/channels-config', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name, number: number !== '' ? parseInt(number) : null, stash_type: _chAddType, source_ids: _chAddSources.map(s => s.id) })
+                    body: JSON.stringify({ name, number: number !== '' ? parseInt(number) : null, stash_type: _chAddType, source_ids: _chAddSources.map(s => s.id), triptych: isTriptych, triptych_salt: document.getElementById('add-ch-triptych-salt').value.trim() })
                 });
                 const data = await res.json().catch(() => ({}));
                 if (res.ok) {
