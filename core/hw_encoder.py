@@ -60,7 +60,6 @@ CPU = EncoderConfig(
 
 _NVENC = EncoderConfig(
     codec="h264_nvenc",  # ingests system frames directly — no upload filter needed
-    input_args=("-init_hw_device", "cuda=cu:0"),
     output_args=("-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "23"),
 )
 
