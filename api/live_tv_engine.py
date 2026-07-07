@@ -1093,6 +1093,9 @@ class _FifoPipeBackend(_PipeBackend):
         self.wfd_a: int | None = None
 
     async def start(self) -> None:
+        for path in (self.fifo_v, self.fifo_a):
+            try: os.unlink(path)
+            except OSError: pass
         os.mkfifo(self.fifo_v, 0o600)
         os.mkfifo(self.fifo_a, 0o600)
         # O_RDWR avoids the "blocks until reader" semantics of O_WRONLY —
