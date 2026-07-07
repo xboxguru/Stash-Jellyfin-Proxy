@@ -556,33 +556,10 @@
                         <div class="form-hint">First channel number assigned to Stash channels</div>
                     </div>
                 </div>
-                <div class="toggle-row" style="margin-top: 16px; margin-bottom: 12px;">
-                    <label class="toggle-switch">
-                        <input type="checkbox" name="ENABLE_SHORTS_CHANNEL">
-                        <span class="toggle-slider"></span>
-                    </label>
-                    <div>
-                        <div class="toggle-label">Enable Shorts Channel</div>
-                        <div class="toggle-hint">Dedicated channel for clips under the configured length</div>
-                    </div>
-                </div>
-                <div class="form-group" style="max-width: 220px;">
+                <div class="form-group" style="max-width: 220px; margin-top: 16px;">
                     <label class="form-label">Shorts Max Length (minutes)</label>
                     <input type="number" class="form-input" name="SHORTS_MAX_MINUTES" placeholder="5">
-                </div>
-                <div class="toggle-row" style="margin-top: 16px; margin-bottom: 12px;">
-                    <label class="toggle-switch">
-                        <input type="checkbox" name="ENABLE_VERTICAL_TV_CHANNEL">
-                        <span class="toggle-slider"></span>
-                    </label>
-                    <div>
-                        <div class="toggle-label">Enable Vertical TV Channel</div>
-                        <div class="toggle-hint">Always-on channel that runs the Vertical Multi-View compositor continuously, cycling fresh center/side clips. Requires Vertical Multi-View enabled above.</div>
-                    </div>
-                </div>
-                <div class="form-group" style="max-width: 220px;">
-                    <label class="form-label">Vertical TV Channel Number</label>
-                    <input type="number" class="form-input" name="VERTICAL_TV_CHANNEL_NUMBER" placeholder="9000">
+                    <div class="form-hint">Default max clip length for channels with "Short clips only" enabled. Each channel can override this in its editor.</div>
                 </div>
                 <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);">
                     <button type="button" id="btn-rebuild-schedule" class="btn" style="background: var(--warning, #b45309); color: #fff;">Regenerate Schedule</button>

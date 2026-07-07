@@ -553,19 +553,10 @@ Triptych channels are persisted in `channels.json` with two fields:
 - **`triptych_salt: ""`** (string, default `""`) — free-text seed modifier; changing it 
   re-rolls all sides deterministically without rebuilding the lineup.
 
-The migration from the legacy config flag `ENABLE_VERTICAL_TV_CHANNEL` is automatic and one-shot:
-on startup, if all three flags are true (`ENABLE_STASH_CHANNELS && ENABLE_VERTICAL_TV_CHANNEL &&
-ENABLE_VERTICAL_MULTI`) and no "Vertical TV" channel exists in `channels.json`, create one with:
-- name: "Vertical TV"
-- tvg_id: "vertical_tv"
-- stash_type: "filter"
-- source_ids: [] (empty; all-verticals filter applied below)
-- triptych: true
-- triptych_salt: ""
-- channel number: `VERTICAL_TV_CHANNEL_NUMBER`
-
-The user can freely edit or delete the migrated channel. The old config keys remain for 
-migration support but are deprecated.
+A triptych channel with no `source_ids` pulls from the whole vertical library; setting tags,
+filters, or performers scopes the center pool. An always-on "Vertical TV" experience is just a
+triptych channel with an empty source set — created through the normal Add Channel dialog, with
+no dedicated config flag.
 
 ### Scene filtering for triptych channels
 
@@ -782,8 +773,9 @@ are surfaced in the settings GUI (`templates/components/tab_settings.html`, Libr
 | `VERTICAL_MAX_SESSIONS` | `2` | int | Concurrent VOD composite sessions; over cap → single-video fallback |
 | `VERTICAL_HWACCEL` | `"auto"` | enum | VOD master encoder: `none/nvenc/qsv/vaapi/auto` |
 | `VERTICAL_DEBUG` | `false` | bool | Verbose diagnostics at INFO (selection pools, FFmpeg cmds, session decisions) |
-| `ENABLE_VERTICAL_TV_CHANNEL` | `false` | bool | Enable the always-on Vertical TV Live TV channel |
-| `VERTICAL_TV_CHANNEL_NUMBER` | `9000` | int | Channel number for Vertical TV |
+
+Triptych playback is enabled per channel via the `triptych` flag in `channels.json` (set in the
+Add/Edit Channel dialog), not through a global config key.
 
 `VERTICAL_ASPECT_MIN` and `VERTICAL_READRATE` are the **float** config keys — a float
 bucket in `_coerce_config_value()`, and the settings form's numeric submit path

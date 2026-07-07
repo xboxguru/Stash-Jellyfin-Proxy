@@ -208,37 +208,6 @@ class TestVerticalConfigRoundTrip:
         assert isinstance(config.VERTICAL_IDLE_TIMEOUT, int)
 
 
-class TestVerticalTvChannelConfig:
-    """Vertical TV channel keys (Feature 1 Phase 2) — see docs/Triptych.md."""
-
-    def test_enable_flag_is_bool(self):
-        assert config._coerce_config_value("ENABLE_VERTICAL_TV_CHANNEL", "true") is True
-        assert config._coerce_config_value("ENABLE_VERTICAL_TV_CHANNEL", "false") is False
-
-    def test_channel_number_is_int(self):
-        result = config._coerce_config_value("VERTICAL_TV_CHANNEL_NUMBER", "9000")
-        assert result == 9000
-        assert isinstance(result, int)
-
-    def test_keys_are_env_overridable(self):
-        assert "ENABLE_VERTICAL_TV_CHANNEL" in config._supported_keys
-        assert "VERTICAL_TV_CHANNEL_NUMBER" in config._supported_keys
-
-    def test_round_trip_preserves_values_and_types(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(config, "CONFIG_FILE", str(tmp_path / "vertical_tv.conf"))
-        monkeypatch.setattr(config, "ENABLE_VERTICAL_TV_CHANNEL", True)
-        monkeypatch.setattr(config, "VERTICAL_TV_CHANNEL_NUMBER", 9500)
-        config.save_config()
-
-        config.ENABLE_VERTICAL_TV_CHANNEL = False
-        config.VERTICAL_TV_CHANNEL_NUMBER = 9000
-        config.load_config_file()
-
-        assert config.ENABLE_VERTICAL_TV_CHANNEL is True
-        assert config.VERTICAL_TV_CHANNEL_NUMBER == 9500
-        assert isinstance(config.VERTICAL_TV_CHANNEL_NUMBER, int)
-
-
 class TestGetStashBase:
     def test_strips_single_trailing_slash(self):
         config.STASH_URL = "http://localhost:9999/"

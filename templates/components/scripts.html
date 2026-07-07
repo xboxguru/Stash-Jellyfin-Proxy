@@ -25,8 +25,7 @@
             ENABLE_LIVE_TV: false, ENABLE_TUNARR: false, TUNER_M3U_URL: '', TUNER_XMLTV_URL: '',
             ENABLE_STASH_CHANNELS: false,
             STASH_SCHEDULE_DAYS: 7, STASH_KEEP_DAYS: 2, STASH_CHANNEL_START_NUMBER: 5001,
-            ENABLE_SHORTS_CHANNEL: false, SHORTS_MAX_MINUTES: 5,
-            ENABLE_VERTICAL_TV_CHANNEL: false, VERTICAL_TV_CHANNEL_NUMBER: 9000,
+            SHORTS_MAX_MINUTES: 5,
             FFMPEG_PATH: 'ffmpeg', LIVE_TV_IDLE_TIMEOUT: 300,
             ENABLE_HANDY_SYNC: false, HANDY_SYNC_MODE: 'auto', HANDY_APPLICATION_ID: '',
             HANDY_HSP_BUFFER_MIN_S: 30, HANDY_HSP_BUFFER_MAX_S: 60, HANDY_HSP_POLL_INTERVAL_S: 15,
@@ -787,7 +786,7 @@
                         ? ` data-scene="${prog.scene_id}" data-title="${escapeHTML(prog.title)}" data-start-ts="${prog.start_ts}" data-stop-ts="${prog.stop_ts}" onclick="openSceneModal(this)"`
                         : ch.readonly
                         ? ` data-epg-tvgid="${escapeHTML(ch.tvg_id)}" data-epg-start="${prog.start_ts}" onclick="openEpgModal(this)"`
-                        : (ch.stash_type === 'shorts')
+                        : (ch.stash_type === 'shorts' || ch.shorts)
                         ? ` data-shorts-tvgid="${escapeHTML(ch.tvg_id)}" data-block-start="${prog.start_ts}" data-block-stop="${prog.stop_ts}" onclick="openShortsBlockModal(this)"`
                         : '';
                     const genreClass = GENRE_CLASS[prog.genre] || '';
@@ -817,6 +816,10 @@
                 }
                 rowsHtml += `<div class="guide-programs-row" style="width:${totalW}px;height:${ROW_H}px;">${progsHtml}</div>`;
             }
+            // Spacer row matching the left panel's "+ Add Channel" cell, so both columns
+            // are the same height. Without it the right panel can't scroll far enough to
+            // reveal the add-channel cell once the channel list exceeds the viewport.
+            rowsHtml += `<div class="guide-programs-row guide-programs-row-spacer" style="width:${totalW}px;height:${ROW_H}px;"></div>`;
 
             wrapper.innerHTML =
                 `<div class="guide-left" id="guide-left">${leftHtml}</div>` +

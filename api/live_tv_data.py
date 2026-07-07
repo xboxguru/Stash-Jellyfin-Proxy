@@ -40,11 +40,20 @@ _rebuild_lock: asyncio.Lock = asyncio.Lock()
 # Persistent channel configuration (channels.json)
 _channels_config: list[dict] = []         # ordered list of channel config dicts
 
+
+def _is_shorts_channel(ch: dict) -> bool:
+    """True when a channel plays as a Shorts channel — either the legacy dedicated
+    `stash_type == "shorts"` channel or any channel with the per-channel `shorts`
+    flag set. Both get the 30-minute block schedule and the block-based now-playing
+    logic; the flag can ride on any source type (tag/filter/performer)."""
+    return ch.get("stash_type") == "shorts" or bool(ch.get("shorts"))
+
+
 def _next_scheduled_segment_after(ch: dict, t: float) -> dict | None:
     """Return the first scheduled segment whose stop_ts > t (i.e. the next
     segment the feeder should play given a wall-clock pointer)."""
     tvg_id = ch["tvg_id"]
-    if ch.get("stash_type") == "shorts":
+    if _is_shorts_channel(ch):
         for block in _stash_schedule.get(tvg_id, []):
             for seg in block.get("segments") or []:
                 if float(seg.get("stop_ts", 0)) > t:
@@ -61,7 +70,7 @@ def _upcoming_scheduled_segments(ch: dict, after_t: float, count: int = 5) -> li
     pointer.  Used by the now-playing modal to show what's queued."""
     tvg_id = ch["tvg_id"]
     out: list[dict] = []
-    if ch.get("stash_type") == "shorts":
+    if _is_shorts_channel(ch):
         for block in _stash_schedule.get(tvg_id, []):
             for seg in block.get("segments") or []:
                 if float(seg.get("stop_ts", 0)) > after_t:
@@ -218,28 +227,10 @@ def _save_channels_config():
 
 
 async def _migrate_from_legacy_config() -> list[dict]:
-    """One-time migration: build channels.json from STASH_TV_TAGS / STASH_TV_FILTERS
-    and optionally the Vertical TV channel from ENABLE_VERTICAL_TV_CHANNEL."""
+    """One-time migration: build channels.json from STASH_TV_TAGS / STASH_TV_FILTERS."""
     from core import stash_client
     migrated: list[dict] = []
     num = int(getattr(config, "STASH_CHANNEL_START_NUMBER", 5001))
-
-    # One-shot migration: if Vertical TV is enabled and hasn't been migrated yet,
-    # create a real channel instead of the synthetic one. User can edit/delete it.
-    if (getattr(config, "ENABLE_STASH_CHANNELS", False)
-            and getattr(config, "ENABLE_VERTICAL_TV_CHANNEL", False)
-            and getattr(config, "ENABLE_VERTICAL_MULTI", False)):
-        migrated.append({
-            "tvg_id": "vertical_tv",
-            "name": "Vertical TV",
-            "number": str(getattr(config, "VERTICAL_TV_CHANNEL_NUMBER", 9000)),
-            "stash_type": "filter",
-            "source_ids": [],  # Empty: all-verticals filter handled by triptych logic
-            "triptych": True,
-            "triptych_salt": "",
-            "order": len(migrated),
-        })
-        logger.info("LiveTV: migrated Vertical TV synthetic channel to real channels.json entry")
 
     raw_tags = getattr(config, "STASH_TV_TAGS", "") or ""
     tag_names = [t.strip() for t in (raw_tags.split(",") if isinstance(raw_tags, str) else raw_tags) if str(t).strip()]
@@ -266,10 +257,6 @@ async def _migrate_from_legacy_config() -> list[dict]:
                                   "number": str(num), "stash_type": "filter",
                                   "source_ids": [sf["id"]], "order": len(migrated)})
                 num += 1
-
-    if getattr(config, "ENABLE_SHORTS_CHANNEL", False):
-        migrated.append({"tvg_id": "shorts", "name": "Shorts", "number": str(num),
-                          "stash_type": "shorts", "source_ids": [], "order": len(migrated)})
 
     _channels_config[:] = migrated
     if migrated:
@@ -967,7 +954,7 @@ async def _rebuild_stash_schedules():
         for ch in channels:
             tvg_id = ch["tvg_id"]
             try:
-                if ch.get("stash_type") == "shorts":
+                if _is_shorts_channel(ch):
                     scenes = await _fetch_scenes_for_stash_channel(ch)
                     if not scenes:
                         logger.warning(f"LiveTV: no scenes for channel '{ch['name']}' — EPG will be empty")
@@ -1016,7 +1003,7 @@ async def _run_maintenance_update():
             existing = _stash_schedule.get(tvg_id, [])
             try:
                 scenes = await _fetch_scenes_for_stash_channel(ch)
-                if ch.get("stash_type") == "shorts":
+                if _is_shorts_channel(ch):
                     # Shorts still prunes past blocks even when scenes is empty
                     # (channel temporarily without content); extend is just a no-op.
                     updated, pruned, added = _maintenance_extend_shorts(existing, scenes, keep_days, sched_days)
@@ -1138,7 +1125,7 @@ async def _build_stash_channel_playlist(ch: dict) -> tuple[list[dict], float] | 
     tvg_id = ch["tvg_id"]
     now = time.time()
 
-    if ch.get("stash_type") == "shorts":
+    if _is_shorts_channel(ch):
         # Flatten the segments stored in each block into a single schedule and
         # play it the same way as a regular channel — seek into the segment
         # currently airing, then queue everything after it.  If we land in a

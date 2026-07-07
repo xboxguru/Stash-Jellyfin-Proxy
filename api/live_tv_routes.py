@@ -20,6 +20,7 @@ from api.live_tv_data import (
     get_channel_by_jellyfin_id, get_program_by_jellyfin_id,
     _is_stash_item, _normalize_id, _build_stash_channel_playlist,
     _get_stash_programs_for_channel, _upcoming_scheduled_segments,
+    _is_shorts_channel,
 )
 
 logger = logging.getLogger(__name__)
@@ -581,7 +582,7 @@ async def endpoint_shorts_block_preview(request: Request):
 
     if not tvg_id:
         stash_channels = await _get_stash_channels()
-        sch = next((c for c in stash_channels if c.get("stash_type") == "shorts"), None)
+        sch = next((c for c in stash_channels if _is_shorts_channel(c)), None)
         if sch:
             tvg_id = sch["tvg_id"]
 

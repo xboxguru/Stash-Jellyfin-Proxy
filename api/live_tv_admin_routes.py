@@ -17,7 +17,7 @@ import api.live_tv_data as _d
 from api.live_tv_data import (
     _save_schedule, _save_channels_config, _load_channels_config,
     _ensure_stash_schedules, _get_stash_channels, _fetch_scenes_for_stash_channel,
-    _build_random_schedule, _build_shorts_block_schedule, _live_tv_enabled,
+    _build_random_schedule, _build_shorts_block_schedule, _is_shorts_channel, _live_tv_enabled,
     _logo_dir, _custom_logo_path, _stash_screenshot_url, _new_eid,
     _upcoming_scheduled_segments, _rebuild_stash_schedules,
     _stash_channels_cache, _m3u_cache, _live_client,
@@ -40,7 +40,7 @@ async def _rebuild_single_channel(tvg_id: str):
             if not scenes:
                 logger.warning(f"LiveTV: no scenes for '{ch['name']}' — schedule will be empty (type={ch.get('stash_type')}, triptych={ch.get('triptych')}, source_ids={ch.get('source_ids')})")
                 return
-            if ch.get("stash_type") == "shorts":
+            if _is_shorts_channel(ch):
                 _stash_schedule[tvg_id] = _build_shorts_block_schedule(scenes)
             else:
                 _stash_schedule[tvg_id] = _build_random_schedule(scenes)
@@ -444,6 +444,7 @@ async def endpoint_guide_data(request: Request):
                 "logo_url": logo_url,
                 "programs": programs,
                 "stash_type": ch.get("stash_type", ""),
+                "shorts": _is_shorts_channel(ch),
             })
 
     return JSONResponse({"date": date_label, "day_start": day_start, "day_end": day_end, "channels": result})
