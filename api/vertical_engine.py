@@ -91,10 +91,11 @@ _DISK_FREE_FLOOR_BYTES = 2 * 1024 * 1024 * 1024
 # synthetic VOD playlist assumes the encoder outruns the client (so read-ahead
 # cache-hits), which wants a full-speed encode — but the single-threaded asyncio
 # relay can't carry full-speed raw 1080p30 and starves the master's audio-endpoint
-# connect.  1.5× realtime stays ahead of a 1× client while keeping relay load close
-# to the known-good realtime (`-re`) rate.  The FIFO backend (Linux) has no such
-# limit and runs full-speed (VERTICAL_READRATE).
-_TCP_RELAY_READRATE = 1.5
+# connect.  3× realtime gets the encoder well ahead of a 1× client (fast startup /
+# seek) while staying under full-speed relay load; drop it back toward 1.5 if the
+# "master never attached to audio endpoint" failure reappears.  The FIFO backend
+# (Linux) has no such limit and runs full-speed (VERTICAL_READRATE).
+_TCP_RELAY_READRATE = 3.0
 
 _SEG_FILE_RE = re.compile(r"seg(\d+)\.ts$")
 
@@ -281,6 +282,23 @@ class _VerticalSessionManager:
 
     def total_segments(self, sid: str) -> int | None:
         return total_segments_for(self._center_dur.get(sid))
+
+    def session_for_scene(self, raw_scene_id: str) -> str | None:
+        """An existing non-stopped session compositing this center scene, for
+        dedupe — so PlaybackInfo's pre-warm and the /Videos/stream guard converge
+        on ONE session per scene instead of each minting its own (which doubled
+        the encode work and cap/disk pressure).  Prefers a live session; falls
+        back to a cached (reaped) one that a fetch will transparently respin."""
+        raw = str(raw_scene_id)
+        live = cached = None
+        for sid, cid in self._center_id.items():
+            if cid != raw or self._stopped.get(sid) or sid not in self._dirs:
+                continue
+            if self.is_alive(sid):
+                live = sid
+            else:
+                cached = sid
+        return live or cached
 
     def active_count(self) -> int:
         """Sessions with a live encode (what the concurrency cap limits).

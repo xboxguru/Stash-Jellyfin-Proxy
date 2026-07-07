@@ -186,9 +186,17 @@ async def vertical_playback_info(scene: dict, raw_id: str, request: Request) -> 
     or the library has no other vertical clips for sides), falls back to normal
     single-video playback and logs why.
     """
-    session_id = _new_session_id(raw_id)
-    vdebug(logger, f"Vertical: PlaybackInfo pre-warming session {session_id!r} for scene {raw_id}")
-    ok = await _vertical_manager.ensure(session_id, scene, 0.0)
+    # Dedupe by scene: reuse a session already compositing this scene (e.g. one
+    # the /Videos/stream guard just minted) rather than starting a second encode.
+    existing = _vertical_manager.session_for_scene(raw_id)
+    if existing:
+        session_id = existing
+        vdebug(logger, f"Vertical: PlaybackInfo reusing session {session_id!r} for scene {raw_id}")
+        ok = await _vertical_manager.ensure(session_id, scene, None)
+    else:
+        session_id = _new_session_id(raw_id)
+        vdebug(logger, f"Vertical: PlaybackInfo pre-warming session {session_id!r} for scene {raw_id}")
+        ok = await _vertical_manager.ensure(session_id, scene, 0.0)
     if not ok:
         logger.info(
             f"Vertical: PlaybackInfo for scene {raw_id} — compositor unavailable "
@@ -219,9 +227,14 @@ async def redirect_to_composite(raw_item_id: str, request: Request) -> Response:
     scene = await stash_client.get_scene(raw_id)
     if not scene:
         return Response(status_code=404)
-    session_id = _new_session_id(raw_id)
     seek = _seek_seconds(request)
-    vdebug(logger, f"Vertical: stream guard for scene {raw_id} — minting session {session_id!r} seek={seek}")
+    # Dedupe by scene: reuse PlaybackInfo's pre-warmed session (or a prior guard's)
+    # instead of minting a fresh one, so a client that both queries PlaybackInfo
+    # and builds the /Videos/stream URL drives ONE composite, not two.
+    existing = _vertical_manager.session_for_scene(raw_id)
+    session_id = existing or _new_session_id(raw_id)
+    vdebug(logger, f"Vertical: stream guard for scene {raw_id} — "
+                   f"{'reusing' if existing else 'minting'} session {session_id!r} seek={seek}")
     ok = await _vertical_manager.ensure(session_id, scene, seek)
     if not ok:
         # Compositor unavailable — fall through to a normal scene stream so the
@@ -310,6 +323,14 @@ async def endpoint_vertical_segment(request: Request) -> Response:
         scene = await stash_client.get_scene(_scene_id_from_session(session_id))
         if not scene:
             logger.warning(f"Vertical: segment {seg_name} for unknown scene in session {session_id!r}")
+            return Response(status_code=404)
+        # Past-EOF guard: a player probing beyond the last real segment (index >=
+        # total) must not respin the encoder — ensure_segment would clamp the index
+        # to the last segment and could relaunch, but the literal seg name still
+        # won't exist.  Just 404 the non-existent segment.
+        total = total_segments_for(_center_duration(scene))
+        if total is not None and index >= total:
+            logger.trace(f"Vertical: segment {seg_name} past end (total={total}) for session {session_id!r}")
             return Response(status_code=404)
         ok = await _vertical_manager.ensure_segment(session_id, index, scene)
         seg_dir = _vertical_manager.seg_dir(session_id)

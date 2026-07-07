@@ -142,6 +142,33 @@ class TestRangeTracker:
         assert _VerticalSessionManager._phase(5, 0) == 0.0      # unknown side duration
 
 
+# ── scene dedupe ────────────────────────────────────────────────────────────────
+
+class TestSessionForScene:
+    def test_none_when_no_session(self, tmp_path):
+        mgr = _VerticalSessionManager()
+        assert mgr.session_for_scene("35879") is None
+
+    def test_finds_session_for_scene(self, tmp_path):
+        mgr, _ = _session(tmp_path, [0], alive=True)
+        mgr._center_id["s"] = "35879"
+        assert mgr.session_for_scene("35879") == "s"
+        assert mgr.session_for_scene("99999") is None
+
+    def test_prefers_live_over_cached(self, tmp_path):
+        mgr = _VerticalSessionManager()
+        mgr._dirs["cached"] = str(tmp_path / "c"); mgr._center_id["cached"] = "35879"
+        mgr._dirs["live"] = str(tmp_path / "l"); mgr._center_id["live"] = "35879"
+        mgr.is_alive = lambda sid: sid == "live"  # type: ignore[assignment]
+        assert mgr.session_for_scene("35879") == "live"
+
+    def test_skips_stopped_session(self, tmp_path):
+        mgr, _ = _session(tmp_path, [0], alive=True)
+        mgr._center_id["s"] = "35879"
+        mgr._stopped["s"] = True
+        assert mgr.session_for_scene("35879") is None
+
+
 # ── ensure_segment trigger cases + debounce ─────────────────────────────────────
 
 class TestEnsureSegment:
