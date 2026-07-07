@@ -802,6 +802,34 @@ class _VerticalSessionManager:
         logger.info(f"Vertical FFmpeg: session {sid!r} audio pid={sub_a.pid}")
         asyncio.create_task(self._drain_sub_stderr(sub_a, sid, "audio"))
 
+        # Silent-center safety net (mirrors the Live TV channel's _feed_one_vertical_round):
+        # a center with no audio stream makes `-map 0:a:0?` map nothing, so the audio sub
+        # exits immediately — and the master, still mapping `1:a:0`, then blocks forever
+        # waiting for audio it never receives (the parent's keepalive FD means no EOF),
+        # which backpressures and stalls the composite (no segments → readiness fails).
+        # If the audio sub dies within 2 s, replace it with an lavfi silence generator so
+        # the audio pipe is fed for the run's duration.
+        try:
+            rc_a_fast = await asyncio.wait_for(asyncio.shield(sub_a.wait()), timeout=2.0)
+            if rc_a_fast != 0:
+                silence_cmd = [
+                    ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "warning",
+                    "-f", "lavfi", "-i", "aevalsrc=0:c=stereo:s=48000",
+                    "-t", f"{remaining:.3f}",
+                    "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le",
+                    "-f", "s16le", sub_out_a,
+                ]
+                self._log_session(sid, f"audio silence-filler cmd: {' '.join(silence_cmd)}")
+                sub_a = await asyncio.create_subprocess_exec(
+                    *silence_cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                )
+                logger.info(
+                    f"Vertical FFmpeg: session {sid!r} center {center_id} has no audio "
+                    f"— spawned {remaining:.1f}s silence filler pid={sub_a.pid}"
+                )
+        except asyncio.TimeoutError:
+            pass  # audio sub still running after 2 s — it has audio, proceed normally
+
         self._subs[sid] = [sub_v, sub_a]
         self._monitors[sid] = asyncio.create_task(self._monitor_run(sid, sub_v, sub_a))
 

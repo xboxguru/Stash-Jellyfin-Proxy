@@ -679,13 +679,16 @@ This mirrors `_feed_one_scene`'s spawn ordering exactly (video sub first, wait f
 master's audio-endpoint attach, then the audio sub) — the same TCP-backend handshake
 constraint applies here as everywhere else in this file.
 
-**Silent-center safety net:** unlike a VOD play — where a silent center just makes that one
-session's audio track empty — a channel that stalls on a silent center stalls *every current
-viewer* indefinitely, since the parent holds a keepalive writer FD on the audio pipe and the
-master never sees EOF to react to. `_feed_one_vertical_round` carries the same fast-fail
-pattern `_feed_one_scene` established for scheduled scenes: if the audio sub exits within 2 s
-(no audio stream), it's replaced with an `lavfi` silence filler so the round still completes
-in roughly the center's duration instead of hanging the channel.
+**Silent-center safety net:** a center with no audio stream makes `-map 0:a:0?` map nothing,
+so the audio sub exits immediately — and the master, still mapping `1:a:0`, then blocks
+forever waiting for audio it never receives (the parent holds a keepalive writer FD on the
+audio pipe, so the master never sees EOF), which backpressures and **stalls the composite** —
+no segments, so a VOD launch fails its readiness gate and a channel wedges every viewer.
+Both playout paths carry the same fast-fail pattern `_feed_one_scene` established: if the
+audio sub exits within 2 s, it's replaced with an `lavfi` silence filler so the encode still
+runs for the center's duration. `_VerticalSessionManager._start_run` applies it per VOD run
+(so relaunches/backfill of a silent center are covered too); `_feed_one_vertical_round`
+applies it per channel round.
 
 **Master encoder:** the Vertical TV channel uses the Live TV master's existing CPU
 (`libx264`) encode path unmodified — `VERTICAL_HWACCEL` only affects the VOD compositor's
@@ -818,7 +821,7 @@ and continues without the per-session file, so a missing file is itself a signal
 - **Black/frozen lanes** → composite sub stderr (`[composite]` lines) — look for HTTP
   reconnects against Stash or filtergraph errors.
 - **No audio** → `[audio]` lines; a silent center exits the audio sub almost immediately
-  (VOD: session plays with an empty audio track; Vertical TV: a silence filler is
+  (both VOD and Vertical TV: a silence filler is
   spawned and logged).
 - **Client stalls after a seek** → the relaunch line for that segment (trigger + old→new
   `start_index` + produced ranges); if the segment stays unavailable the per-request warning
