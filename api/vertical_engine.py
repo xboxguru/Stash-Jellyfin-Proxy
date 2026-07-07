@@ -87,6 +87,11 @@ _SEG_WAIT_TIMEOUT = 15.0
 # backend can take tens of seconds per segment — see _await_ready).  Each new
 # segment resets it, so a slow-but-progressing encode is never spuriously failed.
 _READY_STALL_SECS = 45.0
+# How long to wait for the master to finalize and exit on EOF (after the backend
+# closes) before hard-killing it.  EOF→finalize is normally sub-second; this only
+# caps a stuck flush.  A hard kill would drop the last partial segment, so we
+# prefer the graceful exit (esp. on Windows, where terminate() is a hard kill).
+_MASTER_GRACE_SECS = 8.0
 # Refuse a launch when free space on the HLS temp volume is below this floor: a
 # session renders the full center clip (~1–2 GB per 30 min at 1080p30).
 _DISK_FREE_FLOOR_BYTES = 2 * 1024 * 1024 * 1024
@@ -1004,17 +1009,29 @@ class _VerticalSessionManager:
                 except asyncio.TimeoutError:
                     try: sub.kill()
                     except Exception: pass
+        # Close the backend first: with the subs gone, dropping the parent's
+        # keepalive (FIFO) / relay master connection (TCP) hands the master EOF,
+        # which makes it flush and finalize its last (partial) segment and exit on
+        # its own.  We must WAIT for that graceful exit rather than terminate
+        # immediately — `proc.terminate()` is a hard TerminateProcess() on Windows
+        # (no clean shutdown), so terminating here would drop the final segment
+        # (seg{N}.ts.tmp never renamed → a short 2-segment clip loses seg1 and
+        # fails readiness).  Only hard-kill if EOF-driven shutdown stalls.
         backend = self._backends.pop(sid, None)
         if backend is not None:
             try: await backend.close()
             except Exception: pass
         proc = self._procs.pop(sid, None)
         if proc and proc.returncode is None:
-            proc.terminate()
             try:
-                await asyncio.wait_for(proc.wait(), timeout=5.0)
+                await asyncio.wait_for(proc.wait(), timeout=_MASTER_GRACE_SECS)
             except asyncio.TimeoutError:
-                proc.kill()
+                try: proc.terminate()
+                except Exception: pass
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    proc.kill()
 
     async def _teardown_run(self, sid: str, reason: str) -> None:
         """Stop the current run (lock held): cancel the monitor, then kill the
