@@ -639,8 +639,13 @@ async def _fetch_affinity_scenes(field: str, item_id: str, limit: int, unwatched
     return data.get("scenes", []) if data else []
 
 
-async def _build_similar_pool(scene_id: str, target_limit: int = 12) -> list:
-    """Orchestrator: Fetches scenes sharing performers, studios, or tags with the target scene."""
+async def _build_similar_pool(scene_id: str, target_limit: int = 12, vertical: bool = False) -> list:
+    """Orchestrator: Fetches scenes sharing performers, studios, or tags with the target scene.
+
+    When `vertical` is set (the target was opened from the Triptych library), the pool is
+    refined to vertical-only scenes so every "similar" tile is itself a valid triptych center
+    — clicked, it plays compositor-style like the item the user came from.
+    """
     raw_id = scene_id.replace("scene-", "") if scene_id.startswith("scene-") else scene_id
     scene = await stash_client.get_scene(raw_id)
     
@@ -681,8 +686,13 @@ async def _build_similar_pool(scene_id: str, target_limit: int = 12) -> list:
             if s_id and str(s_id) != str(raw_id) and s_id not in candidates:
                 candidates[s_id] = s
                 
-    # 5. Shuffle and return
+    # 5. Restrict to vertical-only when the target came from the Triptych library, so
+    # every similar tile is itself a valid triptych center (plays compositor-style).
     pool = list(candidates.values())
+    if vertical:
+        pool = filter_vertical_scenes(pool)
+
+    # 6. Shuffle and return
     random.shuffle(pool)
     return pool[:target_limit]
 
@@ -696,21 +706,25 @@ async def endpoint_similar_items(request: Request):
         limit = 12
         
     logger.debug(f"Router -> Similar Items Requested for {item_id} (Limit: {limit})")
-    
+
+    # Detect the Triptych namespace BEFORE decoding — decode_id() strips the leading 'v'.
+    # A vertical target returns vertical-only similars, minted with vscene- ids so a click
+    # plays compositor-style (Feature 1 decision 9); a normal target is unchanged.
+    vertical = jellyfin_mapper.is_vertical_id(item_id)
     decoded_id = decode_id(item_id)
-    
+
     # In our ecosystem, "Similar" only applies to scenes, not folders or individual performers
     if not decoded_id.startswith("scene-"):
         return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": 0})
-        
-    scenes = await _build_similar_pool(decoded_id, target_limit=limit)
-    
+
+    scenes = await _build_similar_pool(decoded_id, target_limit=limit, vertical=vertical)
+
     jellyfin_items = []
-    safe_root = encode_id("root", "scenes")
-    
+    safe_root = encode_id("root", "vertical") if vertical else encode_id("root", "scenes")
+
     for scene in scenes:
         try:
-            item = jellyfin_mapper.format_jellyfin_item(scene, parent_id=safe_root)
+            item = jellyfin_mapper.format_jellyfin_item(scene, parent_id=safe_root, vertical=vertical)
             jellyfin_items.append(item)
         except Exception as e:
             logger.error(f"Failed to map Similar scene {scene.get('id')}: {e}")
