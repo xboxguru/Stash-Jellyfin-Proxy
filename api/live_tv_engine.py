@@ -14,6 +14,7 @@ except ImportError:
 
 import config
 from api.live_tv_data import _next_scheduled_segment_after, _upcoming_scheduled_segments
+from core.hw_encoder import resolve_h264_encoder
 from core.vertical import redact_apikey, vdebug
 
 logger = logging.getLogger(__name__)
@@ -240,8 +241,15 @@ class _FFmpegChannelManager:
         seg_tmpl = os.path.join(d, "seg%05d.ts")
         manifest = os.path.join(d, "stream.m3u8")
 
+        # Resolve hardware encoder (with probe if needed). Blocks, so run off the event loop.
+        loop = asyncio.get_running_loop()
+        enc = await loop.run_in_executor(None, resolve_h264_encoder,
+                                          str(getattr(config, "LIVE_TV_HWACCEL", "none")).lower(),
+                                          ffmpeg_bin)
+
         master_cmd = [
             ffmpeg_bin, "-y", "-hide_banner",
+            *enc.input_args,  # device/global init for GPU encoders
             # Raw video input — implicit 30 fps timing.
             # -probesize 32 / -analyzeduration 0: every codec param is
             # already specified on the cmdline, so we skip avformat's
@@ -271,8 +279,9 @@ class _FFmpegChannelManager:
             # Explicit mapping so the master never silently drops a stream
             "-map", "0:v:0",
             "-map", "1:a:0",
+            *(["-vf", enc.vfilter] if enc.vfilter else []),  # GPU upload filter if needed
             # Encode once and forever — uniform input means no reconfigures
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            *enc.output_args,  # codec + rate control (hardware or CPU fallback)
             "-force_key_frames", "expr:gte(t,n_forced*4)",
             "-c:a", "aac", "-b:a", "192k",
             # HLS
@@ -293,7 +302,7 @@ class _FFmpegChannelManager:
 
         logger.info(
             f"LiveTV FFmpeg: launching channel {cid!r} — pipe-based playout, "
-            f"initial seek={seek:.1f}s"
+            f"initial seek={seek:.1f}s encoder={enc.codec}"
         )
         logger.debug(f"LiveTV FFmpeg master cmd: {' '.join(master_cmd)}")
 
@@ -507,6 +516,14 @@ class _FFmpegChannelManager:
         logger.info(f"Vertical TV: feeder started for channel {cid!r}")
         try:
             while True:
+                # Health check: master process must still be alive
+                if not self.is_alive(cid):
+                    logger.error(
+                        f"Vertical TV: master died for channel {cid!r} — feeder cannot continue "
+                        f"(played {rounds_played} round(s) successfully)"
+                    )
+                    break
+
                 picked = await pick_center_and_sides(exclude_ids=set(recent_centers))
                 if picked is None:
                     logger.warning(
@@ -535,11 +552,20 @@ class _FFmpegChannelManager:
                     f"Vertical TV: channel {cid!r} round #{rounds_played+1} "
                     f"center={center_id} sides={sides} dur={duration:.1f}s"
                 )
-                ok = await self._feed_one_vertical_round(cid, center_id, sides, backend)
+                ok = await self._feed_one_vertical_round(cid, center_id, sides, backend, center_duration=duration)
                 logger.info(
                     f"Vertical TV: channel {cid!r} round center={center_id} "
                     f"finished ok={ok} elapsed={time.time()-t0:.1f}s"
                 )
+
+                # If round failed, check if master is still alive
+                if not ok and not self.is_alive(cid):
+                    logger.error(
+                        f"Vertical TV: round failed for channel {cid!r} center={center_id} "
+                        f"— master died (played {rounds_played} round(s) successfully, current failed)"
+                    )
+                    break
+
                 rounds_played += 1
         except asyncio.CancelledError:
             logger.info(f"Vertical TV: feeder cancelled for {cid!r} after {rounds_played} round(s)")
@@ -548,13 +574,14 @@ class _FFmpegChannelManager:
             logger.error(f"Vertical TV: feeder crashed for {cid!r}", exc_info=True)
 
     async def _feed_one_vertical_round(self, cid: str, center_id: str, sides: list,
-                                        backend: "_PipeBackend") -> bool:
+                                        backend: "_PipeBackend", center_duration: float = 0.0) -> bool:
         """Spawn ONE composite round: a 3-input hstack video sub (2 looping sides
         + center) and a center-only audio sub — the same pair
         `api.vertical_engine._VerticalSessionManager` spawns per VOD play, reused
         here via its command builders so the compositor's filtergraph lives in
         one place (see docs/Triptych.md § Vertical TV).  Ends (both subs exit)
-        when the center clip ends (`-shortest` in the composite filtergraph).
+        when the center clip ends; `-t duration` bounds both subs to the center's
+        length so they exit cleanly at EOF instead of hanging indefinitely.
         """
         from api.vertical_engine import build_composite_cmd, build_audio_cmd
 
@@ -574,7 +601,8 @@ class _FFmpegChannelManager:
                 except Exception:
                     pass
 
-        composite_cmd = build_composite_cmd(ffmpeg_bin, left_id, center_id, right_id, 0.0, sub_out_v)
+        composite_cmd = build_composite_cmd(ffmpeg_bin, left_id, center_id, right_id, 0.0, sub_out_v,
+                                            duration=center_duration if center_duration > 0 else None)
         _log_cmd("composite", composite_cmd)
         try:
             sub_v = await asyncio.create_subprocess_exec(
@@ -603,7 +631,8 @@ class _FFmpegChannelManager:
             return False
         vdebug(logger, f"Vertical TV: channel {cid!r} master attached to audio endpoint")
 
-        audio_cmd = build_audio_cmd(ffmpeg_bin, center_id, 0.0, sub_out_a)
+        audio_cmd = build_audio_cmd(ffmpeg_bin, center_id, 0.0, sub_out_a,
+                                    duration=center_duration if center_duration > 0 else None)
         _log_cmd("audio", audio_cmd)
         try:
             sub_a = await asyncio.create_subprocess_exec(
@@ -620,20 +649,17 @@ class _FFmpegChannelManager:
         logger.info(f"Vertical TV: channel {cid!r} center={center_id} audio pid={sub_a.pid}")
         asyncio.create_task(self._drain_sub_stderr(sub_a, cid, f"{center_id}/audio"))
 
-        # Same fast-fail safety net as _feed_one_scene: a center with no audio
-        # stream exits sub_a almost immediately, which would otherwise starve the
-        # master's audio input indefinitely (it has no EOF to react to — the
-        # parent holds a keepalive writer FD open) and stall the whole channel,
-        # not just one VOD play.  Replace with lavfi silence so the round still
-        # completes in roughly the center's duration.
+        # Safety net for centers with no audio stream: such a center makes
+        # `-map 0:a:0?` find nothing, so the audio sub exits immediately (rc=0)
+        # with zero audio written to the pipe. The master, still mapping 1:a:0,
+        # blocks forever waiting for audio (no EOF to react to — parent holds a
+        # keepalive writer FD), stalling the composite. Distinguish this from a
+        # pipe-endpoint abort (rc!=0, e.g. WSAECONNABORTED) — if the pipe died,
+        # don't spawn silence; the master error will be caught by health-check.
         try:
             rc_a_fast = await asyncio.wait_for(asyncio.shield(sub_a.wait()), timeout=2.0)
-            if rc_a_fast != 0:
-                # Duration unknown here without re-fetching the scene; fall back
-                # to a generous fixed silence window — the composite's own
-                # `-shortest` (bounded by the center's video track) is what
-                # actually ends the round, this just keeps the audio pipe fed
-                # until then.
+            if rc_a_fast == 0:
+                # Clean exit: audio sub found no audio stream (rc=0). Spawn silence.
                 silence_cmd = [
                     ffmpeg_bin, "-y", "-hide_banner", "-loglevel", "warning",
                     "-f", "lavfi", "-i", "aevalsrc=0:c=stereo:s=48000",
@@ -647,8 +673,16 @@ class _FFmpegChannelManager:
                     stderr=asyncio.subprocess.DEVNULL,
                 )
                 logger.info(
-                    f"Vertical TV: channel {cid!r} center={center_id} has no audio "
+                    f"Vertical TV: channel {cid!r} center={center_id} has no audio stream "
                     f"— spawned silence filler pid={sub_a.pid}"
+                )
+            else:
+                # Non-zero exit: pipe endpoint aborted or other error. Log and don't spawn
+                # silence; the master health-check will catch the master death.
+                logger.warning(
+                    f"Vertical TV: audio sub for {cid!r} center={center_id} "
+                    f"exited early (rc={rc_a_fast}) — likely pipe endpoint aborted, "
+                    f"not spawning silence (master health-check will handle)"
                 )
         except asyncio.TimeoutError:
             pass  # sub_a still running after 2 s — has audio, proceed normally
@@ -1124,6 +1158,9 @@ class _FifoPipeBackend(_PipeBackend):
                 except OSError: pass
         self.wfd_v = None
         self.wfd_a = None
+        for path in (self.fifo_v, self.fifo_a):
+            try: os.unlink(path)
+            except OSError: pass
 
 
 class _TcpRelayPipeBackend(_PipeBackend):
