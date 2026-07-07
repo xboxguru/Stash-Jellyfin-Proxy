@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock
 
 import config
 from api.vertical_engine import (
-    _VerticalSessionManager, total_segments_for, SEG_DURATION, _SEG_WAIT_LOOKAHEAD,
+    _VerticalSessionManager, total_segments_for, SEG_DURATION, _FORWARD_WAIT_SEGMENTS,
     build_composite_cmd, build_audio_cmd,
 )
 from api.vertical_routes import _valid_session_id, _new_session_id, _build_vod_playlist
@@ -124,11 +124,12 @@ class TestRangeTracker:
         assert mgr._run_head("s", 9) == 9
 
     def test_run_covers(self, tmp_path):
-        mgr, _ = _session(tmp_path, [5, 6, 7], alive=True, start_index=5)
+        # Large clip so the forward-wait window (24) fits inside the timeline.
+        mgr, _ = _session(tmp_path, [5, 6, 7], alive=True, start_index=5, center_dur=8000.0)
         head = mgr._run_head("s", 5)  # 8
         assert mgr._run_covers("s", head) is True                    # at the live edge
-        assert mgr._run_covers("s", head + _SEG_WAIT_LOOKAHEAD) is True
-        assert mgr._run_covers("s", head + _SEG_WAIT_LOOKAHEAD + 1) is False  # far ahead
+        assert mgr._run_covers("s", head + _FORWARD_WAIT_SEGMENTS) is True   # read-ahead
+        assert mgr._run_covers("s", head + _FORWARD_WAIT_SEGMENTS + 1) is False  # far forward seek
         assert mgr._run_covers("s", 4) is False                      # before the run start
 
     def test_run_covers_false_when_dead(self, tmp_path):
@@ -167,10 +168,23 @@ class TestEnsureSegment:
         await _quiesce(mgr)
 
     async def test_seek_past_head_relaunches(self, tmp_path):
-        mgr, _ = _session(tmp_path, [0, 1], alive=True, start_index=0)  # head=2, far seek to 9
+        # Large clip so a genuinely-far forward seek (well past head + the
+        # read-ahead window) exists; read-ahead within the window would only wait.
+        mgr, _ = _session(tmp_path, [0, 1], alive=True, start_index=0, center_dur=8000.0)  # head=2
         self._armed(mgr)
-        assert await mgr.ensure_segment("s", 9, {"id": "1"}) is True
-        mgr._relaunch.assert_awaited_once_with("s", 9)
+        far = 2 + _FORWARD_WAIT_SEGMENTS + 20
+        assert await mgr.ensure_segment("s", far, {"id": "1"}) is True
+        mgr._relaunch.assert_awaited_once_with("s", far)
+        await _quiesce(mgr)
+
+    async def test_forward_readahead_does_not_relaunch(self, tmp_path):
+        # A read-ahead request within the forward window must WAIT, not relaunch —
+        # this is the client-buffering case that previously caused a relaunch storm.
+        mgr, _ = _session(tmp_path, [0, 1], alive=True, start_index=0, center_dur=8000.0)  # head=2
+        self._armed(mgr)
+        assert await mgr.ensure_segment("s", 2 + _FORWARD_WAIT_SEGMENTS, {"id": "1"}) is True
+        mgr._relaunch.assert_not_called()
+        mgr._await_segment.assert_awaited()
         await _quiesce(mgr)
 
     async def test_back_seek_gap_relaunches(self, tmp_path):
@@ -207,7 +221,7 @@ class TestEnsureSegment:
     async def test_debounce_no_second_relaunch_when_covered(self, tmp_path):
         # A relaunch to a far index makes subsequent requests within that run's
         # reach cache-hit or wait — never stacking a second relaunch.
-        mgr, d = _session(tmp_path, [], alive=True, start_index=0, center_dur=40.0)
+        mgr, d = _session(tmp_path, [], alive=True, start_index=0, center_dur=8000.0)
         mgr._await_segment = AsyncMock(return_value=True)
         calls = []
 
@@ -218,10 +232,11 @@ class TestEnsureSegment:
             return True
 
         mgr._relaunch = fake_relaunch
-        assert await mgr.ensure_segment("s", 8, {"id": "1"}) is True   # far → relaunch to 8
-        assert await mgr.ensure_segment("s", 8, {"id": "1"}) is True   # now cached
-        assert await mgr.ensure_segment("s", 9, {"id": "1"}) is True   # within run reach
-        assert calls == [8]
+        far = _FORWARD_WAIT_SEGMENTS + 50
+        assert await mgr.ensure_segment("s", far, {"id": "1"}) is True      # far → relaunch
+        assert await mgr.ensure_segment("s", far, {"id": "1"}) is True      # now cached
+        assert await mgr.ensure_segment("s", far + 1, {"id": "1"}) is True  # within run reach
+        assert calls == [far]
         await _quiesce(mgr)
 
 

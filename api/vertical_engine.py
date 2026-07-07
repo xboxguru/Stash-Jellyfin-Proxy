@@ -71,18 +71,30 @@ logger = logging.getLogger(__name__)
 # synthetic playlist's EXTINF cadence — segment index N ⇔ center time N*4.
 SEG_DURATION = 4.0
 
-# `ensure_segment` waits (rather than relaunching) for a missing segment when the
-# live encode head is within this many segments of it — full-speed encoding means
-# the head races ahead, so a near-edge miss (client momentarily ahead of the
-# encoder) resolves in well under a second, whereas a real forward seek lands far
-# past the head and relaunches.
-_SEG_WAIT_LOOKAHEAD = 4
+# A forward segment request within this many segments of the live encode head is
+# treated as normal read-ahead and WAITED for (the run advances to the end on its
+# own, so it will produce it); only a request farther ahead than this is treated
+# as a real forward seek and relaunches the encode at that point.  This MUST exceed
+# any client's read-ahead buffer — ExoPlayer/hls.js buffer ~30–60 s (≈8–15
+# segments) ahead, and treating that read-ahead as a seek causes a relaunch storm
+# (each buffered-ahead segment kills and restarts the healthy encode).  24 segments
+# = 96 s of look-ahead, comfortably above typical client buffers.
+_FORWARD_WAIT_SEGMENTS = 24
 # How long a segment fetch waits for the encoder to produce the segment before
 # giving up (the client simply retries).
 _SEG_WAIT_TIMEOUT = 15.0
 # Refuse a launch when free space on the HLS temp volume is below this floor: a
 # session renders the full center clip (~1–2 GB per 30 min at 1080p30).
 _DISK_FREE_FLOOR_BYTES = 2 * 1024 * 1024 * 1024
+
+# Read-rate cap for the vertical subs on the Windows TCP-relay backend only.  The
+# synthetic VOD playlist assumes the encoder outruns the client (so read-ahead
+# cache-hits), which wants a full-speed encode — but the single-threaded asyncio
+# relay can't carry full-speed raw 1080p30 and starves the master's audio-endpoint
+# connect.  1.5× realtime stays ahead of a 1× client while keeping relay load close
+# to the known-good realtime (`-re`) rate.  The FIFO backend (Linux) has no such
+# limit and runs full-speed (VERTICAL_READRATE).
+_TCP_RELAY_READRATE = 1.5
 
 _SEG_FILE_RE = re.compile(r"seg(\d+)\.ts$")
 
@@ -271,9 +283,13 @@ class _VerticalSessionManager:
         return total_segments_for(self._center_dur.get(sid))
 
     def active_count(self) -> int:
-        """Sessions occupying a concurrency slot (a slot is held from launch until
-        stage-2 destroy, so a reaped-but-cached session still counts)."""
-        return len(self._dirs)
+        """Sessions with a live encode (what the concurrency cap limits).
+
+        Counts running masters, not cached dirs: a reaped/finished session keeps
+        its segments on disk but consumes no CPU, so it must not hold a cap slot —
+        otherwise abandoned or paused sessions strand slots until the session TTL
+        (a resume respins the same session and doesn't re-check the cap anyway)."""
+        return sum(1 for sid in self._dirs if self.is_alive(sid))
 
     async def ensure(self, sid: str, center_scene: dict, seek: float | None = None) -> bool:
         """Ensure the session exists and (optionally) honor a seek position.
@@ -380,13 +396,21 @@ class _VerticalSessionManager:
         return (max(run) + 1) if run else start
 
     def _run_covers(self, sid: str, index: int) -> bool:
-        """True when the live run will produce `index` on its own (no relaunch)."""
+        """True when the live run will serve `index` by waiting, no relaunch needed.
+
+        A live run started at `start_index` encodes monotonically to the center's
+        end, so it will *eventually* produce any index >= start_index — the only
+        question is whether waiting is acceptable.  Read-ahead (index within
+        `_FORWARD_WAIT_SEGMENTS` of the head) waits; a far-forward seek relaunches
+        to jump the encode there; a backward request (index < start) relaunches
+        because this run will never revisit it.
+        """
         if not self.is_alive(sid):
             return False
         start = int(self._launch_info.get(sid, {}).get("start_index", 0))
         if index < start:
             return False
-        return index <= self._run_head(sid, start) + _SEG_WAIT_LOOKAHEAD
+        return index <= self._run_head(sid, start) + _FORWARD_WAIT_SEGMENTS
 
     def _first_gap(self, sid: str) -> int | None:
         total = self.total_segments(sid)
@@ -484,14 +508,15 @@ class _VerticalSessionManager:
             )
             return False
 
-        # Concurrency cap — count OTHER occupied sessions (a slot is held until
-        # stage-2 destroy, so reaped-but-cached sessions still occupy).
+        # Concurrency cap — count OTHER sessions with a LIVE encode.  Cached /
+        # reaped sessions burn no CPU, so they don't hold a slot (otherwise
+        # abandoned or paused sessions strand the cap until the TTL).
         max_sessions = int(getattr(config, "VERTICAL_MAX_SESSIONS", 2))
-        others = [s for s in self._dirs if s != sid]
-        vdebug(logger, f"Vertical: launching {sid!r} — {len(others)} other occupied session(s), cap {max_sessions}")
+        others = [s for s in self._dirs if s != sid and self.is_alive(s)]
+        vdebug(logger, f"Vertical: launching {sid!r} — {len(others)} other live encode(s), cap {max_sessions}")
         if len(others) >= max_sessions:
             logger.warning(
-                f"Vertical: concurrency cap {max_sessions} reached (occupied: {others}) "
+                f"Vertical: concurrency cap {max_sessions} reached (live encodes: {others}) "
                 f"— refusing {sid!r}; client falls back to single video"
             )
             return False
@@ -655,7 +680,14 @@ class _VerticalSessionManager:
             await self._teardown_run(sid, reason="master video-endpoint attach timeout")
             return False
 
-        pace = self._pace_args()
+        # Pacing: full-speed on the FIFO backend (kernel forwards the bytes), but
+        # the TCP-relay backend forwards raw video through the single-threaded
+        # asyncio loop and can't sustain multi-Gbps full-speed 1080p30 — that
+        # saturation starves the master's audio-endpoint connect and aborts the run
+        # ("master never attached to audio endpoint").  Cap it just above realtime
+        # on TCP (Windows dev) so the encoder still outruns the client; full-speed
+        # encode is a FIFO-backend (Linux) property.
+        pace = ("-readrate", f"{_TCP_RELAY_READRATE:g}") if backend.kind == "tcp" else self._pace_args()
         seek_s = start_index * SEG_DURATION
         composite_cmd = build_composite_cmd(
             ffmpeg_bin, left_id, center_id, right_id, seek_s, sub_out_v,
