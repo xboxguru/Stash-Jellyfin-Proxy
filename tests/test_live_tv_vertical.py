@@ -140,6 +140,10 @@ class TestFeederDispatch:
 class TestFeederVertical:
     async def test_picks_round_and_tracks_now_playing(self, monkeypatch):
         mgr = lte._FFmpegChannelManager()
+        # Set up a mock master process so health-check passes
+        master_proc = _FakeProc(rc=None)
+        mgr._procs["cid1"] = master_proc
+
         center_scene = {"id": "100", "title": "Center", "files": [{"duration": 42.0}]}
         picked = (center_scene, ["101", "102"])
         pick_mock = AsyncMock(side_effect=[picked, asyncio.CancelledError()])
@@ -160,6 +164,10 @@ class TestFeederVertical:
 
     async def test_retries_when_library_has_no_candidates(self, monkeypatch):
         mgr = lte._FFmpegChannelManager()
+        # Set up a mock master process so health-check passes
+        master_proc = _FakeProc(rc=None)
+        mgr._procs["cid1"] = master_proc
+
         pick_mock = AsyncMock(side_effect=[None, asyncio.CancelledError()])
         monkeypatch.setattr("core.vertical_selection.pick_center_and_sides", pick_mock)
         sleep_mock = AsyncMock()
@@ -180,18 +188,28 @@ class _FakeStderr:
 
 
 class _FakeProc:
-    def __init__(self, rc=0):
+    def __init__(self, rc=0, fast_exit=False, exit_delay=0.1):
         self.pid = 4242
         self.returncode = None
         self._rc = rc
+        self._fast_exit = fast_exit
+        self._exit_delay = exit_delay
         self.stderr = _FakeStderr()
 
     async def wait(self):
+        # If fast_exit=True, exit immediately (for testing silence filler).
+        # Otherwise, delay before exiting (simulates running process).
+        if not self._fast_exit:
+            # Delay longer than the 2s timeout so timeout triggers in silent-center check
+            await asyncio.sleep(self._exit_delay)
         self.returncode = self._rc
         return self._rc
 
     def terminate(self):
         pass
+
+    def is_closing(self):
+        return False
 
 
 class _FakeBackend:
@@ -205,8 +223,9 @@ class _FakeBackend:
 class TestFeedOneVerticalRound:
     async def test_success_spawns_composite_and_audio_subs(self, monkeypatch):
         mgr = lte._FFmpegChannelManager()
-        proc_v = _FakeProc(rc=0)
-        proc_a = _FakeProc(rc=0)
+        proc_v = _FakeProc(rc=0, fast_exit=True)
+        # exit_delay > 2s so the timeout in silent-center check triggers
+        proc_a = _FakeProc(rc=0, fast_exit=False, exit_delay=2.5)
         create_mock = AsyncMock(side_effect=[proc_v, proc_a])
         monkeypatch.setattr(asyncio, "create_subprocess_exec", create_mock)
 
@@ -240,14 +259,14 @@ class TestFeedOneVerticalRound:
         assert create_mock.await_count == 1
 
     async def test_silent_center_spawns_silence_filler(self, monkeypatch):
-        # Center audio sub exits fast with rc != 0 (no audio stream) — mirrors
-        # live_tv_engine._feed_one_scene's own fast-fail safety net so a silent
-        # center can't stall the whole always-on channel.
+        # Center audio sub exits fast with rc=0 (clean exit, no audio stream) — the
+        # silent-center detector spawns a silence filler to prevent the master from
+        # stalling. Mirrors live_tv_engine._feed_one_scene's safety net.
         mgr = lte._FFmpegChannelManager()
-        proc_v = _FakeProc(rc=0)
-        proc_a_fail = _FakeProc(rc=1)
-        proc_silence = _FakeProc(rc=0)
-        create_mock = AsyncMock(side_effect=[proc_v, proc_a_fail, proc_silence])
+        proc_v = _FakeProc(rc=0, fast_exit=True)
+        proc_a_silent = _FakeProc(rc=0, fast_exit=True)  # Fast exit = no audio stream
+        proc_silence = _FakeProc(rc=0, fast_exit=True)
+        create_mock = AsyncMock(side_effect=[proc_v, proc_a_silent, proc_silence])
         monkeypatch.setattr(asyncio, "create_subprocess_exec", create_mock)
 
         ok = await mgr._feed_one_vertical_round("cid1", "100", ["101", "102"], _FakeBackend())

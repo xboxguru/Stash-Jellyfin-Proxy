@@ -538,65 +538,27 @@ bundled Intel stack. Because decode stays on CPU, we avoid pulling the CUDA runt
 - **Intel QSV / VAAPI** — `--device /dev/dri:/dev/dri` passthrough.
 - **CPU** — nothing; it's the automatic fallback when no GPU is available or the probe fails.
 
-## Approved rework A: engine stability fixes
+## Engine stability fixes (rework A) — ✅ IMPLEMENTED 2026-07-07
 
-> **Status: approved design, NOT yet implemented.** Root causes below were confirmed from
-> the 2026-07-06 channel field test (proxy log + `livetv_ffmpeg/63682d76...log`). The
-> implementing chat must fold each fix into the relevant sections of this doc and delete
-> this banner. **Implement this rework before rework B** — B builds on a stable engine.
+Four defects from the 2026-07-06 field test are now fixed. All channel types benefit; fixes
+integrated into `api/live_tv_engine.py`, `api/vertical_engine.py`, and `core/hw_encoder.py`.
 
-Four confirmed defects, ordered by severity. Fixes 1–3 live in `api/live_tv_engine.py`;
-fix 4 is in the shared builder in `api/vertical_engine.py` and benefits VOD too.
+1. **Pipeline throughput:** Live TV master now uses `core/hw_encoder.py` to select hardware
+   H.264 encoding (NVENC/QSV/VAAPI, fallback to libx264). Config: `LIVE_TV_HWACCEL` uses
+   existing probe/fallback semantics. Chosen vs effective encoder logged per launch.
+2. **Round termination:** Both `_feed_one_vertical_round` and VOD compositor now bound
+   composite + audio subs with `-t (center_duration − seek)`. Clean exit at center EOF
+   instead of hang (where `-shortest` is a no-op on single-output composite).
+3. **Master health:** Feeder health-checks the master process before each round and on sub
+   failure; master dead → channel teardown + relaunch (loudly logged). Silent-center
+   detector now distinguishes "audio stream missing" (clean exit) from "pipe endpoint
+   aborted" (non-zero exit).
+4. **Tall verticals:** Both VOD and channel use cover-crop lane geometry
+   (`scale=608:1080:force_original_aspect_ratio=increase:force_divisible_by=2,crop=608:1080`)
+   to handle ultra-tall sources.
 
-1. **Channel pipeline runs below realtime → clients exhaust the segment window and
-   crash.** The round-#1 composite held `speed=0.58–0.61x / 18 fps` for its entire life:
-   3 CPU decodes + hstack + the Live TV master's CPU `libx264` encode outrun this host.
-   A viewer consumes at 1.0×, drains the `hls_list_size 15` (~60 s) window, hits the live
-   edge, and the player dies; reconnecting replays the frozen window and dies at the same
-   spot. **Fix:** extend the `core/hw_encoder.py` probe path to the *Live TV master*
-   command (today `VERTICAL_HWACCEL` only wires into the VOD master — the doc's "future
-   addition" is now load-bearing). All channel types benefit. Config: reuse the existing
-   probe/fallback semantics; log chosen vs effective encoder per channel launch.
-2. **Rounds never self-terminate — `-shortest` is a no-op on the composite. ✅ FIXED (VOD).**
-   `-shortest` compares *output* streams and the composite has exactly one, so at center
-   EOF `hstack` stalls waiting on the ended input: round #1 froze at frame 3524
-   (~117.7 s ≈ center end) and hung ~85 s until externally killed (rc=1). On the VOD path
-   this froze a couple frames short of the final segment, so a short clip's readiness gate
-   never completed (seg1 never finalized). **Fix (shipped for VOD):** `build_composite_cmd`
-   / `build_audio_cmd` take a `duration` arg emitting `-t`, and `_start_run` passes
-   `center_duration − seek` (relaunches get the remaining-from-seek bound too). **Still TODO
-   for the Vertical TV channel** — `_feed_one_vertical_round` must thread the center duration
-   into the builders (it omits `duration` today, so the round still relies on the no-op
-   `-shortest`); this is also a prerequisite for rework B's deterministic EPG.
-3. **A dying sub kills the master, and the feeder never notices — the channel wedges
-   permanently.** When round #1's composite died, the TCP relay's sub-forward ended
-   (`WinError 64`), both master connections closed, and the master exited. Every later
-   round's subs then died in <1 s with `-10053 WSAECONNABORTED` (rounds #2–#5…), while
-   the feeder looped forever spawning corpses and the on-disk playlist stayed frozen —
-   only a manual process kill recovered it. **Fixes:** (a) the feeder health-checks the
-   master process before each round and on sub failure; master dead → tear down and
-   relaunch the whole channel (bounded retries + backoff, loudly logged); (b) the pipe
-   backend must survive an unclean sub abort without dropping the master-side connection
-   (drop partial raw frames — a partial 3,110,400-byte frame shifts alignment and corrupts
-   the master's rawvideo input); (c) the silent-center detector must distinguish "audio
-   sub exited because the center has no audio stream" from "audio sub exited because the
-   pipe endpoint aborted" before spawning the silence filler (rounds #2+ misdiagnosed
-   this every time).
-4. **Ultra-tall verticals crash the composite lane — VOD and channel alike. ✅ FIXED.**
-   Scene 905 / scene 25527 (720×1282): `[Parsed_crop] Invalid too big or non positive size
-   for width '608'`. The lane chain `scale=-2:1080,crop=608:1080` produced width < 608 for
-   any source taller than 1080/608 ≈ 1.776:1 (e.g. 1080×2340 → 498×1080), which the vertical
-   predicate (aspect ≥ 1.3) happily admits; the composite aborted before its first frame, so
-   the master never finished probing input #0 and never attached to the audio endpoint —
-   surfacing as a "master never attached to audio endpoint" timeout + retry loop at ~0 % CPU
-   (not a relay/read-rate issue, as first suspected). **Fix (shipped):** cover-crop in
-   `build_composite_cmd` — `scale=608:1080:force_original_aspect_ratio=increase:force_divisible_by=2,crop=608:1080,setsar=1`
-   — scale to cover the lane, then centre-crop. One change, both consumers fixed. Covered by
-   a unit test with an ultra-tall (720×1282 / 1080×2340) lane and a near-square 1.3:1 lane.
-
-**Invariants:** channel `pace_args` stays `("-re",)` (live channels must not outrun wall
-clock — only the VOD manager passes readrate tokens); the video/audio sub split is
-untouched; the VOD full-length-seek rework's behavior is untouched.
+**Invariants preserved:** `pace_args=("-re",)` (realtime pacing); video/audio sub split;
+VOD full-length-seek behavior all untouched.
 
 ## Approved rework B: Triptych channels (per-channel toggle)
 
