@@ -195,7 +195,15 @@ def build_audio_cmd(ffmpeg_bin: str, center_id: str, seek: float, sub_out_a: str
 
     `pace_args` matches `build_composite_cmd` — default realtime `-re` for the
     Vertical TV channel; the VOD compositor passes the readrate tokens.  `duration`
-    bounds the sub with `-t` so it ends with the composite (kept in lockstep).
+    bounds the sub with `-t` so it ends with the composite (kept in lockstep), and
+    adds `apad`: if the center's audio track is *shorter than its video* (a partial
+    audio stream — common), the audio would otherwise EOF early, and because the
+    parent holds a keepalive FD the master never sees that EOF — it blocks waiting
+    to interleave audio with the remaining video and the whole composite freezes at
+    the audio's end.  `apad` pads silence past the real audio, and `-t` truncates
+    the padded stream to the full run length, so the master always gets audio for
+    the entire video.  (A center with *no* audio at all is handled separately by
+    the silence-filler net in `_start_run`, since `apad` has no input to pad.)
     """
     center_url = _stash_stream_url(center_id)
     common_pre = [
@@ -203,12 +211,14 @@ def build_audio_cmd(ffmpeg_bin: str, center_id: str, seek: float, sub_out_a: str
         "-reconnect", "1", "-reconnect_streamed", "1",
         "-reconnect_at_eof", "1", "-reconnect_delay_max", "5",
     ]
+    af_chain = ("aresample=async=1000:first_pts=0,"
+                "aformat=sample_rates=48000:channel_layouts=stereo")
+    if duration and duration > 0:
+        af_chain += ",apad"  # pad silence to the run length (paired with -t below)
     return common_pre + [
         *list(pace_args), *_in_seek(seek), "-i", center_url,
         "-map", "0:a:0?", "-vn", "-sn",
-        "-af",
-        "aresample=async=1000:first_pts=0,"
-        "aformat=sample_rates=48000:channel_layouts=stereo",
+        "-af", af_chain,
         "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le",
         *(["-t", f"{duration:.3f}"] if duration and duration > 0 else []),
         "-f", "s16le", sub_out_a,

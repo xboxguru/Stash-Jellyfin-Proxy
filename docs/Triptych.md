@@ -679,6 +679,14 @@ This mirrors `_feed_one_scene`'s spawn ordering exactly (video sub first, wait f
 master's audio-endpoint attach, then the audio sub) — the same TCP-backend handshake
 constraint applies here as everywhere else in this file.
 
+**Short/partial center audio:** a center whose **audio track is shorter than its video**
+(e.g. 30 s of audio under a 118 s clip) would EOF the audio sub early; the parent's keepalive
+FD hides that EOF from the master, which then blocks waiting to interleave audio with the
+remaining video and **freezes the whole composite at the audio's end** (looks like a hard
+stall at a fixed timestamp). `build_audio_cmd` adds **`apad`** (paired with `-t`) on the VOD
+path so the audio sub always emits silence-padded audio for the full run length. The
+fully-silent case (no audio stream at all) `apad` can't help — that's the filler net below.
+
 **Silent-center safety net:** a center with no audio stream makes `-map 0:a:0?` map nothing,
 so the audio sub exits immediately — and the master, still mapping `1:a:0`, then blocks
 forever waiting for audio it never receives (the parent holds a keepalive writer FD on the

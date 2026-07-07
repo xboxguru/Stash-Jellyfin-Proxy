@@ -432,9 +432,18 @@ class TestCommandPacing:
         assert "-t" in acmd and acmd[acmd.index("-t") + 1] == "7.500"
 
     def test_channel_default_has_no_t_bound(self):
-        # Vertical TV channel omits duration → command unchanged (no -t).
+        # Vertical TV channel omits duration → command unchanged (no -t, no apad).
+        acmd = build_audio_cmd("ff", "2", 0.0, "out")
         assert "-t" not in build_composite_cmd("ff", "1", "2", "3", 0.0, "out")
-        assert "-t" not in build_audio_cmd("ff", "2", 0.0, "out")
+        assert "-t" not in acmd
+        assert "apad" not in " ".join(acmd)
+
+    def test_audio_pads_to_duration_with_apad(self):
+        # A center whose audio track is shorter than its video would EOF the audio
+        # sub early and freeze the master; apad pads silence to the run length.
+        af = build_audio_cmd("ff", "2", 0.0, "out", duration=118.7)[
+            build_audio_cmd("ff", "2", 0.0, "out", duration=118.7).index("-af") + 1]
+        assert af.endswith(",apad")
 
     def test_lanes_cover_crop_not_plain_scale(self):
         # Lanes must scale-to-cover then crop, so an ultra-tall source (720×1282,
