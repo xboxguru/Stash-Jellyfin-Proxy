@@ -228,6 +228,19 @@ class TestEnsureSegment:
         mgr._relaunch.assert_awaited_once_with("s", 3)
         await _quiesce(mgr)
 
+    async def test_stalled_wait_triggers_recovery_relaunch(self, tmp_path):
+        # A forward request within the window waits; if the wait gives up (the run
+        # stalled/froze short of it), ensure_segment relaunches AT the index to
+        # recover — this is the "seek past a stuck buffer edge" case.
+        mgr, _ = _session(tmp_path, [0, 1], alive=True, start_index=0, center_dur=8000.0)  # head=2
+        mgr._launch = AsyncMock(return_value=True)
+        mgr._relaunch = AsyncMock(return_value=True)
+        mgr._await_segment = AsyncMock(side_effect=[False, True])  # stall, then served after relaunch
+        assert await mgr.ensure_segment("s", 3, {"id": "1"}) is True
+        mgr._relaunch.assert_awaited_once_with("s", 3)
+        assert mgr._await_segment.await_count == 2
+        await _quiesce(mgr)
+
     async def test_cold_session_launches_at_index(self, tmp_path):
         mgr = _VerticalSessionManager()
         mgr.is_alive = lambda sid: False

@@ -413,11 +413,28 @@ class _VerticalSessionManager:
                 if not await self._launch(sid, center_scene, index):
                     return False
             elif self._run_covers(sid, index):
-                pass  # the live run will produce it — just wait below
+                pass  # the live run should reach it — just wait below
             else:
                 if not await self._relaunch(sid, index):
                     return False
 
+        self.touch(sid)
+        if await self._await_segment(sid, index):
+            return True
+
+        # The wait gave up: the run stalled or died before reaching `index` (a
+        # frozen encode, or a forward seek past a stall point), so waiting longer
+        # is futile — relaunch AT `index` to jump the encode there and wait once
+        # more.  This is what recovers a seek past a stuck buffer edge (the run
+        # can be nominally alive but frozen, so `_run_covers` alone won't relaunch).
+        async with self._lock:
+            if self._seg_exists(sid, index):
+                self.touch(sid)
+                return True
+            if sid not in self._dirs:
+                return False
+            if not await self._relaunch(sid, index):
+                return False
         self.touch(sid)
         return await self._await_segment(sid, index)
 
@@ -518,9 +535,17 @@ class _VerticalSessionManager:
             return 0.0
 
     async def _await_segment(self, sid: str, index: int, timeout: float = _SEG_WAIT_TIMEOUT) -> bool:
-        """Poll for segment `index` to appear on disk, up to `timeout` seconds."""
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        """Wait for segment `index` to appear on disk.
+
+        Progress-aware: as long as the encode head keeps advancing we keep waiting
+        (a slow backend may be minutes from `index` but still working), and `timeout`
+        is the *stall* window — it fails only if neither the segment appears nor the
+        head advances for that long, or the run is dead with no backfill.  Returning
+        False signals the caller to relaunch (the run won't reach `index` on its own)."""
+        start = int(self._launch_info.get(sid, {}).get("start_index", 0))
+        last_head = self._run_head(sid, start)
+        stall_deadline = time.time() + timeout
+        while True:
             if self._seg_exists(sid, index):
                 self.touch(sid)
                 return True
@@ -529,11 +554,14 @@ class _VerticalSessionManager:
             bf = self._backfill.get(sid)
             backfilling = bf is not None and not bf.done()
             if not self.is_alive(sid) and not backfilling:
-                # No run producing it and no backfill working toward it — it
-                # won't appear; the caller retries.
-                return self._seg_exists(sid, index)
+                return False  # no run producing it and no backfill — caller relaunches
+            head = self._run_head(sid, start)
+            if head > last_head:
+                last_head = head
+                stall_deadline = time.time() + timeout  # progress → keep waiting
+            elif time.time() > stall_deadline:
+                return False  # head stalled short of `index` — caller relaunches
             await asyncio.sleep(0.25)
-        return self._seg_exists(sid, index)
 
     # ── encoder / pacing helpers ───────────────────────────────────────────────
 
