@@ -816,10 +816,12 @@
                 }
                 rowsHtml += `<div class="guide-programs-row" style="width:${totalW}px;height:${ROW_H}px;">${progsHtml}</div>`;
             }
-            // Spacer row matching the left panel's "+ Add Channel" cell, so both columns
-            // are the same height. Without it the right panel can't scroll far enough to
-            // reveal the add-channel cell once the channel list exceeds the viewport.
-            rowsHtml += `<div class="guide-programs-row guide-programs-row-spacer" style="width:${totalW}px;height:${ROW_H}px;"></div>`;
+            // Spacer row matching the left panel's "+ Add Channel" cell (48px), so both
+            // columns are the same height. Without it the right panel can't scroll far
+            // enough to reveal the add-channel cell once the channel list exceeds the
+            // viewport. (The scrollbar-height filler added post-render below keeps the
+            // two panels' max scrollTop identical so they never drift apart.)
+            rowsHtml += `<div class="guide-programs-row guide-programs-row-spacer" style="width:${totalW}px;height:48px;"></div>`;
 
             wrapper.innerHTML =
                 `<div class="guide-left" id="guide-left">${leftHtml}</div>` +
@@ -968,6 +970,14 @@
             // Sync left panel vertical scroll to right panel's vertical scroll.
             const rightEl = document.getElementById('guide-right');
             const leftEl  = document.getElementById('guide-left');
+            // The right panel's horizontal scrollbar steals clientHeight, letting it
+            // scroll further than the left panel's max scrollTop — the left would clamp
+            // and the rows drift out of alignment near the bottom. Pad the left column
+            // by the scrollbar height so both panels share the same scroll range.
+            const hScrollbarH = rightEl.offsetHeight - rightEl.clientHeight;
+            if (hScrollbarH > 0) {
+                leftEl.insertAdjacentHTML('beforeend', `<div style="height:${hScrollbarH}px;flex-shrink:0;"></div>`);
+            }
             rightEl.addEventListener('scroll', () => { leftEl.scrollTop = rightEl.scrollTop; });
 
             // Wire channel cell drag-to-reorder (edit mode only)

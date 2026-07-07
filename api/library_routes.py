@@ -90,7 +90,7 @@ async def _get_libraries():
         views.append(build_folder("Stash Tags", encode_id("root", "stashtags"), server_id, cache_version, is_user_view=True))
 
     if getattr(config, "ENABLE_VERTICAL_MULTI", False):
-        views.append(build_folder("Vertical Multi-View", encode_id("root", "vertical"), server_id, cache_version, is_user_view=True))
+        views.append(build_folder("Triptych", encode_id("root", "vertical"), server_id, cache_version, is_user_view=True))
 
     tag_names = getattr(config, "TAG_GROUPS", [])
     if tag_names:

@@ -449,20 +449,11 @@ async def _fetch_scenes_for_stash_channel(ch: dict) -> list[dict]:
     _SCENE_FIELDS = "id title files { duration width height } organized rating100 o_counter tags { name } performers { id } details"
 
     if channel_type == "tag":
-        # For shorts/triptych channels with no tags, fetch all or filtered scenes
-        if is_shorts and not source_ids:
-            log.debug(f"_fetch_scenes: shorts tag channel with no source_ids, fetching all scenes")
-            query = f"""
-            query {{
-                findScenes(filter: {{per_page: -1, sort: "id", direction: ASC}}) {{
-                    scenes {{ {_SCENE_FIELDS} }}
-                }}
-            }}
-            """
-            data = await call_graphql(query, {})
-            raw = (data or {}).get("findScenes", {}).get("scenes", [])
-            log.debug(f"_fetch_scenes: all-scenes query returned {len(raw)} scenes")
-        elif is_triptych and not source_ids:
+        # For shorts/triptych channels with no tags, fetch all or filtered scenes.
+        # Triptych takes precedence: Stash can filter PORTRAIT server-side, and the
+        # shorts duration cut is applied client-side below either way — so a
+        # triptych+shorts channel gets vertical AND short, not one or the other.
+        if is_triptych and not source_ids:
             log.debug(f"_fetch_scenes: triptych tag channel with no source_ids, fetching PORTRAIT scenes")
             scene_filter = {"orientation": {"value": ["PORTRAIT"]}}
             query = f"""
@@ -475,6 +466,18 @@ async def _fetch_scenes_for_stash_channel(ch: dict) -> list[dict]:
             data = await call_graphql(query, {"sf": scene_filter})
             raw = (data or {}).get("findScenes", {}).get("scenes", [])
             log.debug(f"_fetch_scenes: PORTRAIT query returned {len(raw)} scenes")
+        elif is_shorts and not source_ids:
+            log.debug(f"_fetch_scenes: shorts tag channel with no source_ids, fetching all scenes")
+            query = f"""
+            query {{
+                findScenes(filter: {{per_page: -1, sort: "id", direction: ASC}}) {{
+                    scenes {{ {_SCENE_FIELDS} }}
+                }}
+            }}
+            """
+            data = await call_graphql(query, {})
+            raw = (data or {}).get("findScenes", {}).get("scenes", [])
+            log.debug(f"_fetch_scenes: all-scenes query returned {len(raw)} scenes")
         else:
             # INCLUDES with multiple IDs = OR — scenes matching ANY of the selected tags
             scene_filter = {"tags": {"value": source_ids, "modifier": "INCLUDES", "depth": 1}}
@@ -492,20 +495,10 @@ async def _fetch_scenes_for_stash_channel(ch: dict) -> list[dict]:
     elif channel_type == "filter":
         from core.query_builder import transform_saved_filter
         from core.stash_client import get_saved_filters
-        # For shorts/triptych channels with no filters, fetch all or portrait scenes
-        if is_shorts and not source_ids:
-            log.debug(f"_fetch_scenes: shorts filter channel with no source_ids, fetching all scenes")
-            query = f"""
-            query {{
-                findScenes(filter: {{per_page: -1, sort: "id", direction: ASC}}) {{
-                    scenes {{ {_SCENE_FIELDS} }}
-                }}
-            }}
-            """
-            data = await call_graphql(query, {})
-            raw = (data or {}).get("findScenes", {}).get("scenes", [])
-            log.debug(f"_fetch_scenes: all-scenes query returned {len(raw)} scenes")
-        elif is_triptych and not source_ids:
+        # For shorts/triptych channels with no filters, fetch portrait or all scenes.
+        # Triptych takes precedence (server-side PORTRAIT filter); the shorts duration
+        # cut happens client-side below, so triptych+shorts = vertical AND short.
+        if is_triptych and not source_ids:
             log.debug(f"_fetch_scenes: triptych with no source_ids, fetching PORTRAIT scenes")
             scene_filter = {"orientation": {"value": ["PORTRAIT"]}}
             query = f"""
@@ -518,6 +511,18 @@ async def _fetch_scenes_for_stash_channel(ch: dict) -> list[dict]:
             data = await call_graphql(query, {"sf": scene_filter})
             raw = (data or {}).get("findScenes", {}).get("scenes", [])
             log.debug(f"_fetch_scenes: PORTRAIT query returned {len(raw)} scenes")
+        elif is_shorts and not source_ids:
+            log.debug(f"_fetch_scenes: shorts filter channel with no source_ids, fetching all scenes")
+            query = f"""
+            query {{
+                findScenes(filter: {{per_page: -1, sort: "id", direction: ASC}}) {{
+                    scenes {{ {_SCENE_FIELDS} }}
+                }}
+            }}
+            """
+            data = await call_graphql(query, {})
+            raw = (data or {}).get("findScenes", {}).get("scenes", [])
+            log.debug(f"_fetch_scenes: all-scenes query returned {len(raw)} scenes")
         else:
             # Union results from all source filters, deduplicating by scene ID
             saved_all = await get_saved_filters()
@@ -710,7 +715,7 @@ def _half_hour_floor(ts: float) -> float:
     return float((int(ts) // _HALF_HOUR) * _HALF_HOUR)
 
 
-def _shorts_blocks_in_range(scenes: list[dict], range_start: float, range_end: float) -> list[dict]:
+def _shorts_blocks_in_range(scenes: list[dict], range_start: float, range_end: float, title: str = "Shorts") -> list[dict]:
     """Produce contiguous ~30-minute Shorts blocks between range_start and range_end.
 
     The first block's start is aligned to the nearest UTC half-hour boundary at or
@@ -766,7 +771,7 @@ def _shorts_blocks_in_range(scenes: list[dict], range_start: float, range_end: f
                 "eid":          _new_eid(),
                 "start_ts":     block_start,
                 "stop_ts":      block_stop,
-                "title":        "Shorts",
+                "title":        title,
                 "duration_sec": block_stop - block_start,
                 "segments":     segments,
             })
@@ -780,14 +785,14 @@ def _shorts_blocks_in_range(scenes: list[dict], range_start: float, range_end: f
     return blocks
 
 
-def _build_shorts_block_schedule(scenes: list[dict]) -> list[dict]:
+def _build_shorts_block_schedule(scenes: list[dict], title: str = "Shorts") -> list[dict]:
     """Build the full Shorts schedule across the keep/sched window."""
     if not scenes:
         return []
     keep_days  = max(1, int(getattr(config, "STASH_KEEP_DAYS", 2)))
     sched_days = max(1, int(getattr(config, "STASH_SCHEDULE_DAYS", 7)))
     now = time.time()
-    return _shorts_blocks_in_range(scenes, now - keep_days * 86400, now + sched_days * 86400)
+    return _shorts_blocks_in_range(scenes, now - keep_days * 86400, now + sched_days * 86400, title=title)
 
 
 def _maintenance_extend_channel(
@@ -856,6 +861,7 @@ def _maintenance_extend_shorts(
     scenes: list[dict],
     keep_days: int,
     sched_days: int,
+    title: str = "Shorts",
 ) -> tuple[list[dict], int, int]:
     """Prune stale Shorts blocks and append new ones to fill the window."""
     now        = time.time()
@@ -872,7 +878,7 @@ def _maintenance_extend_shorts(
     else:
         frontier = cutoff
 
-    new_blocks = _shorts_blocks_in_range(scenes, frontier, target_end)
+    new_blocks = _shorts_blocks_in_range(scenes, frontier, target_end, title=title)
     return retained + new_blocks, pruned, len(new_blocks)
 
 
@@ -922,6 +928,8 @@ async def _get_stash_channels() -> list[dict]:
             "stash_id": str(source_ids[0]) if source_ids else "",
             "triptych": cfg.get("triptych", False),
             "triptych_salt": cfg.get("triptych_salt", ""),
+            "shorts": cfg.get("shorts", False),
+            "shorts_max_minutes": cfg.get("shorts_max_minutes"),
         }
         channels.append(ch)
 
@@ -959,7 +967,7 @@ async def _rebuild_stash_schedules():
                     if not scenes:
                         logger.warning(f"LiveTV: no scenes for channel '{ch['name']}' — EPG will be empty")
                         continue
-                    slots = _build_shorts_block_schedule(scenes)
+                    slots = _build_shorts_block_schedule(scenes, title=ch.get("name", "Shorts"))
                     new_schedule[tvg_id] = slots
                     seg_total = sum(len(b.get("segments", [])) for b in slots)
                     logger.notice(f"LiveTV: schedule built for '{ch['name']}' — {len(scenes)} scenes, {len(slots)} 30-min blocks, {seg_total} segments")
@@ -1006,7 +1014,7 @@ async def _run_maintenance_update():
                 if _is_shorts_channel(ch):
                     # Shorts still prunes past blocks even when scenes is empty
                     # (channel temporarily without content); extend is just a no-op.
-                    updated, pruned, added = _maintenance_extend_shorts(existing, scenes, keep_days, sched_days)
+                    updated, pruned, added = _maintenance_extend_shorts(existing, scenes, keep_days, sched_days, title=ch.get("name", "Shorts"))
                 else:
                     if not scenes:
                         continue

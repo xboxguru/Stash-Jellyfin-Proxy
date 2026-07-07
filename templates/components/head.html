@@ -150,7 +150,9 @@
         .guide-wrapper { display: flex; height: calc(100vh - 230px); min-height: 300px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--bg-primary); }
         /* Left panel: channel column — only the right panel scrolls horizontally */
         .guide-left { width: 160px; flex-shrink: 0; overflow: hidden; display: flex; flex-direction: column; border-right: 1px solid var(--border); }
-        .guide-corner { height: 36px; flex-shrink: 0; background: var(--bg-secondary); border-bottom: 1px solid var(--border); }
+        /* Sticky: the left panel scrolls via JS-synced scrollTop; the corner must stay
+           pinned like the right panel's sticky ruler or the two headers drift apart. */
+        .guide-corner { position: sticky; top: 0; z-index: 10; height: 36px; flex-shrink: 0; background: var(--bg-secondary); border-bottom: 1px solid var(--border); }
         .guide-channel-cell { height: 80px; flex-shrink: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; padding: 6px; background: var(--bg-card); border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.15s; overflow: hidden; }
         .guide-channel-cell:hover { background: var(--bg-secondary); }
         .guide-ch-logo { width: 40px; height: 40px; object-fit: contain; border-radius: 4px; background: var(--bg-primary); flex-shrink: 0; }

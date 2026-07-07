@@ -54,6 +54,35 @@ class TestIsShortsChannel:
         assert ltd._is_shorts_channel({"stash_type": "filter", "shorts": False}) is False
 
 
+class TestGetStashChannelsFlagPropagation:
+    """_get_stash_channels() builds the runtime channel dicts that the schedule
+    builder, scene fetch, and guide payload all consume — every per-channel flag
+    in channels.json must survive the copy. (Regression: `shorts` and
+    `shorts_max_minutes` were dropped here, so shorts channels got random
+    schedules and no duration filter.)"""
+
+    async def test_propagates_shorts_and_triptych_fields(self, monkeypatch):
+        cfg = {
+            "tvg_id": "ch_test1", "name": "Verts", "number": "5001",
+            "stash_type": "filter", "source_ids": [],
+            "triptych": True, "triptych_salt": "abc",
+            "shorts": True, "shorts_max_minutes": 3,
+            "order": 0,
+        }
+        monkeypatch.setattr(ltd, "_channels_config", [cfg])
+        monkeypatch.setitem(ltd._stash_channels_cache, "data", None)
+        monkeypatch.setitem(ltd._stash_channels_cache, "ts", 0.0)
+
+        channels = await ltd._get_stash_channels()
+
+        ch = next(c for c in channels if c["tvg_id"] == "ch_test1")
+        assert ch["triptych"] is True
+        assert ch["triptych_salt"] == "abc"
+        assert ch["shorts"] is True
+        assert ch["shorts_max_minutes"] == 3
+        assert ltd._is_shorts_channel(ch) is True
+
+
 # ── _feed_one_vertical_round ─────────────────────────────────────────────────
 
 class _FakeStderr:

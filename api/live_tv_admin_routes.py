@@ -41,7 +41,7 @@ async def _rebuild_single_channel(tvg_id: str):
                 logger.warning(f"LiveTV: no scenes for '{ch['name']}' — schedule will be empty (type={ch.get('stash_type')}, triptych={ch.get('triptych')}, source_ids={ch.get('source_ids')})")
                 return
             if _is_shorts_channel(ch):
-                _stash_schedule[tvg_id] = _build_shorts_block_schedule(scenes)
+                _stash_schedule[tvg_id] = _build_shorts_block_schedule(scenes, title=ch.get("name", "Shorts"))
             else:
                 _stash_schedule[tvg_id] = _build_random_schedule(scenes)
             logger.info(f"LiveTV: rebuilt schedule for '{ch['name']}' — {len(scenes)} scenes")
