@@ -135,8 +135,11 @@ async def endpoint_channels_config_create(request: Request):
     name       = str(body.get("name", "")).strip()
     stash_type = str(body.get("stash_type", "tag"))
     source_ids = [str(s) for s in (body.get("source_ids") or [])]
-    if not name or (stash_type != "shorts" and not source_ids):
-        return JSONResponse({"error": "name and source_ids are required"}, status_code=400)
+    triptych   = bool(body.get("triptych", False))
+    is_shorts  = stash_type == "shorts"
+    # source_ids required unless it's shorts or triptych
+    if not name or (not is_shorts and not triptych and not source_ids):
+        return JSONResponse({"error": "name is required; source_ids required unless using Shorts or Triptych"}, status_code=400)
 
     # Auto-assign next available channel number
     used_numbers = {int(c["number"]) for c in _channels_config if str(c.get("number", "")).isdigit()}
@@ -153,6 +156,7 @@ async def endpoint_channels_config_create(request: Request):
     tvg_id = "ch_" + os.urandom(4).hex()
     new_cfg = {"tvg_id": tvg_id, "name": name, "number": number,
                "stash_type": stash_type, "source_ids": source_ids,
+               "triptych": triptych, "triptych_salt": str(body.get("triptych_salt", "")).strip(),
                "order": len(_channels_config)}
     _channels_config.append(new_cfg)
     _save_channels_config()
