@@ -1030,6 +1030,9 @@
             document.getElementById('logo-modal-title').textContent = el.dataset.chname || 'Edit Channel';
             document.getElementById('ch-edit-name').value = '';
             document.getElementById('ch-edit-number').value = '';
+            document.getElementById('ch-edit-triptych').checked = false;
+            document.getElementById('ch-edit-triptych-salt').value = '';
+            updateTriptychUI();
             document.getElementById('ch-edit-source-search').value = '';
             document.getElementById('ch-edit-source-list').innerHTML = '<div class="empty-state" style="padding:12px;">Loading…</div>';
             document.getElementById('ch-edit-source-pills').innerHTML = '';
@@ -1059,6 +1062,9 @@
                     if (cfg) {
                         document.getElementById('ch-edit-name').value = cfg.name || '';
                         document.getElementById('ch-edit-number').value = cfg.number != null ? cfg.number : '';
+                        document.getElementById('ch-edit-triptych').checked = cfg.triptych || false;
+                        document.getElementById('ch-edit-triptych-salt').value = cfg.triptych_salt || '';
+                        updateTriptychUI();
                         _chEditType = cfg.stash_type || 'tag';
                         _chEditSources = (cfg.source_ids || []).map(id => ({ id: String(id), name: String(id) }));
                     }
@@ -1067,6 +1073,14 @@
 
             _setChEditTab(_chEditType);
             await _loadChEditSources();
+        }
+
+        function updateTriptychUI() {
+            const triptychCheckbox = document.getElementById('ch-edit-triptych');
+            const saltSection = document.getElementById('ch-triptych-salt-section');
+            if (saltSection) {
+                saltSection.style.display = triptychCheckbox.checked ? 'block' : 'none';
+            }
         }
 
         function closeLogoModal() {
@@ -1293,7 +1307,9 @@
                         name,
                         number: number !== '' ? parseInt(number) : null,
                         stash_type: _chEditType,
-                        source_ids: _chEditSources.map(s => s.id)
+                        source_ids: _chEditSources.map(s => s.id),
+                        triptych: document.getElementById('ch-edit-triptych').checked,
+                        triptych_salt: document.getElementById('ch-edit-triptych-salt').value.trim()
                     })
                 });
                 if (res.ok) {

@@ -95,6 +95,19 @@
                 <div class="ch-source-pills" id="ch-edit-source-pills"></div>
             </div>
 
+            <!-- Triptych Options -->
+            <div class="logo-modal-section">
+                <div class="logo-modal-label">Composite Playback</div>
+                <label class="picker-filter-check" style="margin-bottom:12px;">
+                    <input type="checkbox" id="ch-edit-triptych" onchange="updateTriptychUI()">
+                    Enable Triptych (center + 2 sides composite)
+                </label>
+                <div id="ch-triptych-salt-section" style="display:none;">
+                    <input type="text" id="ch-edit-triptych-salt" class="form-input" placeholder="Salt (optional, for shuffling sides)" style="width:100%;">
+                    <div class="form-hint" style="margin-top:4px;">Leave empty for default, or enter any text to change side pairings.</div>
+                </div>
+            </div>
+
             <!-- Artwork -->
             <div class="logo-modal-section">
                 <div class="logo-modal-label">Artwork</div>
