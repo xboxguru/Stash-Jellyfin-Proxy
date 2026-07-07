@@ -292,7 +292,10 @@ async def endpoint_vertical_segment(request: Request) -> Response:
     """
     session_id = request.path_params.get("session_id", "")
     seg_name = request.path_params.get("seg_name", "")
-    if not re.match(r"^seg\d+\.ts$", seg_name):
+    # Match only the zero-padded names we mint (seg%05d.ts); an unpadded name like
+    # `seg7.ts` would parse to index 7 but the engine would produce seg00007.ts, so
+    # the recheck below would 404 forever — reject it up front instead.
+    if not re.match(r"^seg\d{5,}\.ts$", seg_name):
         return Response(status_code=400)
     if not _valid_session_id(session_id):
         logger.warning(f"Vertical: segment request with malformed session id {session_id!r}")

@@ -265,6 +265,10 @@ sides just loop; Shape A above is what shipped.)
 
 ### Full-length seek + segment cache
 
+> **Status: implemented 2026-07-06, not yet field-tested.** Remove this line once VOD
+> playback, full-range seeking, post-reap resume, and backfill have been verified on a
+> real client.
+
 The whole center timeline is seekable the instant playback starts, and spin-up is fast,
 because of five interlocking pieces:
 
@@ -443,7 +447,135 @@ bundled Intel stack. Because decode stays on CPU, we avoid pulling the CUDA runt
 - **Intel QSV / VAAPI** — `--device /dev/dri:/dev/dri` passthrough.
 - **CPU** — nothing; it's the automatic fallback when no GPU is available or the probe fails.
 
+## Approved rework A: engine stability fixes
+
+> **Status: approved design, NOT yet implemented.** Root causes below were confirmed from
+> the 2026-07-06 channel field test (proxy log + `livetv_ffmpeg/63682d76...log`). The
+> implementing chat must fold each fix into the relevant sections of this doc and delete
+> this banner. **Implement this rework before rework B** — B builds on a stable engine.
+
+Four confirmed defects, ordered by severity. Fixes 1–3 live in `api/live_tv_engine.py`;
+fix 4 is in the shared builder in `api/vertical_engine.py` and benefits VOD too.
+
+1. **Channel pipeline runs below realtime → clients exhaust the segment window and
+   crash.** The round-#1 composite held `speed=0.58–0.61x / 18 fps` for its entire life:
+   3 CPU decodes + hstack + the Live TV master's CPU `libx264` encode outrun this host.
+   A viewer consumes at 1.0×, drains the `hls_list_size 15` (~60 s) window, hits the live
+   edge, and the player dies; reconnecting replays the frozen window and dies at the same
+   spot. **Fix:** extend the `core/hw_encoder.py` probe path to the *Live TV master*
+   command (today `VERTICAL_HWACCEL` only wires into the VOD master — the doc's "future
+   addition" is now load-bearing). All channel types benefit. Config: reuse the existing
+   probe/fallback semantics; log chosen vs effective encoder per channel launch.
+2. **Rounds never self-terminate — `-shortest` is a no-op on the composite.**
+   `-shortest` compares *output* streams and the composite has exactly one, so at center
+   EOF `hstack` stalls waiting on the ended input: round #1 froze at frame 3524
+   (~117.7 s ≈ center end) and hung ~85 s until externally killed (rc=1). **Fix:** bound
+   every composite (and audio sub) with an explicit `-t (center_duration − seek)` computed
+   from Stash metadata. This is also a prerequisite for rework B's deterministic EPG —
+   block durations become exact. Apply in the shared builders so VOD relaunches
+   (`ensure_segment`) get the same bound (`-t` = remaining duration from the seek point).
+3. **A dying sub kills the master, and the feeder never notices — the channel wedges
+   permanently.** When round #1's composite died, the TCP relay's sub-forward ended
+   (`WinError 64`), both master connections closed, and the master exited. Every later
+   round's subs then died in <1 s with `-10053 WSAECONNABORTED` (rounds #2–#5…), while
+   the feeder looped forever spawning corpses and the on-disk playlist stayed frozen —
+   only a manual process kill recovered it. **Fixes:** (a) the feeder health-checks the
+   master process before each round and on sub failure; master dead → tear down and
+   relaunch the whole channel (bounded retries + backoff, loudly logged); (b) the pipe
+   backend must survive an unclean sub abort without dropping the master-side connection
+   (drop partial raw frames — a partial 3,110,400-byte frame shifts alignment and corrupts
+   the master's rawvideo input); (c) the silent-center detector must distinguish "audio
+   sub exited because the center has no audio stream" from "audio sub exited because the
+   pipe endpoint aborted" before spawning the silence filler (rounds #2+ misdiagnosed
+   this every time).
+4. **Ultra-tall verticals crash the composite lane — VOD and channel alike.** Scene 905:
+   `[Parsed_crop_7] Invalid too big or non positive size for width '608'`. The lane chain
+   `scale=-2:1080,crop=608:1080` produces width < 608 for any source taller than
+   1080/608 ≈ 1.776:1 (e.g. 1080×2340 → 498×1080), which the vertical predicate
+   (aspect ≥ 1.3) happily admits. **Fix:** cover-crop in `build_composite_cmd`:
+   `scale=608:1080:force_original_aspect_ratio=increase,crop=608:1080,setsar=1` — scale to
+   cover the lane, then center-crop. One change, both consumers fixed. Add a unit test
+   with a 1080×2340 lane and a near-square 1.3:1 lane.
+
+**Invariants:** channel `pace_args` stays `("-re",)` (live channels must not outrun wall
+clock — only the VOD manager passes readrate tokens); the video/audio sub split is
+untouched; the VOD full-length-seek rework's behavior is untouched.
+
+## Approved rework B: Triptych channels (per-channel toggle)
+
+> **Status: approved design, NOT yet implemented. Requires rework A first.** Supersedes
+> § *Vertical TV channel* below (the synthetic-channel design) — the implementing chat
+> must rewrite that section as implemented behavior and delete this banner.
+
+The 2026-07-06 field test surfaced three *designed-in* gaps of the synthetic channel: no
+Guide data (schedule builder skips `vertical_tv`), "channel doesn't exist" from the
+rebuild endpoint (not a `channels.json` row), and a channel editor showing tags/filters
+that do nothing. Rather than patching the special case, triptych becomes a **property of
+ordinary channels** — deleting the special case deletes the whole bug class.
+
+### Decisions (locked 2026-07-06)
+
+1. **`triptych: true` is a per-channel flag in `channels.json`.** Any tag/filter/shorts
+   channel can set it. Semantics: the channel's scene lineup is additionally filtered by
+   the vertical predicate, and the feeder plays every block as a composite round
+   (center + 2 sides) instead of a single scene. Uniform rule — a triptych channel is
+   *all* triptych; there is no per-block mixed mode (considered, deferred: it complicates
+   the feeder dispatch and makes EPG blocks ambiguous). To offer both flavors of the same
+   content (e.g. standard shorts *and* triptych shorts), create two channels — the
+   implementer must ensure shorts-type channels are instantiable like tag/filter channels
+   if they are currently a singleton.
+2. **The synthetic `vertical_tv` channel is deleted, with migration.** On startup, if
+   `ENABLE_VERTICAL_TV_CHANNEL` is true and no migrated channel exists yet, create a real
+   `channels.json` entry — name "Vertical TV", `triptych: true`, an all-verticals filter,
+   channel number `VERTICAL_TV_CHANNEL_NUMBER` — then mark the migration done (one-shot;
+   the user can freely edit or delete the real channel afterwards). The
+   `_build_vertical_tv_channel` / `_feeder_vertical` special cases, the
+   `_rebuild_stash_schedules` skip-branch, and the `_build_stash_channel_playlist`
+   short-circuit are all removed. Retire `ENABLE_VERTICAL_TV_CHANNEL` +
+   `VERTICAL_TV_CHANNEL_NUMBER` from config defaults after migration support ships
+   (keep reading them for the migration itself).
+3. **Deterministic schedule, exactly like other channels.** The lineup builder produces
+   the center sequence from the channel's (vertical-scoped) query; the schedule builder
+   turns it into `_stash_schedule` EPG entries with block duration = center duration
+   (exact, thanks to rework A's `-t` bounds). Guide data, the rebuild endpoint, "now
+   playing", and mid-block seek-on-join all work because it *is* a normal scheduled
+   channel.
+4. **Deterministic sides via seeded RNG, with a per-channel salt.** Side selection for a
+   block runs the existing `core/vertical_selection.py` algorithm with a seeded
+   `random.Random` instance instead of the module-level RNG:
+   `seed = hash((channel_id, TRIPTYCH_SALT, schedule_generation, block_index, center_id))`.
+   The salt is a free-text field on the channel config (default `""`): changing it
+   re-rolls every block's sides without rebuilding the lineup — a cheap "shuffle the
+   sides" knob. Determinism means a channel relaunch (rework A fix 3) or a mid-block
+   viewer join reproduces the identical triptych.
+5. **Mid-block join phases all three lanes.** Joining a block at offset *t* seeks the
+   center by *t* (the scheduled feeder's existing seek math) and launches the sides at
+   `t mod side_duration` — the builders already take per-side seeks
+   (`build_composite_cmd(..., left_seek, right_seek)`), added by the VOD rework.
+6. **Channel editor UI:** a Triptych toggle + salt field; the tags/filters controls now
+   genuinely drive the (vertical-scoped) lineup. EPG block titles show the center's
+   title; listing the sides in the program description is a nice-to-have, not required.
+
+### Feeder dispatch after the rework
+
+`_feeder` walks `_stash_schedule` as today; per **channel** (not per block), if the
+channel is `triptych`, each schedule entry is played via a composite round — sides
+resolved deterministically at feed time (not stored in the schedule), `-t` bounded,
+health-checked per rework A. `_feeder_vertical`'s round-spawning mechanics
+(`_feed_one_vertical_round`, silent-center safety net, spawn ordering) survive as the
+triptych round player; its infinite fresh-random loop does not.
+
+### Tests
+
+Migration one-shot (creates the channel once, honors user deletion); vertical-scoped
+lineup build; seeded-sides determinism (same seed inputs → same sides; salt change →
+different sides); EPG entries for a triptych channel; mid-block phase math; shorts
+standard + triptych coexistence; feeder dispatch per channel type.
+
 ## Vertical TV channel — `api/live_tv_engine.py`
+
+> **Superseded by § Approved rework B above** — this section documents the synthetic
+> channel that currently ships; rework B replaces it with a per-channel triptych toggle.
 
 An optional always-on Live TV channel that runs the compositor continuously, cycling fresh
 center/side clips forever instead of playing one chosen scene. It's a genuinely new *Live TV

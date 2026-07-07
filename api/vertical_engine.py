@@ -307,8 +307,11 @@ class _VerticalSessionManager:
         Fast path: the file already exists.  Otherwise, under the lock, decide:
         launch (session gone), wait (the live run will reach it imminently), or
         relaunch at `index` (back-seek / far forward seek / dead encoder).  The
-        wait for the file happens outside the lock so it never blocks other
-        sessions.
+        long *file-poll* happens outside the lock; the launch/relaunch spawn
+        (including its endpoint-attach waits) is under the lock, as elsewhere in
+        this manager, so a concurrent respin briefly serializes other sessions'
+        lock-taking calls — acceptable given the cap is small and Stash is
+        single-user.
         """
         async with self._lock:
             total = self.total_segments(sid)
@@ -589,8 +592,15 @@ class _VerticalSessionManager:
         # first segment seg{start_index}, and force_key_frames pins keyframes to
         # the 4 s segment grid, so segment N always covers center time [N*4,N*4+4).
         # The muxer keeps all .ts files on disk (no delete flag); we ignore its own
-        # playlist entirely.  `enc` supplies the encoder/device/hwupload groups so
-        # decode + hstack stay on CPU.
+        # playlist entirely.  `temp_file` is essential: the synthetic VOD playlist
+        # lists every segment up front, so a client can request seg{N} the instant
+        # it seeks there — without temp_file the muxer's seg{N}.ts exists (and is
+        # served) while still being written (or is left partial when a respin/reap
+        # SIGTERMs the master), which `_seg_exists`/`_await_segment` would trust as
+        # complete and stream truncated.  temp_file writes to seg{N}.ts.tmp and
+        # renames on finalize, so seg{N}.ts only appears once whole.
+        # `enc` supplies the encoder/device/hwupload groups so decode + hstack stay
+        # on CPU.
         master_cmd = [
             ffmpeg_bin, "-y", "-hide_banner",
             *enc.input_args,
@@ -606,7 +616,7 @@ class _VerticalSessionManager:
             "-force_key_frames", "expr:gte(t,n_forced*4)",
             "-c:a", "aac", "-b:a", "192k",
             "-hls_time", "4",
-            "-hls_flags", "independent_segments",
+            "-hls_flags", "independent_segments+temp_file",
             "-hls_list_size", "0",
             "-start_number", str(start_index),
             "-hls_segment_filename", seg_tmpl,
