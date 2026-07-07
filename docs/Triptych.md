@@ -174,8 +174,15 @@ the detail view keeps the compositor source.
    direct play off), `PlaySessionId={session}`. The source is a **finite** VOD
    (`RunTimeTicks` = center length, `IsLive=false`) so the client shows a scrub bar.
 2. `endpoint_stream` has a guard mirroring the Live TV one: a `vscene-` id built straight
-   into `/Videos/{id}/stream` (client bypassing PlaybackInfo) 302-redirects to a fresh
-   composite session.
+   into `/Videos/{id}/stream` (client bypassing PlaybackInfo) 302-redirects to a composite
+   session.
+
+   **Dedupe by scene:** both entry points call `_vertical_manager.session_for_scene(scene_id)`
+   and reuse an existing non-stopped session for that scene (preferring a live one, else a
+   cached/reaped one) instead of minting a fresh nonce. Some clients (e.g. Wholphin/ExoPlayer)
+   query PlaybackInfo *and* build the `/Videos/stream` URL; without dedupe each would start
+   its own encode, doubling the CPU and cap/disk pressure. With it, one composite drives the
+   play. The nonce still makes a *fresh* play (after the session is torn down) re-roll sides.
 3. `/vertical/{session}/master.m3u8` serves a **proxy-synthesized VOD playlist** covering
    the entire center duration (not FFmpeg's own playlist — see § Full-length seek + segment
    cache); `/vertical/{session}/seg/{name}` serves each segment, producing it on demand if
@@ -226,6 +233,14 @@ endpoint first, the composite sub connects second (producer), then the master at
 the audio endpoint (only possible after `find_stream_info()` on the video input completes,
 which needs the composite sub already writing), then the audio sub connects.
 
+**TCP-relay throughput (`_RELAY_BUFSIZE`, Windows only):** the FIFO backend forwards bytes
+in-kernel, but the Windows TCP relay copies them through a single asyncio loop. At the
+default 64 KB `start_server` limit / read size, a ~3 MB raw frame is shuttled in ~48 tiny
+chunks and the per-chunk overhead throttles the composite (observed ~0.14× realtime → the
+readiness gate timed out). The relay reads and its `StreamReader` `limit` are raised to
+**4 MB** (a whole frame per iteration). This is a dev-backend property; the FIFO backend has
+no relay in the path and runs full-speed.
+
 ### Filtergraph geometry (Shape A)
 
 ```
@@ -272,9 +287,10 @@ sides just loop; Shape A above is what shipped.)
 
 ### Full-length seek + segment cache
 
-> **Status: implemented 2026-07-06, not yet field-tested.** Remove this line once VOD
-> playback, full-range seeking, post-reap resume, and backfill have been verified on a
-> real client.
+> **Status: implemented 2026-07-06; field-tested 2026-07-07 on the Windows/TCP-relay dev
+> backend** (Wholphin/ExoPlayer), which surfaced and fixed a series of real bugs — see the
+> `### Field-test fixes` subsection below. The FIFO/Linux (Unraid) deployment, which has no
+> TCP relay in the path, is still the definitive performance/stability target.
 
 The whole center timeline is seekable the instant playback starts, and spin-up is fast,
 because of five interlocking pieces:
@@ -288,28 +304,47 @@ advertised `RunTimeTicks`, so the full timeline is seekable from the first fetch
 segment↔time contract is exact: the master forces keyframes with
 `force_key_frames expr:gte(t,n_forced*4)` and cuts at `-hls_time 4`, so segment *N* always
 covers center time `[N*4, N*4+4)`. `SEG_DURATION`, `hls_time`, and that expression must stay
-in lockstep.
+in lockstep. The master runs `-hls_flags independent_segments+temp_file`: **`temp_file`** is
+essential — because the playlist advertises every segment up front, a client can request
+seg *N* the instant it seeks there, and without `temp_file` the muxer's `seg{N}.ts` exists
+(and would be served) while still being written or left partial by a teardown; `temp_file`
+writes `seg{N}.ts.tmp` and renames on finalize, so `seg{N}.ts` only appears whole. The
+range tracker's `seg(\d+)\.ts$` anchor excludes the `.tmp` files.
 
-**2. Full-speed encode.** The vertical subs drop `-re` (the Live TV pacing flag) — the client
-reads static files off disk, the encoder outruns it, and there is no client-paced
-backpressure in the chain. The video/audio process split stays (that is the actual deadlock
-protection; see § Pipe topology). With `-shortest` against the looping sides, the pipeline
-exits on its own once the center is fully encoded, and the session degrades to pure static
-files. `VERTICAL_READRATE` (float, default `0` = unlimited) optionally caps the burst via
-`-readrate N` for thermally-constrained hosts.
+**2. Full-speed encode (backend-aware).** The vertical subs drop `-re` (the Live TV pacing
+flag) — the client reads static files off disk, the encoder outruns it, and there is no
+client-paced backpressure in the chain. On the **FIFO backend** the subs run at
+`VERTICAL_READRATE` (default `0` = unlimited full speed). On the **TCP relay** they are
+capped at `_TCP_RELAY_READRATE` (3×) — full-speed raw video overwhelms the single-threaded
+relay — but still outrun a 1× client. The video/audio process split stays (the actual
+deadlock protection; see § Pipe topology). `-shortest` is a **no-op** on the single-output
+composite, so each sub is bounded by an explicit `-t (center_duration − seek)` to exit at
+center EOF (see Field-test fix #2); when the subs exit, the master finalizes gracefully on
+EOF (fix #3).
 
 **3. Segment range tracker + `ensure_segment(index)` — the single recovery path.** The
 session tracks which segment indexes exist on disk (produced ranges; seeks leave holes).
-A request for a missing segment calls `ensure_segment(index)`, which either **waits** (the
-live encode head is within `_SEG_WAIT_LOOKAHEAD` segments — a momentary client-ahead-of-
-encoder miss resolves in well under a second at full speed) or **relaunches** the subs with
-`-ss index*4` on the center and `-start_number index` on the master, into the *same* session
-dir (old segments stay valid). That one path serves **seek past the encode head**, **seek
-back into an unfilled gap**, and **resume after a process reap** identically. A respin never
-counts against `VERTICAL_MAX_SESSIONS` — it's the same session. Relaunches are debounced by
-the session lock: a newer target re-decides after the previous respin lands rather than
-stacking a second one. A request that carries **no** position (`None` vs `0.0` through
-`_seek_seconds` → `ensure`) is steady-state and never disturbs the running encode.
+A request for a missing segment calls `ensure_segment(index)`, which decides:
+
+- **within `_FORWARD_WAIT_SEGMENTS` (24) of the live head** → *wait* (`_await_segment`). This
+  window must exceed any client read-ahead buffer (ExoPlayer buffers ~30–60 s ≈ 8–15
+  segments ahead) — a smaller window mistook read-ahead for a seek and caused a relaunch
+  storm (fix #4). The wait is **progress-aware**: it keeps waiting while the encode head
+  advances, so a slow-but-working encode is never abandoned.
+- **farther ahead, behind the run start, or the encoder is dead** → *relaunch* the subs with
+  `-ss index*4` on the center and `-start_number index` on the master, into the *same* dir
+  (old segments stay valid).
+- **the wait gave up** (head stalled/froze short of the target — e.g. a seek *past* a stuck
+  buffer edge) → *relaunch at the index* and wait once more, so a stalled encode recovers
+  instead of 404ing forever (fix #6).
+
+That one path serves seek-past-head, seek-into-a-gap, resume-after-reap, and
+recover-from-stall identically. A respin never counts against `VERTICAL_MAX_SESSIONS` — same
+session. Relaunches serialize on the session lock (a newer target re-decides after the
+previous respin lands). A request with **no** position (`None` vs `0.0` through
+`_seek_seconds` → `ensure`) is steady-state and never disturbs the running encode. The
+segment endpoint 404s a request **past the last real segment** (`index ≥ total`) without
+respinning (a player probing beyond EOF).
 
 **4. Sides are phased to the timeline, not to watch time.** Cached segments bake the side
 pixels in: the segment at position *T* necessarily shows the sides at `T mod side_duration`
@@ -324,16 +359,58 @@ forward seeks) and lets it run to the end, so backward seeking always cache-hits
 Backfill runs one relaunch at a time, defers to any live user-driven run (`ensure_segment`
 wins), stops on a stall (a gap that made no progress), and is skipped after a stage-1 reap.
 
+### Field-test fixes (2026-07-07)
+
+Field-testing on the Windows/TCP-relay dev backend surfaced a run of concrete bugs — each
+was diagnosed from the per-session FFmpeg log (`vertical_ffmpeg/{session}.log`), **not** from
+guessing at "relay flakiness." All are fixed and unit-tested; most are backend-agnostic and
+also apply to the FIFO/Linux path.
+
+1. **Ultra-tall clips crashed the composite.** `scale=-2:1080,crop=608:1080` produces a lane
+   narrower than 608 for any source taller than 1080/608 ≈ 1.776:1 (e.g. a 720×1282 center →
+   606 px), and `crop=608` then aborts the whole composite before its first frame. **Fix:**
+   cover-crop — `scale=608:1080:force_original_aspect_ratio=increase:force_divisible_by=2,crop=608:1080`.
+2. **`-shortest` is a no-op → the composite hung at center EOF.** With one output stream,
+   `-shortest` never fires, so at center EOF `hstack` stalls on the ended input; a short clip
+   froze a couple frames short of finalizing its last segment. **Fix:** bound each sub with
+   `-t (center_duration − seek)` (the `duration` arg to the shared builders; the Vertical TV
+   channel omits it and is byte-identical to before).
+3. **Windows hard-kill dropped the last segment.** `proc.terminate()` is `TerminateProcess()`
+   on Windows (no graceful flush), so terminating the master at run end left `seg{N}.ts.tmp`
+   un-renamed; a 2-segment clip lost `seg1`. **Fix:** `_kill_procs` closes the backend
+   (hands the master EOF) and **waits `_MASTER_GRACE_SECS` for it to finalize and exit on its
+   own**, hard-killing only if that stalls.
+4. **Read-ahead relaunch storm.** `_run_covers` used a 4-segment forward window, so a client
+   buffering ~50 s ahead had every read-ahead request treated as a forward seek → relaunch,
+   killing the healthy encode. **Fix:** widen the forward-wait window to `_FORWARD_WAIT_SEGMENTS`
+   (24), above any client buffer.
+5. **Silent / short-audio centers stalled the master.** A center with no audio, *or an audio
+   track shorter than its video* (e.g. 30 s audio under a 118 s clip), EOFs the audio sub;
+   the parent keepalive FD hides that EOF, so the master blocks waiting to interleave audio
+   with the remaining video and the composite freezes exactly at the audio's end. **Fix:**
+   `apad` pads the audio to the run length (`-t` truncates it), and `_start_run` still spawns
+   an `lavfi` silence filler for the no-audio-at-all case (where `apad` has no input).
+6. **A seek past a stall wedged forever.** When an encode froze mid-run (alive but not
+   advancing), a seek's segment request kept *waiting* (it was within the forward window) and
+   never relaunched. **Fix:** `_await_segment` is progress-aware (waits only while the head
+   advances) and `ensure_segment` **relaunches at the index when the wait gives up**, so a
+   seek past a stuck edge respins the encode there.
+
+Cross-cutting: the concurrency cap counts **live encodes** (not cached dirs, so a
+reaped/finished session doesn't strand a slot); sessions **dedupe by scene** (§ Playback
+wiring); the launch **readiness gate runs outside the manager lock** and is progress-aware
+(§ Encoders/teardown); and the TCP relay buffer is **4 MB** (§ Pipe topology).
+
 ### Encoders, concurrency, two-stage teardown
 
 - **Encoder:** selected by `VERTICAL_HWACCEL` (`none|nvenc|qsv|vaapi|auto`) through the shared
   probe (see § Hardware encoding below). The master's `-c:v` block (plus any device-init /
   `hwupload` filter) is supplied by the probed encoder. Decode + `hstack` still run on CPU.
-- **Concurrency:** `VERTICAL_MAX_SESSIONS` (default 2). A launch that would exceed the cap
-  is refused (logged), and the caller falls back to single-video playback. A session holds
-  its slot from launch until stage-2 destroy (so a reaped-but-cached session still counts);
-  a respin is the *same* session and never consumes a second slot. 3 decodes + 1 encode is
-  heavy — the cap is a safety rail (Stash is single-user).
+- **Concurrency:** `VERTICAL_MAX_SESSIONS` (default 2) caps concurrent **live encodes**
+  (`active_count` counts sessions with a running master, *not* cached dirs — a reaped or
+  finished session burns no CPU and must not strand a slot; a resume respins the same session
+  and doesn't re-check the cap). A launch over the cap is refused (logged) → single-video
+  fallback. 3 decodes + 1 encode is heavy — the cap is a safety rail (Stash is single-user).
 - **Disk guardrail:** a session renders the *full* center clip (~1–2 GB per 30 min at
   1080p30). Before launch the engine checks free space on the HLS temp volume and refuses
   below a 2 GB floor (falling back to single-video playback, logged).
@@ -343,9 +420,16 @@ wins), stops on a stall (a gap that made no progress), and is skipped after a st
   already finished). **Stage 2 — session destroy** at `VERTICAL_SESSION_TTL` (default
   1800 s), or an explicit `/stop`: delete the temp dir and free the cap slot. A segment fetch
   is the liveness signal and resets both clocks; a client that unpauses after a reap
-  transparently respins via `ensure_segment`. Expected first-frame latency with `-re` gone is
-  ~3–5 s on the reference hardware (vs 15–20 s under realtime pacing) — the readiness gate
-  waits for `VERTICAL_READY_SEGMENTS` (default 2) segment files.
+  transparently respins via `ensure_segment`.
+- **Readiness gate:** PlaybackInfo waits for `VERTICAL_READY_SEGMENTS` (default 2, capped at
+  the clip's segment count so an ultra-short clip doesn't hang) finalized segments before
+  returning. It runs **outside the manager lock** (`ensure` → `_await_launch_ready`), because
+  a short clip's final segment is finalized by the run monitor terminating the master — which
+  needs that same lock — so waiting under it would deadlock; it also stops a slow launch from
+  blocking other sessions. The gate is **progress-aware**: it fails only if the master dies or
+  no new segment appears for `_READY_STALL_SECS`, so a slow-but-working encode isn't dropped
+  to single-video. Expected first-frame latency with full-speed encode is ~3–5 s on the FIFO
+  backend (vs 15–20 s under the old realtime pacing + 3-segment gate).
 
 ### Logging
 
@@ -365,10 +449,10 @@ The engine logs session lifecycle at INFO: launch (center + sides + side duratio
 + backend + total segments), the readiness gate, **every relaunch** with its trigger
 (`back-seek/gap` / `resume/gap` / `seek-past-head`), old→new `start_index`, and the produced
 range summary, **backfill** start/finish, **stage-1 process reap vs stage-2 destroy** each
-with reason, concurrency refusals (with the ids of the sessions holding the slots), the
-disk-guardrail refusal (with free space vs floor), and the single-video fallback with its
-reason. A session that fails the readiness gate is torn down immediately rather than left
-encoding orphaned.
+with reason, concurrency refusals (with the ids of the live encodes holding the slots), the
+disk-guardrail refusal (with free space vs floor), the silence-filler spawn on a no-audio
+center, and the single-video fallback with its reason. A session that fails the readiness
+gate is torn down immediately rather than left encoding orphaned.
 
 Stderr draining splits on `\r` as well as `\n`: FFmpeg's periodic progress line is
 `\r`-terminated on a pipe, and newline-only reading would grow one "line" until the
@@ -729,11 +813,13 @@ drop-exclusion-rather-than-fail fallback). `tests/test_config.py` covers the two
 keys' coercion, env-override, and save/load round-trip. `tests/test_vertical_engine.py`
 covers the synthetic VOD playlist (segment count + uniform/final durations), the segment
 range tracker (produced indexes, first gap, run head/coverage, range summary, side phasing),
-the `ensure_segment` trigger cases (cache hit, near-head wait, seek-past-head, back-seek gap,
-post-reap resume, cold launch) and relaunch debounce, the two-stage teardown (stage-1 reap
-keeps segments, stage-2 destroy frees the slot) and fetch liveness reset, backfill scheduling
-and preemption, the pacing invariant (Live TV keeps `-re`, VOD drops it / adds `-readrate`),
-session-id validation, and the `VERTICAL_DEBUG` level gating.
+the `ensure_segment` trigger cases (cache hit, forward read-ahead waits, seek-past-head,
+back-seek gap, post-reap resume, cold launch, **recovery relaunch when a wait stalls**) and
+relaunch debounce, scene dedupe (`session_for_scene` — prefer live, skip stopped), the
+two-stage teardown (stage-1 reap keeps segments, stage-2 destroy frees the slot) and fetch
+liveness reset, backfill scheduling and preemption, the command builders (Live TV keeps
+`-re` while VOD drops it / adds `-readrate`, cover-crop lanes, the `-t` duration bound, and
+`apad` audio padding), session-id validation, and the `VERTICAL_DEBUG` level gating.
 
 ## Config reference
 
