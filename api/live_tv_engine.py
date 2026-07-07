@@ -417,9 +417,13 @@ class _FFmpegChannelManager:
         into the master via the backend's sub-output endpoints.  Persists
         until the master process is stopped (this task is cancelled by
         _stop_locked).
+
+        For triptych channels, each scheduled entry is played as a composite
+        round (center + 2 deterministically-seeded sides) instead of a single scene.
         """
-        if ch.get("stash_type") == "vertical_tv":
-            await self._feeder_vertical(cid, backend)
+        # Triptych channels: walk the schedule and play each entry as a composite round
+        if ch.get("triptych"):
+            await self._feeder_triptych(cid, ch, backend, initial_seek)
             return
 
         stash_base = config.get_stash_base()
@@ -499,79 +503,128 @@ class _FFmpegChannelManager:
         except Exception:
             logger.error(f"LiveTV feeder: crashed for {cid!r}", exc_info=True)
 
-    async def _feeder_vertical(self, cid: str, backend: "_PipeBackend") -> None:
-        """Feeder for the Vertical TV channel (Feature 1 Phase 2).
+    async def _feeder_triptych(self, cid: str, ch: dict, backend: "_PipeBackend",
+                               initial_seek: float) -> None:
+        """Feeder for triptych channels: walk the live schedule and play each block as
+        a composite round (center + 2 deterministically-seeded sides).
 
-        There's no fixed schedule to walk — instead of the next scheduled scene,
-        every round picks a fresh random center + 2 side clips from the Vertical
-        Multi-View library (`core.vertical_selection`, the exact algorithm the
-        VOD compositor uses) and composites them via `_feed_one_vertical_round`
-        until the center ends, then picks a new round.  Runs until cancelled by
-        _stop_locked, exactly like the scheduled `_feeder`.
+        Uses seeded RNG for side selection so the same sides play on channel relaunch
+        and mid-block viewer joins. Seed = hash((channel_id, salt, schedule_generation,
+        block_index, center_id)).
         """
-        from core.vertical_selection import pick_center_and_sides
+        from api.live_tv_data import _stash_schedule_built_at
+        from core.vertical_selection import pick_center_and_sides_seeded
+        import random as _random_module
 
-        recent_centers: list[str] = []
-        rounds_played = 0
-        logger.info(f"Vertical TV: feeder started for channel {cid!r}")
+        consumed_until = time.time()
+        self._consumed_until[cid] = consumed_until
+        logger.info(
+            f"LiveTV triptych feeder: started for channel {cid!r} "
+            f"(initial_seek={initial_seek:.1f}s)"
+        )
+
+        blocks_played = 0
         try:
             while True:
-                # Health check: master process must still be alive
-                if not self.is_alive(cid):
-                    logger.error(
-                        f"Vertical TV: master died for channel {cid!r} — feeder cannot continue "
-                        f"(played {rounds_played} round(s) successfully)"
-                    )
-                    break
-
-                picked = await pick_center_and_sides(exclude_ids=set(recent_centers))
-                if picked is None:
+                # Re-read the live schedule on every iteration
+                seg = _next_scheduled_segment_after(ch, consumed_until)
+                if seg is None:
                     logger.warning(
-                        f"Vertical TV: channel {cid!r} has no eligible vertical scenes "
-                        f"for a triptych — retrying in 10s"
+                        f"LiveTV triptych feeder: no scheduled segment after "
+                        f"{consumed_until:.0f} for channel {cid!r}; sleeping 2s"
                     )
-                    await asyncio.sleep(10)
+                    await asyncio.sleep(2)
                     continue
-                center, sides = picked
-                center_id = str(center.get("id"))
-                recent_centers.append(center_id)
-                del recent_centers[:-5]  # avoid immediate repeats without tracking full history
 
-                files = center.get("files") or []
-                duration = float(files[0].get("duration") or 0) if files else 0.0
+                center_id = seg.get("scene_id") or seg.get("id")
+                if not center_id:
+                    logger.warning(f"LiveTV triptych feeder: scheduled segment missing scene_id, skipping")
+                    consumed_until = float(seg.get("stop_ts", consumed_until + 1))
+                    self._consumed_until[cid] = consumed_until
+                    continue
+
+                block_dur = float(seg.get("duration_sec") or 0)
+                block_seek = max(0.0, consumed_until - float(seg.get("start_ts", consumed_until)))
+                if block_dur <= 0 or block_seek >= block_dur - 0.5:
+                    # Already past end of this block — advance pointer.
+                    consumed_until = float(seg.get("stop_ts", consumed_until + max(0.0, block_dur)))
+                    self._consumed_until[cid] = consumed_until
+                    continue
+
+                # Compute seeded RNG for deterministic side selection
+                tvg_id = ch["tvg_id"]
+                salt = ch.get("triptych_salt", "")
+                schedule_gen = _stash_schedule_built_at
+                # Find the block index in the schedule
+                from api.live_tv_data import _stash_schedule
+                tvg_schedule = _stash_schedule.get(tvg_id, [])
+                block_index = next(
+                    (i for i, e in enumerate(tvg_schedule)
+                     if e.get("scene_id") == center_id and e.get("start_ts") == seg.get("start_ts")),
+                    0
+                )
+                seed_inputs = (tvg_id, salt, int(schedule_gen), block_index, str(center_id))
+                seed_hash = hash(seed_inputs)
+                rng = _random_module.Random(seed_hash)
+
+                # Fetch vertical candidates for seeded side selection
+                from core.vertical_selection import _fetch_vertical_candidates
+                candidates = await _fetch_vertical_candidates()
+                if not candidates:
+                    logger.warning(
+                        f"LiveTV triptych feeder: channel {cid!r} has no vertical candidates "
+                        f"for center {center_id} — skipping block"
+                    )
+                    consumed_until = float(seg.get("stop_ts", consumed_until + block_dur))
+                    self._consumed_until[cid] = consumed_until
+                    continue
+
+                # Use seeded selection to pick the sides
+                result = pick_center_and_sides_seeded(candidates, str(center_id), rng)
+                if result is None:
+                    logger.warning(
+                        f"LiveTV triptych feeder: could not resolve sides for center {center_id}"
+                    )
+                    consumed_until = float(seg.get("stop_ts", consumed_until + block_dur))
+                    self._consumed_until[cid] = consumed_until
+                    continue
+
+                center, sides = result
+                left_id, right_id = sides[0], sides[1]
+
+                # Update current scene info
                 self._current_scene[cid] = {
                     "scene_id":     center_id,
-                    "title":        center.get("title", ""),
-                    "duration_sec": duration,
-                    "scene_seek":   0.0,
+                    "title":        seg.get("title", ""),
+                    "start_ts":     seg.get("start_ts"),
+                    "stop_ts":      seg.get("stop_ts"),
+                    "duration_sec": block_dur,
+                    "scene_seek":   block_seek,
                     "started_at":   time.time(),
                 }
 
                 t0 = time.time()
                 logger.info(
-                    f"Vertical TV: channel {cid!r} round #{rounds_played+1} "
-                    f"center={center_id} sides={sides} dur={duration:.1f}s"
+                    f"LiveTV triptych feeder: channel {cid!r} block #{blocks_played+1} "
+                    f"center={center_id} sides=[{left_id},{right_id}] "
+                    f"seek={block_seek:.1f}s dur={block_dur:.1f}s"
                 )
-                ok = await self._feed_one_vertical_round(cid, center_id, sides, backend, center_duration=duration)
+
+                ok = await self._feed_one_vertical_round(cid, center_id, sides, backend, center_duration=block_dur)
                 logger.info(
-                    f"Vertical TV: channel {cid!r} round center={center_id} "
+                    f"LiveTV triptych feeder: channel {cid!r} block center={center_id} "
                     f"finished ok={ok} elapsed={time.time()-t0:.1f}s"
                 )
 
-                # If round failed, check if master is still alive
-                if not ok and not self.is_alive(cid):
-                    logger.error(
-                        f"Vertical TV: round failed for channel {cid!r} center={center_id} "
-                        f"— master died (played {rounds_played} round(s) successfully, current failed)"
-                    )
-                    break
+                blocks_played += 1
+                consumed_until = float(seg.get("stop_ts", consumed_until + block_dur))
+                self._consumed_until[cid] = consumed_until
 
-                rounds_played += 1
         except asyncio.CancelledError:
-            logger.info(f"Vertical TV: feeder cancelled for {cid!r} after {rounds_played} round(s)")
+            logger.info(f"LiveTV triptych feeder: cancelled for {cid!r} after {blocks_played} block(s)")
             raise
         except Exception:
-            logger.error(f"Vertical TV: feeder crashed for {cid!r}", exc_info=True)
+            logger.error(f"LiveTV triptych feeder: crashed for {cid!r}", exc_info=True)
 
     async def _feed_one_vertical_round(self, cid: str, center_id: str, sides: list,
                                         backend: "_PipeBackend", center_duration: float = 0.0) -> bool:

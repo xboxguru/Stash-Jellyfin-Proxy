@@ -560,81 +560,84 @@ integrated into `api/live_tv_engine.py`, `api/vertical_engine.py`, and `core/hw_
 **Invariants preserved:** `pace_args=("-re",)` (realtime pacing); video/audio sub split;
 VOD full-length-seek behavior all untouched.
 
-## Approved rework B: Triptych channels (per-channel toggle)
+## Triptych channels — per-channel toggle (Feature 1 Phase 2 Rework)
 
-> **Status: approved design, NOT yet implemented. Requires rework A first.** Supersedes
-> § *Vertical TV channel* below (the synthetic-channel design) — the implementing chat
-> must rewrite that section as implemented behavior and delete this banner.
+Triptych channels are implemented as a per-channel flag in `channels.json`. Any tag/filter/shorts
+channel can set `triptych: true` to enable composite playback (center + 2 sides) instead of
+single-video playout. The synthetic "Vertical TV" channel has been replaced with this flexible
+per-channel approach, eliminating special cases and enabling full EPG/guide support.
 
-The 2026-07-06 field test surfaced three *designed-in* gaps of the synthetic channel: no
-Guide data (schedule builder skips `vertical_tv`), "channel doesn't exist" from the
-rebuild endpoint (not a `channels.json` row), and a channel editor showing tags/filters
-that do nothing. Rather than patching the special case, triptych becomes a **property of
-ordinary channels** — deleting the special case deletes the whole bug class.
+### Implementation overview — `api/live_tv_data.py`, `api/live_tv_engine.py`, `core/vertical_selection.py`
 
-### Decisions (locked 2026-07-06)
+**Channel configuration:**
+- `triptych: true` (boolean, default `false`) — play all blocks as composite rounds.
+- `triptych_salt: ""` (string, default `""`) — free-text seed modifier; changing it re-rolls
+  all sides deterministically without rebuilding the lineup.
 
-1. **`triptych: true` is a per-channel flag in `channels.json`.** Any tag/filter/shorts
-   channel can set it. Semantics: the channel's scene lineup is additionally filtered by
-   the vertical predicate, and the feeder plays every block as a composite round
-   (center + 2 sides) instead of a single scene. Uniform rule — a triptych channel is
-   *all* triptych; there is no per-block mixed mode (considered, deferred: it complicates
-   the feeder dispatch and makes EPG blocks ambiguous). To offer both flavors of the same
-   content (e.g. standard shorts *and* triptych shorts), create two channels — the
-   implementer must ensure shorts-type channels are instantiable like tag/filter channels
-   if they are currently a singleton.
-2. **The synthetic `vertical_tv` channel is deleted, with migration.** On startup, if
-   `ENABLE_VERTICAL_TV_CHANNEL` is true and no migrated channel exists yet, create a real
-   `channels.json` entry — name "Vertical TV", `triptych: true`, an all-verticals filter,
-   channel number `VERTICAL_TV_CHANNEL_NUMBER` — then mark the migration done (one-shot;
-   the user can freely edit or delete the real channel afterwards). The
-   `_build_vertical_tv_channel` / `_feeder_vertical` special cases, the
-   `_rebuild_stash_schedules` skip-branch, and the `_build_stash_channel_playlist`
-   short-circuit are all removed. Retire `ENABLE_VERTICAL_TV_CHANNEL` +
-   `VERTICAL_TV_CHANNEL_NUMBER` from config defaults after migration support ships
-   (keep reading them for the migration itself).
-3. **Deterministic schedule, exactly like other channels.** The lineup builder produces
-   the center sequence from the channel's (vertical-scoped) query; the schedule builder
-   turns it into `_stash_schedule` EPG entries with block duration = center duration
-   (exact, thanks to rework A's `-t` bounds). Guide data, the rebuild endpoint, "now
-   playing", and mid-block seek-on-join all work because it *is* a normal scheduled
-   channel.
-4. **Deterministic sides via seeded RNG, with a per-channel salt.** Side selection for a
-   block runs the existing `core/vertical_selection.py` algorithm with a seeded
-   `random.Random` instance instead of the module-level RNG:
-   `seed = hash((channel_id, TRIPTYCH_SALT, schedule_generation, block_index, center_id))`.
-   The salt is a free-text field on the channel config (default `""`): changing it
-   re-rolls every block's sides without rebuilding the lineup — a cheap "shuffle the
-   sides" knob. Determinism means a channel relaunch (rework A fix 3) or a mid-block
-   viewer join reproduces the identical triptych.
-5. **Mid-block join phases all three lanes.** Joining a block at offset *t* seeks the
-   center by *t* (the scheduled feeder's existing seek math) and launches the sides at
-   `t mod side_duration` — the builders already take per-side seeks
-   (`build_composite_cmd(..., left_seek, right_seek)`), added by the VOD rework.
-6. **Channel editor UI:** a Triptych toggle + salt field; the tags/filters controls now
-   genuinely drive the (vertical-scoped) lineup. EPG block titles show the center's
-   title; listing the sides in the program description is a nice-to-have, not required.
+**Scene filtering:**
+Triptych channels apply the vertical predicate (height > width, aspect ≥ 1.3) to the fetched
+scene lineup in `_fetch_scenes_for_stash_channel()`. Non-vertical scenes are excluded before
+schedule building.
 
-### Feeder dispatch after the rework
+**Schedule building:**
+Triptych channels use the same schedule builder as tag/filter/shorts channels. The schedule
+consists of center scene entries, scheduled back-to-back, with duration = center file duration
+(enforced by rework A's `-t` bound). No special EPG handling — triptych blocks appear as normal
+program entries in the guide, titled by the center scene's name.
 
-`_feeder` walks `_stash_schedule` as today; per **channel** (not per block), if the
-channel is `triptych`, each schedule entry is played via a composite round — sides
-resolved deterministically at feed time (not stored in the schedule), `-t` bounded,
-health-checked per rework A. `_feeder_vertical`'s round-spawning mechanics
-(`_feed_one_vertical_round`, silent-center safety net, spawn ordering) survive as the
-triptych round player; its infinite fresh-random loop does not.
+**Feeder dispatch:**
+`_feeder()` checks per-channel if `ch.get("triptych")` is true:
+- False → normal single-scene feed path (`_feed_one_scene`)
+- True → composite-round feed path (`_feeder_triptych`)
 
-### Tests
+`_feeder_triptych()` walks `_stash_schedule[tvg_id]` the same way the normal feeder walks it:
+- Load the next scheduled segment (center scene).
+- Compute seeded RNG: `seed_hash = hash((tvg_id, salt, schedule_generation, block_index, center_id))`
+- Fetch vertical candidates and use seeded selection (`pick_center_and_sides_seeded()`) to resolve sides.
+- Launch a composite round via `_feed_one_vertical_round()` (center duration, 2 looping sides).
+- Advance to the next block when the composite finishes.
 
-Migration one-shot (creates the channel once, honors user deletion); vertical-scoped
-lineup build; seeded-sides determinism (same seed inputs → same sides; salt change →
-different sides); EPG entries for a triptych channel; mid-block phase math; shorts
-standard + triptych coexistence; feeder dispatch per channel type.
+**Seeded side selection:**
+`core/vertical_selection.py` exports seeded versions of the side-picking algorithm:
+- `select_side_clips_seeded(center_scene, candidates, rng)` — picks 2 sides using a seeded RNG.
+- `pick_center_and_sides_seeded(candidates, center_id, rng)` — resolves a known center + sides.
 
-## Vertical TV channel — `api/live_tv_engine.py`
+The seed is stable across channel relaunches and mid-block viewer joins, ensuring the same
+triptych composition plays consistently.
 
-> **Superseded by § Approved rework B above** — this section documents the synthetic
-> channel that currently ships; rework B replaces it with a per-channel triptych toggle.
+**Mid-block seek:**
+Joining a block at wall-clock offset *t* computes:
+- Center seek: `t - block.start_ts` (standard playlist seek math)
+- Side seeks: `(t - block.start_ts) mod side_duration` (phase-aligned in the looping side duration)
+
+The feeder passes per-side seeks to `_feed_one_vertical_round()`, which uses them in
+`build_composite_cmd(..., left_seek, right_seek)`.
+
+**Migration from synthetic vertical_tv:**
+On startup, if all three flags are true (`ENABLE_STASH_CHANNELS && ENABLE_VERTICAL_TV_CHANNEL &&
+ENABLE_VERTICAL_MULTI`) and no "Vertical TV" channel exists in `channels.json`, create one:
+- name: "Vertical TV"
+- tvg_id: "vertical_tv"
+- stash_type: "filter"
+- source_ids: [] (empty; all-verticals filter applied by triptych logic)
+- triptych: true
+- triptych_salt: ""
+- channel number: `VERTICAL_TV_CHANNEL_NUMBER`
+
+This is a one-shot migration; the user can freely edit or delete the migrated channel.
+The old config keys (`ENABLE_VERTICAL_TV_CHANNEL`, `VERTICAL_TV_CHANNEL_NUMBER`) remain
+for migration support but are deprecated post-implementation.
+
+### Tests — `tests/test_live_tv_vertical.py`, `tests/test_vertical_selection.py`
+
+- Migration one-shot: channel created once, honors user deletion.
+- Vertical-scoped lineup: triptych channels filter to vertical scenes only.
+- Seeded determinism: same seed inputs → same sides; salt change → different sides.
+- EPG entries: triptych blocks appear as normal schedule entries in the guide.
+- Mid-block phase math: center seek *t*, sides seek *t mod side_duration*.
+- Shorts coexistence: standard and triptych shorts channels instantiate independently.
+- Feeder dispatch: triptych channels dispatch to composite round feeding.
+- Silent-center safety net: audio-sub failure triggers silence filler (reuses VOD path).
 
 An optional always-on Live TV channel that runs the compositor continuously, cycling fresh
 center/side clips forever instead of playing one chosen scene. It's a genuinely new *Live TV

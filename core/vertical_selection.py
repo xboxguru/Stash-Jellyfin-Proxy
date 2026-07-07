@@ -30,11 +30,15 @@ _CATEGORY_WEIGHT_ATTRS = {
 _SIDE_SLOTS = 2
 
 
-def _weighted_choice(pairs: list) -> object:
-    """Picks one item from a list of (item, weight) pairs, weighted-random."""
+def _weighted_choice(pairs: list, rng: random.Random | None = None) -> object:
+    """Picks one item from a list of (item, weight) pairs, weighted-random.
+
+    If rng is provided, uses that seeded Random instance instead of module-level random.
+    """
+    _rng = rng if rng is not None else random
     items = [item for item, _ in pairs]
     weights = [weight for _, weight in pairs]
-    return random.choices(items, weights=weights, k=1)[0]
+    return _rng.choices(items, weights=weights, k=1)[0]
 
 
 def _resolve_date(scene: dict):
@@ -115,12 +119,14 @@ def _build_category_pools(center: dict, eligible: list) -> dict:
     return {name: pool for name, pool in pools.items() if pool}
 
 
-def _pick_side(center: dict, candidates: list, excluded_ids: set) -> tuple:
+def _pick_side(center: dict, candidates: list, excluded_ids: set, rng: random.Random | None = None) -> tuple:
     """Picks one side clip. Returns (scene_or_None, path_taken) for logging.
 
     Path: weighted category pick, re-normalized over non-empty pools only
     (§1.6.2-3). Falls back to uniform-random over all eligible vertical scenes
     when every category is empty or every configured weight is 0 (§1.6.4).
+
+    If rng is provided, uses that seeded Random instance instead of module-level random.
     """
     eligible = [s for s in candidates if str(s.get("id")) not in excluded_ids]
     if not eligible:
@@ -139,11 +145,11 @@ def _pick_side(center: dict, candidates: list, excluded_ids: set) -> tuple:
     ))
 
     if not weighted_categories:
-        chosen = _weighted_choice([(s, 1.0) for s in eligible])
+        chosen = _weighted_choice([(s, 1.0) for s in eligible], rng=rng)
         return chosen, "uniform_random_all_categories_empty"
 
-    category = _weighted_choice(weighted_categories)
-    chosen = _weighted_choice(pools[category])
+    category = _weighted_choice(weighted_categories, rng=rng)
+    chosen = _weighted_choice(pools[category], rng=rng)
     return chosen, category
 
 
@@ -193,6 +199,44 @@ async def select_side_clips(center_scene: dict) -> list:
     return []
 
 
+def select_side_clips_seeded(center_scene: dict, candidates: list, rng: random.Random) -> list:
+    """Returns 2 side scene ids for center_scene, or [] to signal single-video fallback.
+    Uses a seeded RNG for deterministic playback (triptych channel scheduling).
+
+    - Enough distinct eligible vertical scenes: 2 unique sides, re-rolled deterministically.
+    - Exactly 1 distinct eligible side: repeats it for both slots (§1.2.5 tiny-library).
+    - No other vertical scenes at all: [] — caller falls back to normal single-video
+      playback and should log a warning (§1.2.5).
+    """
+    center_id = str(center_scene.get("id"))
+    vdebug(logger, f"Vertical selection: center {center_id} — {len(candidates)} vertical candidate(s) for seeded selection")
+    excluded_ids = {center_id}
+    sides = []
+
+    for slot in range(1, _SIDE_SLOTS + 1):
+        chosen, path = _pick_side(center_scene, candidates, excluded_ids, rng=rng)
+        if chosen is None:
+            logger.debug(f"Vertical selection: slot {slot} for center {center_id} has no eligible candidates")
+            break
+        side_id = str(chosen.get("id"))
+        sides.append(side_id)
+        excluded_ids.add(side_id)
+        logger.info(f"Vertical selection: slot {slot} for center {center_id} -> scene {side_id} via '{path}' (seeded)")
+
+    if len(sides) == _SIDE_SLOTS:
+        return sides
+    if len(sides) == 1:
+        logger.warning(
+            f"Vertical selection: only 1 distinct eligible side for center {center_id} — repeating it for both slots"
+        )
+        return [sides[0], sides[0]]
+
+    logger.warning(
+        f"Vertical selection: no other vertical scenes besides center {center_id} — falling back to single-video playback"
+    )
+    return []
+
+
 async def pick_center_and_sides(exclude_ids: set | None = None) -> tuple:
     """Pick a random center scene plus its 2 sides — one full triptych round.
 
@@ -219,6 +263,30 @@ async def pick_center_and_sides(exclude_ids: set | None = None) -> tuple:
     ))
     center = random.choice(pool)
     sides = await select_side_clips(center)
+    if not sides:
+        return None
+    return center, sides
+
+
+def pick_center_and_sides_seeded(candidates: list, center_id: str, rng: random.Random) -> tuple:
+    """Pick a center scene (by id) plus its 2 deterministic sides — one full triptych round.
+
+    Used by triptych channel scheduling (api/live_tv_engine.py) to resolve sides
+    deterministically per schedule block. `center_id` must be in the candidates list.
+    Uses the provided seeded RNG for deterministic playback.
+
+    Returns (center_scene, [left_id, right_id]), or None if center_id not in candidates
+    or there aren't enough distinct scenes for sides.
+    """
+    center = None
+    for s in candidates:
+        if str(s.get("id")) == str(center_id):
+            center = s
+            break
+    if center is None:
+        return None
+
+    sides = select_side_clips_seeded(center, candidates, rng)
     if not sides:
         return None
     return center, sides

@@ -177,6 +177,8 @@ async def endpoint_channels_config_update(request: Request):
     if "number"     in body: cfg["number"]      = str(body["number"])
     if "stash_type" in body: cfg["stash_type"]  = str(body["stash_type"])
     if "source_ids" in body: cfg["source_ids"]  = [str(s) for s in body["source_ids"]]
+    if "triptych"   in body: cfg["triptych"]    = bool(body["triptych"])
+    if "triptych_salt" in body: cfg["triptych_salt"] = str(body["triptych_salt"]).strip()
     _channels_config[idx] = cfg
     _save_channels_config()
     _stash_channels_cache["data"] = None
