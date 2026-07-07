@@ -538,176 +538,149 @@ bundled Intel stack. Because decode stays on CPU, we avoid pulling the CUDA runt
 - **Intel QSV / VAAPI** — `--device /dev/dri:/dev/dri` passthrough.
 - **CPU** — nothing; it's the automatic fallback when no GPU is available or the probe fails.
 
-## Engine stability fixes (rework A) — ✅ IMPLEMENTED 2026-07-07
+## Live TV integration — per-channel triptych toggle
 
-Four defects from the 2026-07-06 field test are now fixed. All channel types benefit; fixes
-integrated into `api/live_tv_engine.py`, `api/vertical_engine.py`, and `core/hw_encoder.py`.
+Triptych playback is integrated into the Dynamic Stash Channels Live TV system as a per-channel
+toggle. Any tag/filter/shorts channel can set `triptych: true` to enable composite playback 
+(center + 2 looping sides) instead of single-video playout. Channels support full EPG/guide 
+integration with composites appearing as normal program entries.
 
-1. **Pipeline throughput:** Live TV master now uses `core/hw_encoder.py` to select hardware
-   H.264 encoding (NVENC/QSV/VAAPI, fallback to libx264). Config: `LIVE_TV_HWACCEL` uses
-   existing probe/fallback semantics. Chosen vs effective encoder logged per launch.
-2. **Round termination:** Both `_feed_one_vertical_round` and VOD compositor now bound
-   composite + audio subs with `-t (center_duration − seek)`. Clean exit at center EOF
-   instead of hang (where `-shortest` is a no-op on single-output composite).
-3. **Master health:** Feeder health-checks the master process before each round and on sub
-   failure; master dead → channel teardown + relaunch (loudly logged). Silent-center
-   detector now distinguishes "audio stream missing" (clean exit) from "pipe endpoint
-   aborted" (non-zero exit).
-4. **Tall verticals:** Both VOD and channel use cover-crop lane geometry
-   (`scale=608:1080:force_original_aspect_ratio=increase:force_divisible_by=2,crop=608:1080`)
-   to handle ultra-tall sources.
+### Per-channel configuration
 
-**Invariants preserved:** `pace_args=("-re",)` (realtime pacing); video/audio sub split;
-VOD full-length-seek behavior all untouched.
+Triptych channels are persisted in `channels.json` with two fields:
 
-## Triptych channels — per-channel toggle (Feature 1 Phase 2 Rework)
+- **`triptych: true`** (boolean, default `false`) — enable composite playback for all blocks.
+- **`triptych_salt: ""`** (string, default `""`) — free-text seed modifier; changing it 
+  re-rolls all sides deterministically without rebuilding the lineup.
 
-Triptych channels are implemented as a per-channel flag in `channels.json`. Any tag/filter/shorts
-channel can set `triptych: true` to enable composite playback (center + 2 sides) instead of
-single-video playout. The synthetic "Vertical TV" channel has been replaced with this flexible
-per-channel approach, eliminating special cases and enabling full EPG/guide support.
-
-### Implementation overview — `api/live_tv_data.py`, `api/live_tv_engine.py`, `core/vertical_selection.py`
-
-**Channel configuration:**
-- `triptych: true` (boolean, default `false`) — play all blocks as composite rounds.
-- `triptych_salt: ""` (string, default `""`) — free-text seed modifier; changing it re-rolls
-  all sides deterministically without rebuilding the lineup.
-
-**Scene filtering:**
-Triptych channels apply the vertical predicate (height > width, aspect ≥ 1.3) to the fetched
-scene lineup in `_fetch_scenes_for_stash_channel()`. Non-vertical scenes are excluded before
-schedule building.
-
-**Schedule building:**
-Triptych channels use the same schedule builder as tag/filter/shorts channels. The schedule
-consists of center scene entries, scheduled back-to-back, with duration = center file duration
-(enforced by rework A's `-t` bound). No special EPG handling — triptych blocks appear as normal
-program entries in the guide, titled by the center scene's name.
-
-**Feeder dispatch:**
-`_feeder()` checks per-channel if `ch.get("triptych")` is true:
-- False → normal single-scene feed path (`_feed_one_scene`)
-- True → composite-round feed path (`_feeder_triptych`)
-
-`_feeder_triptych()` walks `_stash_schedule[tvg_id]` the same way the normal feeder walks it:
-- Load the next scheduled segment (center scene).
-- Compute seeded RNG: `seed_hash = hash((tvg_id, salt, schedule_generation, block_index, center_id))`
-- Fetch vertical candidates and use seeded selection (`pick_center_and_sides_seeded()`) to resolve sides.
-- Launch a composite round via `_feed_one_vertical_round()` (center duration, 2 looping sides).
-- Advance to the next block when the composite finishes.
-
-**Seeded side selection:**
-`core/vertical_selection.py` exports seeded versions of the side-picking algorithm:
-- `select_side_clips_seeded(center_scene, candidates, rng)` — picks 2 sides using a seeded RNG.
-- `pick_center_and_sides_seeded(candidates, center_id, rng)` — resolves a known center + sides.
-
-The seed is stable across channel relaunches and mid-block viewer joins, ensuring the same
-triptych composition plays consistently.
-
-**Mid-block seek:**
-Joining a block at wall-clock offset *t* computes:
-- Center seek: `t - block.start_ts` (standard playlist seek math)
-- Side seeks: `(t - block.start_ts) mod side_duration` (phase-aligned in the looping side duration)
-
-The feeder passes per-side seeks to `_feed_one_vertical_round()`, which uses them in
-`build_composite_cmd(..., left_seek, right_seek)`.
-
-**Migration from synthetic vertical_tv:**
-On startup, if all three flags are true (`ENABLE_STASH_CHANNELS && ENABLE_VERTICAL_TV_CHANNEL &&
-ENABLE_VERTICAL_MULTI`) and no "Vertical TV" channel exists in `channels.json`, create one:
+The migration from the legacy config flag `ENABLE_VERTICAL_TV_CHANNEL` is automatic and one-shot:
+on startup, if all three flags are true (`ENABLE_STASH_CHANNELS && ENABLE_VERTICAL_TV_CHANNEL &&
+ENABLE_VERTICAL_MULTI`) and no "Vertical TV" channel exists in `channels.json`, create one with:
 - name: "Vertical TV"
 - tvg_id: "vertical_tv"
 - stash_type: "filter"
-- source_ids: [] (empty; all-verticals filter applied by triptych logic)
+- source_ids: [] (empty; all-verticals filter applied below)
 - triptych: true
 - triptych_salt: ""
 - channel number: `VERTICAL_TV_CHANNEL_NUMBER`
 
-This is a one-shot migration; the user can freely edit or delete the migrated channel.
-The old config keys (`ENABLE_VERTICAL_TV_CHANNEL`, `VERTICAL_TV_CHANNEL_NUMBER`) remain
-for migration support but are deprecated post-implementation.
+The user can freely edit or delete the migrated channel. The old config keys remain for 
+migration support but are deprecated.
+
+### Scene filtering for triptych channels
+
+When fetching scenes for a triptych channel, `_fetch_scenes_for_stash_channel()` 
+(`api/live_tv_data.py`) applies additional filtering:
+
+1. **Server-side orientation:** Stash's GraphQL query includes `orientation: {"value": ["PORTRAIT"]}` 
+   to filter portrait scenes server-side (height > width). This applies to both tag channels 
+   and filter channels with empty `source_ids`.
+
+2. **Client-side aspect ratio:** After Stash returns scenes, `filter_vertical_scenes()` applies 
+   the aspect ratio check (height / width ≥ `VERTICAL_ASPECT_MIN`, default 1.3) to exclude 
+   near-square files. This requires file dimensions in the response, so the GraphQL query includes 
+   `files { duration width height }` for each scene.
+
+3. **Result preservation:** The fetched scenes are structured into a result dict for schedule 
+   building. Critically, the `files` array from the GraphQL response is preserved in the result 
+   dict so that the vertical filter can access `files[0].width` and `files[0].height` to compute 
+   the aspect ratio.
+
+### Schedule and EPG
+
+Triptych channels use the same schedule builder as tag/filter/shorts channels. The schedule 
+consists of center scene entries, scheduled back-to-back with duration = center file duration 
+(enforced by clean round termination with `-t`). No special EPG handling — triptych blocks 
+appear as normal program entries in the guide, titled by the center scene's name.
+
+### Feeder dispatch and composite playback
+
+**Feeder dispatch:** `_feeder()` (`api/live_tv_engine.py`) checks per-channel if `ch.get("triptych")` 
+is true:
+- `false` → normal single-scene feed path (`_feed_one_scene`)
+- `true` → composite-round feed path (`_feeder_triptych`)
+
+**Round composition:** `_feeder_triptych()` walks `_stash_schedule[tvg_id]` exactly like the 
+normal feeder:
+1. Load the next scheduled segment (center scene).
+2. Compute seeded RNG: `seed_hash = hash((tvg_id, triptych_salt, schedule_generation, block_index, center_id))`
+3. Fetch vertical candidates via `_fetch_vertical_candidates()` and use seeded selection 
+   (`pick_center_and_sides_seeded(candidates, center_id, rng)`) to resolve the two side clips.
+4. Launch a composite round via `_feed_one_vertical_round()` (center duration, 2 looping sides).
+5. Advance to the next block when the composite finishes.
+
+**Seeded side selection:** `core/vertical_selection.py` exports seeded versions of the 
+side-picking algorithm so that the same triptych composition plays consistently across 
+channel relaunches and mid-block viewer joins:
+- `select_side_clips_seeded(center_scene, candidates, rng)` — picks 2 sides using a seeded RNG.
+- `pick_center_and_sides_seeded(candidates, center_id, rng)` — resolves a known center + sides.
+
+**Mid-block seek phasing:** Joining a block at wall-clock offset *t* computes:
+- Center seek: `t - block.start_ts` (standard playlist seek math)
+- Side seeks: `(t - block.start_ts) mod side_duration` (phase-aligned in the looping side duration)
+
+The feeder passes per-side seeks to `_feed_one_vertical_round()`, which uses them in 
+`build_composite_cmd(..., left_seek, right_seek)`.
+
+### Optional always-on Vertical TV channel
+
+The "Vertical TV" channel can be configured as a continuously-cycling triptych feed with no 
+fixed lineup. It reuses the Dynamic Stash Channels' FFmpeg manager (`_FFmpegChannelManager`), 
+the same PlaybackInfo/stream-serving code, and the exact filtergraph the VOD compositor uses. 
+There is no separate compositor implementation for Live TV.
+
+**Why Live TV, not VOD session:** A **VOD session** is keyed by `{scene_id}-{nonce}` and 
+exists once per play — sides are picked once and fixed for that play. A **channel** is keyed 
+by channel id and exists once total — every viewer shares the same running FFmpeg process. 
+Since Vertical TV cycles rounds forever with no single "play" to key by, it belongs in the 
+channel infrastructure.
+
+**Feeder:** For a `triptych: true` channel with empty `source_ids` configured as an always-on 
+broadcast (rather than a fixed schedule), the feeder can optionally loop forever picking fresh 
+centers/sides instead of walking `_stash_schedule`. This is the "Vertical TV" behavior: 
+excluded-center tracking prevents immediate repetition, and the loop retries every 10 s if 
+the vertical library can't support a triptych.
+
+### Engine stability improvements
+
+Triptych playback benefits from four fixes applied to all Live TV channel types:
+
+1. **Pipeline throughput:** Live TV master uses hardware H.264 encoding (NVENC/QSV/VAAPI, 
+   fallback to libx264) via `core/hw_encoder.py`. Config: `LIVE_TV_HWACCEL` uses existing 
+   probe/fallback semantics.
+2. **Round termination:** Both `_feed_one_vertical_round` and VOD compositor bound composite 
+   + audio subs with `-t (center_duration − seek)`. Clean exit at center EOF instead of hang.
+3. **Master health:** Feeder health-checks the master process before each round; master dead → 
+   channel teardown + relaunch (logged). Silent-center detector distinguishes missing audio 
+   streams (clean exit) from aborted pipe endpoints (non-zero exit).
+4. **Tall verticals:** Both VOD and channel use cover-crop lane geometry to handle ultra-tall 
+   sources: `scale=608:1080:force_original_aspect_ratio=increase:force_divisible_by=2,crop=608:1080`
+
+**Audio padding:** A center with shorter audio than video would stall the composite; `apad` 
+(with `-t` duration bound) pads audio to full length. A center with no audio stream triggers 
+the silence-filler fallback so the encode completes.
 
 ### Tests — `tests/test_live_tv_vertical.py`, `tests/test_vertical_selection.py`
 
-- Migration one-shot: channel created once, honors user deletion.
+- Per-channel triptych flag: enable/disable composite playback per channel.
 - Vertical-scoped lineup: triptych channels filter to vertical scenes only.
 - Seeded determinism: same seed inputs → same sides; salt change → different sides.
 - EPG entries: triptych blocks appear as normal schedule entries in the guide.
 - Mid-block phase math: center seek *t*, sides seek *t mod side_duration*.
 - Shorts coexistence: standard and triptych shorts channels instantiate independently.
 - Feeder dispatch: triptych channels dispatch to composite round feeding.
-- Silent-center safety net: audio-sub failure triggers silence filler (reuses VOD path).
+- Silent-center safety net: audio-sub failure triggers silence filler.
+- Migration: "Vertical TV" channel created once, honors user deletion.
 
-An optional always-on Live TV channel that runs the compositor continuously, cycling fresh
-center/side clips forever instead of playing one chosen scene. It's a genuinely new *Live TV
-channel type*, not a new engine: it reuses the Dynamic Stash Channels' FFmpeg manager
-(`_FFmpegChannelManager`), the same PlaybackInfo/stream-serving code, and — critically — the
-exact filtergraph the VOD compositor uses (`build_composite_cmd`/`build_audio_cmd` in
-`api/vertical_engine.py`). There is no second compositor implementation anywhere.
+### The feeder implementation: `_feeder_triptych` / `_feed_one_vertical_round`
 
-### Why it fits as a channel, not a session
+`_FFmpegChannelManager._feeder` (`api/live_tv_engine.py`) is normally the scheduled-scene loop 
+that walks `_stash_schedule` one entry at a time. For a `triptych: true` channel it dispatches 
+instead to `_feeder_triptych()`, which walks the schedule the same way as the normal feeder 
+but composites each center with seeded-selected sides.
 
-Live TV channels and VOD compositor sessions solve different problems that happen to share a
-playout spine:
-
-- A **VOD session** (`_VerticalSessionManager`) is keyed by `{scene_id}-{nonce}` and exists
-  once per *play* — it ends when the center ends, sides are picked once and stay fixed for
-  that play, and there's a concurrency cap per Jellyfin session.
-- A **channel** (`_FFmpegChannelManager`) is keyed by channel id and exists once *total* —
-  every viewer of "Vertical TV" shares the same running FFmpeg process, and it's expected to
-  run indefinitely with no viewer-driven lifecycle beyond idle teardown.
-
-Because the Vertical TV channel has no single "play" to key sessions by (it cycles rounds
-forever), it belongs on the channel side of that split, sharing infrastructure with the Stash
-tag/filter/shorts channels rather than the VOD manager.
-
-### The channel is synthetic, not a channels.json entry
-
-Tag/filter/shorts channels are user-created rows in `channels.json` (`_channels_config`),
-each with a fixed scene lineup that the schedule builder turns into `_stash_schedule[tvg_id]`
-EPG entries. Vertical TV has **no fixed lineup at all** — center and sides are picked live,
-fresh, every round — so there is nothing for the channel-editor CRUD or the schedule builder
-to store, edit, or reorder.
-
-Instead, `api/live_tv_data.py`'s `_get_stash_channels()` appends one synthetic channel dict
-(`_build_vertical_tv_channel()`, `stash_type: "vertical_tv"`) whenever
-`_vertical_tv_enabled()` is true, right alongside the persisted tag/filter/shorts channels
-from `channels.json`. It's registered into the same `_channel_info_map`/`_stash_channel_map`
-lookups as every other channel, so `get_channel_by_jellyfin_id`, PlaybackInfo dispatch,
-guide listings, and "now playing" all work for it without any new code path — they already
-branch on `ch.get("stash_type")` being truthy, and `"vertical_tv"` satisfies that the same way
-`"tag"`/`"filter"`/`"shorts"` do.
-
-`_rebuild_stash_schedules` / `_run_maintenance_update` explicitly skip `vertical_tv` channels
-(nothing to build), and `_build_stash_channel_playlist` short-circuits to `([], 0.0)` for them
-— always "airing", seek always 0 since there's no meaningful position to resume into a channel
-that never repeats the same content.
-
-### Gating — `ENABLE_VERTICAL_TV_CHANNEL`
-
-Three flags must all be true for the channel to appear:
-
-| Flag | Why required |
-|---|---|
-| `ENABLE_STASH_CHANNELS` | Vertical TV reuses the Dynamic Stash Channels plumbing wholesale — PlaybackInfo, stream serving, the FFmpeg manager. |
-| `ENABLE_VERTICAL_MULTI` | The compositor and side-selection algorithm are the Vertical Multi-View feature; the channel is just that feature run continuously. |
-| `ENABLE_VERTICAL_TV_CHANNEL` | The channel-specific toggle. |
-
-`ENABLE_LIVE_TV` (the master Live TV switch) still gates everything as usual —
-`_live_tv_enabled()` now also returns true when Vertical TV alone is configured, so the
-channel works even if a deployment has neither Tunarr nor plain Stash tag/filter channels
-enabled.
-
-`VERTICAL_TV_CHANNEL_NUMBER` (default 9000) sets its channel number; picked well above the
-default Stash channel start number (5001) so operators using both don't have to think about
-collisions.
-
-### The feeder: `_feeder_vertical` / `_feed_one_vertical_round`
-
-`_FFmpegChannelManager._feeder` is normally the scheduled-scene loop that walks
-`_stash_schedule` one entry at a time. For a `vertical_tv` channel it dispatches instead to
-`_feeder_vertical`, which loops forever:
+For an always-on "Vertical TV" channel with no fixed schedule, the feeder can optionally loop 
+forever picking fresh rounds (instead of walking a schedule):
 
 1. `core.vertical_selection.pick_center_and_sides(exclude_ids=recent_centers)` — a fresh
    random center + 2 sides, excluding the last 5 centers played so the channel doesn't
@@ -765,25 +738,24 @@ channel uses (`LIVE_TV_IDLE_TIMEOUT`), restarting a fresh round on the next play
 
 ### Tests
 
-`tests/test_live_tv_vertical.py` — gating (`_vertical_tv_enabled`/`_live_tv_enabled`, all
-three flags required), channel-list assembly (`_get_stash_channels` appends the synthetic
-channel only when fully enabled, and never persists it to `channels.json`), the
-`_build_stash_channel_playlist` short-circuit, feeder dispatch, `_feeder_vertical`'s
-round-picking and "now playing" tracking, and `_feed_one_vertical_round`'s sub-spawning
-(success, composite-spawn failure, audio-attach timeout, and the silence-filler fallback).
-The FFmpeg manager is mocked — no real ffmpeg or subprocesses in tests, matching the VOD
-compositor's own test approach. `tests/test_vertical_selection.py` covers
-`pick_center_and_sides` (empty/single-scene library, center exclusion, and the
-drop-exclusion-rather-than-fail fallback). `tests/test_config.py` covers the two new config
-keys' coercion, env-override, and save/load round-trip. `tests/test_vertical_engine.py`
-covers the synthetic VOD playlist (segment count + uniform/final durations), the segment
-range tracker (produced indexes, first gap, run head/coverage, range summary, side phasing),
-the `ensure_segment` trigger cases (cache hit, forward read-ahead waits, seek-past-head,
-back-seek gap, post-reap resume, cold launch, **recovery relaunch when a wait stalls**) and
-relaunch debounce, scene dedupe (`session_for_scene` — prefer live, skip stopped), the
-two-stage teardown (stage-1 reap keeps segments, stage-2 destroy frees the slot) and fetch
-liveness reset, backfill scheduling and preemption, the command builders (Live TV keeps
-`-re` while VOD drops it / adds `-readrate`, cover-crop lanes, the `-t` duration bound, and
+`tests/test_live_tv_vertical.py` — per-channel triptych flag (enable/disable composite 
+playback), feeder dispatch (`_feeder()` routes to `_feeder_triptych()` when triptych=true), 
+`_feeder_triptych()` schedule walking and round-picking with seeded side selection, "now 
+playing" tracking, and `_feed_one_vertical_round()`'s sub-spawning (success, composite-spawn 
+failure, audio-attach timeout, and the silence-filler fallback). The FFmpeg manager is mocked 
+— no real ffmpeg or subprocesses in tests, matching the VOD compositor's own test approach. 
+`tests/test_vertical_selection.py` covers `pick_center_and_sides` and seeded variants 
+(empty/single-scene library, center exclusion, and the drop-exclusion-rather-than-fail 
+fallback). `tests/test_config.py` covers the triptych and triptych_salt config keys' 
+coercion, env-override, and save/load round-trip. `tests/test_vertical_engine.py` covers 
+the VOD composite playlist (segment count + uniform/final durations), the segment range 
+tracker (produced indexes, first gap, run head/coverage, range summary, side phasing), the 
+`ensure_segment` trigger cases (cache hit, forward read-ahead waits, seek-past-head, 
+back-seek gap, post-reap resume, cold launch, **recovery relaunch when a wait stalls**) and 
+relaunch debounce, scene dedupe (`session_for_scene` — prefer live, skip stopped), the 
+two-stage teardown (stage-1 reap keeps segments, stage-2 destroy frees the slot) and fetch 
+liveness reset, backfill scheduling and preemption, the command builders (Live TV keeps 
+`-re` while VOD drops it / adds `-readrate`, cover-crop lanes, the `-t` duration bound, and 
 `apad` audio padding), session-id validation, and the `VERTICAL_DEBUG` level gating.
 
 ## Config reference

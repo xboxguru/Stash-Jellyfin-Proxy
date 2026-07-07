@@ -35,9 +35,10 @@ async def _rebuild_single_channel(tvg_id: str):
         return
     async with _rebuild_lock:
         try:
+            logger.debug(f"LiveTV: rebuilding channel '{ch['name']}' (type={ch.get('stash_type')}, triptych={ch.get('triptych')}, source_ids={ch.get('source_ids')})")
             scenes = await _fetch_scenes_for_stash_channel(ch)
             if not scenes:
-                logger.warning(f"LiveTV: no scenes for '{ch['name']}' — schedule will be empty")
+                logger.warning(f"LiveTV: no scenes for '{ch['name']}' — schedule will be empty (type={ch.get('stash_type')}, triptych={ch.get('triptych')}, source_ids={ch.get('source_ids')})")
                 return
             if ch.get("stash_type") == "shorts":
                 _stash_schedule[tvg_id] = _build_shorts_block_schedule(scenes)
@@ -124,6 +125,15 @@ async def endpoint_stash_filters_list(request: Request):
     return JSONResponse({"filters": [{"id": f["id"], "name": f["name"]} for f in filters]})
 
 
+async def endpoint_stash_performers_list(request: Request):
+    """Return all Stash performers."""
+    from core.stash_client import call_graphql
+    query = """query { findPerformers(filter: {per_page: -1, sort: "name", direction: ASC}) { performers { id name image_path } } }"""
+    data = await call_graphql(query, {})
+    performers = (data or {}).get("findPerformers", {}).get("performers", [])
+    return JSONResponse({"performers": [{"id": p["id"], "name": p["name"], "has_image": bool(p.get("image_path"))} for p in performers]})
+
+
 async def endpoint_channels_config_list(request: Request):
     """Return ordered channel config list."""
     return JSONResponse({"channels": sorted(_channels_config, key=lambda c: c.get("order", 0))})
@@ -136,9 +146,9 @@ async def endpoint_channels_config_create(request: Request):
     stash_type = str(body.get("stash_type", "tag"))
     source_ids = [str(s) for s in (body.get("source_ids") or [])]
     triptych   = bool(body.get("triptych", False))
-    is_shorts  = stash_type == "shorts"
+    shorts     = bool(body.get("shorts", False))
     # source_ids required unless it's shorts or triptych
-    if not name or (not is_shorts and not triptych and not source_ids):
+    if not name or (not shorts and not triptych and not source_ids):
         return JSONResponse({"error": "name is required; source_ids required unless using Shorts or Triptych"}, status_code=400)
 
     # Auto-assign next available channel number
@@ -154,10 +164,13 @@ async def endpoint_channels_config_create(request: Request):
         number = str(n)
 
     tvg_id = "ch_" + os.urandom(4).hex()
+    shorts_max_minutes = body.get("shorts_max_minutes")
+    if shorts_max_minutes is not None:
+        shorts_max_minutes = int(shorts_max_minutes) if shorts_max_minutes else None
     new_cfg = {"tvg_id": tvg_id, "name": name, "number": number,
                "stash_type": stash_type, "source_ids": source_ids,
                "triptych": triptych, "triptych_salt": str(body.get("triptych_salt", "")).strip(),
-               "order": len(_channels_config)}
+               "shorts": shorts, "shorts_max_minutes": shorts_max_minutes, "order": len(_channels_config)}
     _channels_config.append(new_cfg)
     _save_channels_config()
     _stash_channels_cache["data"] = None
@@ -183,6 +196,8 @@ async def endpoint_channels_config_update(request: Request):
     if "source_ids" in body: cfg["source_ids"]  = [str(s) for s in body["source_ids"]]
     if "triptych"   in body: cfg["triptych"]    = bool(body["triptych"])
     if "triptych_salt" in body: cfg["triptych_salt"] = str(body["triptych_salt"]).strip()
+    if "shorts"     in body: cfg["shorts"]      = bool(body["shorts"])
+    if "shorts_max_minutes" in body: cfg["shorts_max_minutes"] = int(body["shorts_max_minutes"]) if body["shorts_max_minutes"] else None
     _channels_config[idx] = cfg
     _save_channels_config()
     _stash_channels_cache["data"] = None

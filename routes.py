@@ -108,6 +108,7 @@ routes = [
     # Stash source lists
     Route("/api/livetv/stash-tags", live_tv_admin_routes.endpoint_stash_tags_list, methods=["GET"]),
     Route("/api/livetv/stash-filters", live_tv_admin_routes.endpoint_stash_filters_list, methods=["GET"]),
+    Route("/api/livetv/stash-performers", live_tv_admin_routes.endpoint_stash_performers_list, methods=["GET"]),
     Route("/api/livetv/stash-tag-image/{tag_id}", live_tv_admin_routes.endpoint_stash_tag_image, methods=["GET"]),
     Route("/api/livetv/channel-logo/{tvg_id}/from-tag", live_tv_admin_routes.endpoint_channel_logo_set_from_tag, methods=["POST"]),
     Route("/api/livetv/channel-logo/{tvg_id}", live_tv_admin_routes.endpoint_channel_logo_get, methods=["GET"]),

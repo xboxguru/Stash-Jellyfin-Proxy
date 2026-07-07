@@ -1032,7 +1032,10 @@
             document.getElementById('ch-edit-number').value = '';
             document.getElementById('ch-edit-triptych').checked = false;
             document.getElementById('ch-edit-triptych-salt').value = '';
+            document.getElementById('ch-edit-shorts').checked = false;
+            document.getElementById('ch-edit-shorts-minutes').value = '';
             updateTriptychUI();
+            updateShortsUI();
             document.getElementById('ch-edit-source-search').value = '';
             document.getElementById('ch-edit-source-list').innerHTML = '<div class="empty-state" style="padding:12px;">Loading…</div>';
             document.getElementById('ch-edit-source-pills').innerHTML = '';
@@ -1064,7 +1067,10 @@
                         document.getElementById('ch-edit-number').value = cfg.number != null ? cfg.number : '';
                         document.getElementById('ch-edit-triptych').checked = cfg.triptych || false;
                         document.getElementById('ch-edit-triptych-salt').value = cfg.triptych_salt || '';
+                        document.getElementById('ch-edit-shorts').checked = cfg.shorts || false;
+                        document.getElementById('ch-edit-shorts-minutes').value = cfg.shorts_max_minutes ? cfg.shorts_max_minutes.toString() : '';
                         updateTriptychUI();
+                        updateShortsUI();
                         _chEditType = cfg.stash_type || 'tag';
                         _chEditSources = (cfg.source_ids || []).map(id => ({ id: String(id), name: String(id) }));
                     }
@@ -1080,6 +1086,14 @@
             const saltSection = document.getElementById('ch-triptych-salt-section');
             if (saltSection) {
                 saltSection.style.display = triptychCheckbox.checked ? 'block' : 'none';
+            }
+        }
+
+        function updateShortsUI() {
+            const shortsCheckbox = document.getElementById('ch-edit-shorts');
+            const minutesSection = document.getElementById('ch-edit-shorts-minutes-section');
+            if (minutesSection) {
+                minutesSection.style.display = shortsCheckbox.checked ? 'block' : 'none';
             }
         }
 
@@ -1133,10 +1147,20 @@
             return _filtersCache;
         }
 
+        let _performersCache = null;
+        async function _loadPerformersCache() {
+            if (_performersCache) return _performersCache;
+            const res = await fetch('/api/livetv/stash-performers');
+            if (!res.ok) return [];
+            _performersCache = (await res.json()).performers || [];
+            return _performersCache;
+        }
+
         function _setChEditTab(type) {
             _chEditType = type;
             document.getElementById('ch-edit-tab-tag').classList.toggle('active', type === 'tag');
             document.getElementById('ch-edit-tab-filter').classList.toggle('active', type === 'filter');
+            document.getElementById('ch-edit-tab-performer').classList.toggle('active', type === 'performer');
         }
 
         function switchChEditTab(type) {
@@ -1152,7 +1176,16 @@
             const list = document.getElementById('ch-edit-source-list');
             list.innerHTML = '<div class="empty-state" style="padding:12px;">Loading…</div>';
             try {
-                const items = _chEditType === 'tag' ? await _loadTagsCache() : await _loadFiltersCache();
+                let items;
+                if (_chEditType === 'tag') {
+                    items = await _loadTagsCache();
+                } else if (_chEditType === 'filter') {
+                    items = await _loadFiltersCache();
+                } else if (_chEditType === 'performer') {
+                    items = await _loadPerformersCache();
+                } else {
+                    items = [];
+                }
                 // Resolve placeholder names for pre-selected source IDs
                 _chEditSources = _chEditSources.map(s => {
                     const found = items.find(i => String(i.id) === s.id);
@@ -1170,7 +1203,16 @@
             const search = (document.getElementById('ch-edit-source-search').value || '').toLowerCase();
             const list = document.getElementById('ch-edit-source-list');
             try {
-                const items = _chEditType === 'tag' ? await _loadTagsCache() : await _loadFiltersCache();
+                let items;
+                if (_chEditType === 'tag') {
+                    items = await _loadTagsCache();
+                } else if (_chEditType === 'filter') {
+                    items = await _loadFiltersCache();
+                } else if (_chEditType === 'performer') {
+                    items = await _loadPerformersCache();
+                } else {
+                    items = [];
+                }
                 const filtered = search ? items.filter(i => i.name.toLowerCase().includes(search)) : items;
                 if (!filtered.length) { list.innerHTML = '<div class="empty-state" style="padding:12px;">No results.</div>'; return; }
                 // Selected items first, then alphabetical within each group
@@ -1309,7 +1351,9 @@
                         stash_type: _chEditType,
                         source_ids: _chEditSources.map(s => s.id),
                         triptych: document.getElementById('ch-edit-triptych').checked,
-                        triptych_salt: document.getElementById('ch-edit-triptych-salt').value.trim()
+                        triptych_salt: document.getElementById('ch-edit-triptych-salt').value.trim(),
+                        shorts: document.getElementById('ch-edit-shorts').checked,
+                        shorts_max_minutes: (function() { const val = document.getElementById('ch-edit-shorts-minutes').value.trim(); return val ? parseInt(val) : null; })()
                     })
                 });
                 if (res.ok) {
@@ -1384,7 +1428,10 @@
             document.getElementById('add-ch-number').value = '';
             document.getElementById('add-ch-triptych').checked = false;
             document.getElementById('add-ch-triptych-salt').value = '';
+            document.getElementById('add-ch-shorts').checked = false;
+            document.getElementById('add-ch-shorts-minutes').value = '';
             updateAddChTriptychUI();
+            updateAddChShortsUI();
             document.getElementById('add-ch-status').textContent = '';
             document.getElementById('add-ch-overlay').style.display = 'flex';
             _loadAddChSources();
@@ -1401,6 +1448,7 @@
             _chAddType = type;
             document.getElementById('add-ch-tab-tag').classList.toggle('active', type === 'tag');
             document.getElementById('add-ch-tab-filter').classList.toggle('active', type === 'filter');
+            document.getElementById('add-ch-tab-performer').classList.toggle('active', type === 'performer');
             document.getElementById('add-ch-source-search').value = '';
             _loadAddChSources();
             _renderAddChPills();
@@ -1408,7 +1456,13 @@
 
         async function _loadAddChSources() {
             try {
-                _chAddType === 'tag' ? await _loadTagsCache() : await _loadFiltersCache();
+                if (_chAddType === 'tag') {
+                    await _loadTagsCache();
+                } else if (_chAddType === 'filter') {
+                    await _loadFiltersCache();
+                } else if (_chAddType === 'performer') {
+                    await _loadPerformersCache();
+                }
                 renderAddChSourceList();
             } catch (e) {
                 document.getElementById('add-ch-source-list').innerHTML = '<div class="empty-state" style="padding:12px;">Failed to load.</div>';
@@ -1419,7 +1473,16 @@
             const search = (document.getElementById('add-ch-source-search').value || '').toLowerCase();
             const list = document.getElementById('add-ch-source-list');
             try {
-                const items = _chAddType === 'tag' ? await _loadTagsCache() : await _loadFiltersCache();
+                let items;
+                if (_chAddType === 'tag') {
+                    items = await _loadTagsCache();
+                } else if (_chAddType === 'filter') {
+                    items = await _loadFiltersCache();
+                } else if (_chAddType === 'performer') {
+                    items = await _loadPerformersCache();
+                } else {
+                    items = [];
+                }
                 const filtered = search ? items.filter(i => i.name.toLowerCase().includes(search)) : items;
                 if (!filtered.length) { list.innerHTML = '<div class="empty-state" style="padding:12px;">No results.</div>'; return; }
                 // Selected items first, then alphabetical within each group
@@ -1467,20 +1530,29 @@
             }
         }
 
+        function updateAddChShortsUI() {
+            const shortsCheckbox = document.getElementById('add-ch-shorts');
+            const minutesSection = document.getElementById('add-ch-shorts-minutes-section');
+            if (minutesSection) {
+                minutesSection.style.display = shortsCheckbox.checked ? 'block' : 'none';
+            }
+        }
+
         async function saveNewChannel() {
             const statusEl = document.getElementById('add-ch-status');
             const name   = document.getElementById('add-ch-name').value.trim();
             const number = document.getElementById('add-ch-number').value.trim();
             const isTriptych = document.getElementById('add-ch-triptych').checked;
+            const isShorts = document.getElementById('add-ch-shorts').checked;
             if (!name) { statusEl.textContent = 'Channel name is required.'; statusEl.style.color = 'var(--error)'; return; }
-            if (!isTriptych && !_chAddSources.length) { statusEl.textContent = 'Select at least one source (or enable Triptych).'; statusEl.style.color = 'var(--error)'; return; }
+            if (!isTriptych && !isShorts && !_chAddSources.length) { statusEl.textContent = 'Select at least one source (or enable Triptych/Shorts).'; statusEl.style.color = 'var(--error)'; return; }
             statusEl.textContent = 'Creating…';
             statusEl.style.color = 'var(--text-secondary)';
             try {
                 const res = await fetch('/api/livetv/channels-config', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name, number: number !== '' ? parseInt(number) : null, stash_type: _chAddType, source_ids: _chAddSources.map(s => s.id), triptych: isTriptych, triptych_salt: document.getElementById('add-ch-triptych-salt').value.trim() })
+                    body: JSON.stringify({ name, number: number !== '' ? parseInt(number) : null, stash_type: _chAddType, source_ids: _chAddSources.map(s => s.id), triptych: isTriptych, triptych_salt: document.getElementById('add-ch-triptych-salt').value.trim(), shorts: isShorts, shorts_max_minutes: (function() { const val = document.getElementById('add-ch-shorts-minutes').value.trim(); return val ? parseInt(val) : null; })() })
                 });
                 const data = await res.json().catch(() => ({}));
                 if (res.ok) {

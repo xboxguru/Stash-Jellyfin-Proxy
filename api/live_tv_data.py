@@ -446,63 +446,123 @@ async def _fetch_scenes_for_stash_channel(ch: dict) -> list[dict]:
     filter channels union results from each saved filter by scene ID.
     For triptych channels, applies additional vertical predicate filtering (orientation+aspect).
     """
+    import logging
     from core.stash_client import call_graphql
     from core.vertical import filter_vertical_scenes
+    log = logging.getLogger(__name__)
     channel_type = ch.get("stash_type", "")
     source_ids = [str(s) for s in (ch.get("source_ids") or [])]
     if not source_ids and ch.get("stash_id"):
         source_ids = [str(ch["stash_id"])]
     is_triptych = ch.get("triptych", False)
+    is_shorts = ch.get("shorts", False)
+    ch_name = ch.get("name", "unknown")
+    log.debug(f"_fetch_scenes: channel={ch_name}, type={channel_type}, triptych={is_triptych}, shorts={is_shorts}, source_ids={source_ids}")
 
-    _SCENE_FIELDS = "id title files { duration } organized rating100 o_counter tags { name } performers { id } details"
+    _SCENE_FIELDS = "id title files { duration width height } organized rating100 o_counter tags { name } performers { id } details"
 
     if channel_type == "tag":
-        # INCLUDES with multiple IDs = OR — scenes matching ANY of the selected tags
-        scene_filter = {"tags": {"value": source_ids, "modifier": "INCLUDES", "depth": 1}}
-        query = f"""
-        query($sf: SceneFilterType) {{
-            findScenes(filter: {{per_page: -1, sort: "id", direction: ASC}}, scene_filter: $sf) {{
-                scenes {{ {_SCENE_FIELDS} }}
+        # For shorts/triptych channels with no tags, fetch all or filtered scenes
+        if is_shorts and not source_ids:
+            log.debug(f"_fetch_scenes: shorts tag channel with no source_ids, fetching all scenes")
+            query = f"""
+            query {{
+                findScenes(filter: {{per_page: -1, sort: "id", direction: ASC}}) {{
+                    scenes {{ {_SCENE_FIELDS} }}
+                }}
             }}
-        }}
-        """
-        data = await call_graphql(query, {"sf": scene_filter})
-        raw = (data or {}).get("findScenes", {}).get("scenes", [])
+            """
+            data = await call_graphql(query, {})
+            raw = (data or {}).get("findScenes", {}).get("scenes", [])
+            log.debug(f"_fetch_scenes: all-scenes query returned {len(raw)} scenes")
+        elif is_triptych and not source_ids:
+            log.debug(f"_fetch_scenes: triptych tag channel with no source_ids, fetching PORTRAIT scenes")
+            scene_filter = {"orientation": {"value": ["PORTRAIT"]}}
+            query = f"""
+            query($sf: SceneFilterType) {{
+                findScenes(filter: {{per_page: -1, sort: "id", direction: ASC}}, scene_filter: $sf) {{
+                    scenes {{ {_SCENE_FIELDS} }}
+                }}
+            }}
+            """
+            data = await call_graphql(query, {"sf": scene_filter})
+            raw = (data or {}).get("findScenes", {}).get("scenes", [])
+            log.debug(f"_fetch_scenes: PORTRAIT query returned {len(raw)} scenes")
+        else:
+            # INCLUDES with multiple IDs = OR — scenes matching ANY of the selected tags
+            scene_filter = {"tags": {"value": source_ids, "modifier": "INCLUDES", "depth": 1}}
+            query = f"""
+            query($sf: SceneFilterType) {{
+                findScenes(filter: {{per_page: -1, sort: "id", direction: ASC}}, scene_filter: $sf) {{
+                    scenes {{ {_SCENE_FIELDS} }}
+                }}
+            }}
+            """
+            data = await call_graphql(query, {"sf": scene_filter})
+            raw = (data or {}).get("findScenes", {}).get("scenes", [])
+            log.debug(f"_fetch_scenes: tag query returned {len(raw)} scenes")
 
     elif channel_type == "filter":
         from core.query_builder import transform_saved_filter
         from core.stash_client import get_saved_filters
-        # Union results from all source filters, deduplicating by scene ID
-        saved_all = await get_saved_filters()
-        saved_by_id = {str(f["id"]): f for f in saved_all}
-        raw_by_id: dict[str, dict] = {}
-        q = f"""
-        query($filter: FindFilterType, $sf: SceneFilterType) {{
-            findScenes(filter: $filter, scene_filter: $sf) {{
-                scenes {{ {_SCENE_FIELDS} }}
+        # For shorts/triptych channels with no filters, fetch all or portrait scenes
+        if is_shorts and not source_ids:
+            log.debug(f"_fetch_scenes: shorts filter channel with no source_ids, fetching all scenes")
+            query = f"""
+            query {{
+                findScenes(filter: {{per_page: -1, sort: "id", direction: ASC}}) {{
+                    scenes {{ {_SCENE_FIELDS} }}
+                }}
             }}
-        }}
-        """
-        for filter_id in source_ids:
-            fd = saved_by_id.get(filter_id)
-            if not fd:
-                continue
-            scene_filter: dict = {}
-            filter_args: dict = {"per_page": -1, "sort": "id", "direction": "ASC"}
-            if fd.get("object_filter"):
-                scene_filter = transform_saved_filter(fd["object_filter"])
-            elif fd.get("filter"):
-                import json as _json
-                parsed = _json.loads(fd["filter"])
-                if "scene_filter" in parsed:
-                    scene_filter = transform_saved_filter(parsed["scene_filter"])
-                for k in ("q", "sort", "direction"):
-                    if k in parsed:
-                        filter_args[k] = parsed[k]
-            data = await call_graphql(q, {"filter": filter_args, "sf": scene_filter})
-            for s in (data or {}).get("findScenes", {}).get("scenes", []):
-                raw_by_id[s["id"]] = s
-        raw = list(raw_by_id.values())
+            """
+            data = await call_graphql(query, {})
+            raw = (data or {}).get("findScenes", {}).get("scenes", [])
+            log.debug(f"_fetch_scenes: all-scenes query returned {len(raw)} scenes")
+        elif is_triptych and not source_ids:
+            log.debug(f"_fetch_scenes: triptych with no source_ids, fetching PORTRAIT scenes")
+            scene_filter = {"orientation": {"value": ["PORTRAIT"]}}
+            query = f"""
+            query($sf: SceneFilterType) {{
+                findScenes(filter: {{per_page: -1, sort: "id", direction: ASC}}, scene_filter: $sf) {{
+                    scenes {{ {_SCENE_FIELDS} }}
+                }}
+            }}
+            """
+            data = await call_graphql(query, {"sf": scene_filter})
+            raw = (data or {}).get("findScenes", {}).get("scenes", [])
+            log.debug(f"_fetch_scenes: PORTRAIT query returned {len(raw)} scenes")
+        else:
+            # Union results from all source filters, deduplicating by scene ID
+            saved_all = await get_saved_filters()
+            saved_by_id = {str(f["id"]): f for f in saved_all}
+            raw_by_id: dict[str, dict] = {}
+            q = f"""
+            query($filter: FindFilterType, $sf: SceneFilterType) {{
+                findScenes(filter: $filter, scene_filter: $sf) {{
+                    scenes {{ {_SCENE_FIELDS} }}
+                }}
+            }}
+            """
+            for filter_id in source_ids:
+                fd = saved_by_id.get(filter_id)
+                if not fd:
+                    continue
+                scene_filter: dict = {}
+                filter_args: dict = {"per_page": -1, "sort": "id", "direction": "ASC"}
+                if fd.get("object_filter"):
+                    scene_filter = transform_saved_filter(fd["object_filter"])
+                elif fd.get("filter"):
+                    import json as _json
+                    parsed = _json.loads(fd["filter"])
+                    if "scene_filter" in parsed:
+                        scene_filter = transform_saved_filter(parsed["scene_filter"])
+                    for k in ("q", "sort", "direction"):
+                        if k in parsed:
+                            filter_args[k] = parsed[k]
+                data = await call_graphql(q, {"filter": filter_args, "sf": scene_filter})
+                for s in (data or {}).get("findScenes", {}).get("scenes", []):
+                    raw_by_id[s["id"]] = s
+            raw = list(raw_by_id.values())
 
     elif channel_type == "shorts":
         max_secs = int(getattr(config, "SHORTS_MAX_MINUTES", 5)) * 60
@@ -516,11 +576,32 @@ async def _fetch_scenes_for_stash_channel(ch: dict) -> list[dict]:
         """
         data = await call_graphql(query, {"sf": scene_filter})
         raw = (data or {}).get("findScenes", {}).get("scenes", [])
+
+    elif channel_type == "performer":
+        # Filter scenes by performer IDs
+        if source_ids:
+            scene_filter = {"performers": {"value": source_ids, "modifier": "INCLUDES"}}
+            query = f"""
+            query($sf: SceneFilterType) {{
+                findScenes(filter: {{per_page: -1, sort: "id", direction: ASC}}, scene_filter: $sf) {{
+                    scenes {{ {_SCENE_FIELDS} }}
+                }}
+            }}
+            """
+            data = await call_graphql(query, {"sf": scene_filter})
+            raw = (data or {}).get("findScenes", {}).get("scenes", [])
+            log.debug(f"_fetch_scenes: performer query returned {len(raw)} scenes")
+        else:
+            raw = []
+
     else:
         raw = []
 
-    shorts_enabled  = bool(getattr(config, "ENABLE_SHORTS_CHANNEL", False))
-    shorts_max_secs = int(getattr(config, "SHORTS_MAX_MINUTES", 5)) * 60
+    # Use per-channel shorts_max_minutes if set, otherwise use global config
+    shorts_max_minutes = ch.get("shorts_max_minutes")
+    if shorts_max_minutes is None:
+        shorts_max_minutes = int(getattr(config, "SHORTS_MAX_MINUTES", 5))
+    shorts_max_secs = shorts_max_minutes * 60
 
     result = []
     for s in raw:
@@ -528,9 +609,8 @@ async def _fetch_scenes_for_stash_channel(ch: dict) -> list[dict]:
         duration = float(files[0].get("duration") or 0) if files else 0.0
         if duration < 5.0:
             continue
-        # When the shorts channel is enabled, exclude short scenes from regular channels
-        # so the same scene never appears on both a shorts channel and a regular channel.
-        if channel_type != "shorts" and shorts_enabled and duration < shorts_max_secs:
+        # If this is a shorts channel, only include clips under the max duration
+        if is_shorts and duration >= shorts_max_secs:
             continue
         result.append({
             "id": s["id"],
@@ -543,12 +623,18 @@ async def _fetch_scenes_for_stash_channel(ch: dict) -> list[dict]:
             "tags": [t["name"] for t in (s.get("tags") or [])],
             "performer_count": len(s.get("performers") or []),
             "has_description": bool((s.get("details") or "").strip()),
+            "files": files,
         })
+
+    log.debug(f"_fetch_scenes: after duration filter, {len(result)} scenes")
 
     # For triptych channels, apply additional vertical predicate filtering (orientation+aspect)
     if is_triptych:
+        before_vert = len(result)
         result = filter_vertical_scenes(result)
+        log.debug(f"_fetch_scenes: after vertical filter, {before_vert} → {len(result)} scenes")
 
+    log.debug(f"_fetch_scenes: returning {len(result)} scenes for {ch_name}")
     return result
 
 

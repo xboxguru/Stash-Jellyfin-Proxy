@@ -57,7 +57,7 @@ def _primary_dimensions(scene: dict) -> tuple[int, int]:
     return width, height
 
 
-def is_vertical_scene(scene: dict, aspect_min: float = None) -> bool:
+def is_vertical_scene(scene: dict, aspect_min: float = None, debug_log=None) -> bool:
     """True when the scene qualifies for the Vertical library.
 
     A scene is vertical when its primary file is portrait (height > width) AND
@@ -69,9 +69,33 @@ def is_vertical_scene(scene: dict, aspect_min: float = None) -> bool:
     if aspect_min is None:
         aspect_min = getattr(config, "VERTICAL_ASPECT_MIN", 1.3)
     width, height = _primary_dimensions(scene)
-    return width > 0 and height > width and (height / width) >= aspect_min
+    scene_id = scene.get('id', '?')
+    scene_title = scene.get('title', '?')[:40] if scene.get('title') else '?'
+    if debug_log:
+        debug_log(f"  checking {scene_id} {scene_title}: w={width} h={height}")
+    if width <= 0 or height <= 0:
+        if debug_log:
+            debug_log(f"    → no dimensions")
+        return False
+    if height <= width:
+        if debug_log:
+            debug_log(f"    → not portrait")
+        return False
+    aspect = height / width
+    passes = aspect >= aspect_min
+    if debug_log:
+        debug_log(f"    → aspect={aspect:.2f} (min={aspect_min}) {'✓ PASS' if passes else '✗ FAIL'}")
+    return passes
 
 
-def filter_vertical_scenes(scenes: list) -> list:
+def filter_vertical_scenes(scenes: list, debug=False) -> list:
     """Keeps only scenes passing is_vertical_scene(); refines Stash's PORTRAIT filter."""
-    return [s for s in scenes if is_vertical_scene(s)]
+    debug_log = None
+    if debug:
+        logger = logging.getLogger(__name__)
+        debug_log = lambda msg: logger.debug(msg)
+        debug_log(f"filter_vertical_scenes: checking {len(scenes)} scenes")
+    result = [s for s in scenes if is_vertical_scene(s, debug_log=debug_log)]
+    if debug:
+        debug_log(f"filter_vertical_scenes: {len(scenes)} → {len(result)} scenes pass vertical filter")
+    return result

@@ -83,12 +83,13 @@
                 </div>
             </div>
 
-            <!-- Source (tags / filters) -->
+            <!-- Source (tags / filters / performers) -->
             <div class="logo-modal-section">
                 <div class="logo-modal-label">Source</div>
                 <div class="ch-source-type-tabs">
                     <button id="ch-edit-tab-tag" class="active" onclick="switchChEditTab('tag')">Tags</button>
                     <button id="ch-edit-tab-filter" onclick="switchChEditTab('filter')">Filters</button>
+                    <button id="ch-edit-tab-performer" onclick="switchChEditTab('performer')">Performers</button>
                 </div>
                 <input type="text" id="ch-edit-source-search" class="ch-source-search" placeholder="Search&hellip;" oninput="renderChEditSourceList()">
                 <div class="ch-source-list" id="ch-edit-source-list"><div class="empty-state" style="padding:12px;">Loading&hellip;</div></div>
@@ -105,6 +106,19 @@
                 <div id="ch-triptych-salt-section" style="display:none;">
                     <input type="text" id="ch-edit-triptych-salt" class="form-input" placeholder="Salt (optional, for shuffling sides)" style="width:100%;">
                     <div class="form-hint" style="margin-top:4px;">Leave empty for default, or enter any text to change side pairings.</div>
+                </div>
+            </div>
+
+            <!-- Shorts Options -->
+            <div class="logo-modal-section">
+                <div class="logo-modal-label">Short Clips</div>
+                <label class="picker-filter-check" style="margin-bottom:12px;">
+                    <input type="checkbox" id="ch-edit-shorts" onchange="updateShortsUI()">
+                    Short clips only
+                </label>
+                <div id="ch-edit-shorts-minutes-section" style="display:none;">
+                    <input type="number" id="ch-edit-shorts-minutes" class="form-input" placeholder="Max minutes (default: {{ shorts_max_minutes }})" min="1" style="width:100%;">
+                    <div class="form-hint" style="margin-top:4px;">Leave empty to use default ({{ shorts_max_minutes }} min), or enter a custom max duration.</div>
                 </div>
             </div>
 
@@ -161,6 +175,7 @@
                 <div class="ch-source-type-tabs">
                     <button id="add-ch-tab-tag" class="active" onclick="switchAddChTab('tag')">Tags</button>
                     <button id="add-ch-tab-filter" onclick="switchAddChTab('filter')">Filters</button>
+                    <button id="add-ch-tab-performer" onclick="switchAddChTab('performer')">Performers</button>
                 </div>
                 <input type="text" id="add-ch-source-search" class="ch-source-search" placeholder="Search&hellip;" oninput="renderAddChSourceList()">
                 <div class="ch-source-list" id="add-ch-source-list"><div class="empty-state" style="padding:12px;">Loading&hellip;</div></div>
@@ -184,6 +199,18 @@
                 <div id="add-ch-triptych-salt-section" style="display:none;">
                     <input type="text" id="add-ch-triptych-salt" class="form-input" placeholder="Salt (optional, for shuffling sides)" style="width:100%;">
                     <div class="form-hint" style="margin-top:4px;">Leave empty for default, or enter any text to change side pairings.</div>
+                </div>
+            </div>
+
+            <div class="logo-modal-section">
+                <div class="logo-modal-label">Short Clips</div>
+                <label class="picker-filter-check" style="margin-bottom:12px;">
+                    <input type="checkbox" id="add-ch-shorts" onchange="updateAddChShortsUI()">
+                    Short clips only
+                </label>
+                <div id="add-ch-shorts-minutes-section" style="display:none;">
+                    <input type="number" id="add-ch-shorts-minutes" class="form-input" placeholder="Max minutes (default: {{ shorts_max_minutes }})" min="1" style="width:100%;">
+                    <div class="form-hint" style="margin-top:4px;">Leave empty to use default ({{ shorts_max_minutes }} min), or enter a custom max duration.</div>
                 </div>
             </div>
 
