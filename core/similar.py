@@ -211,11 +211,14 @@ async def build_next_up_pool(limit: int = 25) -> list:
              + [("tag", t) for t in tag_ids])
 
     candidates: list = []
+    scored_pool = 0  # unique unwatched candidates the facet queries surfaced (pre-truncation)
     if seeds:
         corpus, by_id, ps_hits, pt_hits = await _collect(seeds, vertical=False, unwatched_only=True)
+        scored_pool = len(by_id)
         target_ids = {"performers": set(perf_ids), "tags": set(tag_ids), "studios": set(studio_ids)}
         candidates = _rank(by_id, target_ids, corpus, ps_hits, pt_hits,
                            exclude_ids=watched_ids, limit=limit)
+    scored_count = len(candidates)  # how many came from affinity scoring (before backfill)
 
     # Backfill with global unwatched scenes so the rail is never short.
     if len(candidates) < limit:
@@ -235,6 +238,7 @@ async def build_next_up_pool(limit: int = 25) -> list:
 
     logger.debug(
         f"Next Up: {len(history)} watched → {len(seeds)} seed facet(s), "
-        f"{len(candidates)} scene(s) after scoring + backfill (limit {limit})"
+        f"{scored_pool} scored candidate(s) → {scored_count} from scoring "
+        f"+ {len(candidates) - scored_count} backfilled = {len(candidates)} (limit {limit})"
     )
     return candidates
