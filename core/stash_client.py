@@ -31,7 +31,7 @@ BASE_SCENE_FIELDS = """
     id title code date details o_counter play_count rating100 created_at organized resume_time interactive
     files { path duration video_codec audio_codec frame_rate bit_rate width height format size basename }
     studio { id name image_path }
-    tags { name }
+    tags { id name }
     performers { name id image_path }
     captions { language_code caption_type }
     paths { caption funscript }
@@ -225,6 +225,24 @@ async def get_performer(performer_id: str):
     data = await call_graphql("""query FindPerformer($id: ID!) { findPerformer(id: $id) { id name image_path alias_list gender birthdate country ethnicity hair_color eye_color height_cm weight measurements piercings tattoos details fake_tits career_length penis_length circumcised } }""", {"id": performer_id})
     return data.get("findPerformer") if data else None
 
+@cached(ttl=300)
+async def get_studio(studio_id: str):
+    """Studio with its parent (for similar-items fan-out). Cached — hierarchy is stable."""
+    data = await call_graphql(
+        "query FindStudio($id: ID!) { findStudio(id: $id) { id name parent_studio { id name } } }",
+        {"id": studio_id},
+    )
+    return data.get("findStudio") if data else None
+
+@cached(ttl=300)
+async def get_tag(tag_id: str):
+    """Tag with its parents (for similar-items fan-out). Cached — hierarchy is stable."""
+    data = await call_graphql(
+        "query FindTag($id: ID!) { findTag(id: $id) { id name parents { id name } } }",
+        {"id": tag_id},
+    )
+    return data.get("findTag") if data else None
+
 async def clear_all_caches():
     """Flush the in-memory aiocache so fresh data is fetched from Stash on the next request."""
     cache = caches.get("default")
@@ -315,7 +333,7 @@ async def fetch_recent_watch_history(limit: int = 50) -> list:
         filter: { sort: "updated_at", direction: DESC, per_page: $per_page },
         scene_filter: { play_count: { value: 0, modifier: GREATER_THAN } }
       ) {
-        scenes { id title play_count resume_time performers { id name } studio { id name } }
+        scenes { id title play_count resume_time performers { id name } studio { id name } tags { id name } }
       }
     }
     """
