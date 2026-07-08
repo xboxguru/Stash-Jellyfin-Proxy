@@ -80,24 +80,36 @@ with the same `orientation: PORTRAIT` filter as the library browse path, `per_pa
 refined through `core.vertical.filter_vertical_scenes`). From that pool, four **category
 pools** are built against the center scene:
 
-| Category | Membership | Candidate weight (within pool) |
+| Category | Membership | Category present when |
 |---|---|---|
-| Performer | shares ≥1 performer id with center | uniform (1.0) |
-| Tags | shares ≥1 tag *name* with center (Stash's scene fields carry tag names, not ids) | shared-tag count — higher overlap is picked more often |
-| Studio | same studio id as center | uniform (1.0) |
-| Date | within `VERTICAL_DATE_WINDOW_DAYS` of center's `date` (falls back to `created_at`) | `window + 1 - day_distance` — closer dates are picked more often |
+| Performer | shares ≥1 performer id with center | center has a performer with a match |
+| Tags | shares ≥1 tag with center | center has a tag with a match |
+| Studio | same studio id as center | center has a studio with a match |
+| Date | within `VERTICAL_DATE_WINDOW_DAYS` of center's `date` (falls back to `created_at`) | center has a parseable date with a match |
 
 Only **non-empty** pools count. For each of the 2 side slots:
 1. Pick a **category** by weighted-random over `VERTICAL_WEIGHT_PERFORMER/_TAGS/_STUDIO/_DATE`,
    re-normalized across whatever pools are currently non-empty (a category with 0 matches
    never gets picked — it isn't in the running at all, not picked-then-discarded).
-2. Pick a **clip** within that category's pool, weighted-random by the per-candidate
-   weight above (so Tags/Date favor the closest matches; Performer/Studio are a flat
-   draw since there's no natural "how much" to rank by).
-3. Tags additionally keep only the top `VERTICAL_TAG_WINDOW` candidates by shared-tag
-   count before the weighted draw — an unbounded tag pool would let a handful of
-   loosely-related clips (1 shared tag out of a large tag set) dilute the pick just as
-   much as strongly-related ones.
+2. Pick a **clip** within that category's pool, weighted-random:
+   - **Facet categories (Performer / Tags / Studio)** weight each clip by its
+     **rarity-weighted per-candidate affinity** (`core.affinity.score_candidate`) — the
+     same scoring brain the `/similar` rail uses. A clip that shares *more* facets, and
+     *rarer* ones, with the center is picked more often: sharing a niche performer/tag
+     outweighs a generic one, and a clip that shares the performer **and** a tag **and**
+     the studio outweighs a single-facet match. "Rarity" here is the facet's frequency
+     **within the vertical candidate set** (computed in-process, no extra Stash query), so
+     the seeded channel path (below) stays deterministic.
+   - **Date** keeps its proximity weight (`window + 1 - day_distance`) — it isn't a
+     facet-overlap signal, so affinity doesn't apply.
+3. Tags additionally keep only the top `VERTICAL_TAG_WINDOW` candidates (by shared-tag
+   count) before the affinity re-weight — an unbounded tag pool would let a handful of
+   loosely-related clips (1 shared tag out of a large tag set) enter the draw at all.
+
+The rarity + affinity math lives in **`core/affinity.py`** (`rarity`, `score_candidate`),
+shared verbatim with `core/similar.py` (the `/similar` and Next Up rails) — one facet-scoring
+primitive, three callers. The Triptych draw stays *weighted-random* (not argmax) on purpose:
+sides must vary across plays / re-roll, unlike the deterministic top-N of `/similar`.
 
 Pools are **rebuilt from scratch for slot 2** with the slot-1 pick added to the exclusion
 set. This is what makes the "next-heaviest category" fallback happen for free: if slot 1
