@@ -627,16 +627,22 @@ async def endpoint_display_preferences(request: Request):
 async def _fetch_affinity_scenes(field: str, item_id: str, limit: int, unwatched_only: bool = True, sort_dir: str = "ASC") -> list:
     """Helper: Fetches scenes for a specific performer, studio, or tag."""
     scene_filter = {field: {"value": [item_id], "modifier": "INCLUDES"}}
-    
+
     if unwatched_only:
         scene_filter["play_count"] = {"value": 0, "modifier": "EQUALS"}
-        
+
     data = await stash_client.fetch_scenes(
         filter_args={"sort": "date", "direction": sort_dir},
         page=1, per_page=limit,
         scene_filter=scene_filter
     )
-    return data.get("scenes", []) if data else []
+    scenes = data.get("scenes", []) if data else []
+    logger.debug(
+        f"Similar/affinity: {field}={item_id} limit={limit} dir={sort_dir} "
+        f"→ {len(scenes)} scene(s) (total match count={data.get('count') if data else 0}); "
+        f"filter={scene_filter}"
+    )
+    return scenes
 
 
 async def _build_similar_pool(scene_id: str, target_limit: int = 12, vertical: bool = False) -> list:
@@ -648,14 +654,22 @@ async def _build_similar_pool(scene_id: str, target_limit: int = 12, vertical: b
     """
     raw_id = scene_id.replace("scene-", "") if scene_id.startswith("scene-") else scene_id
     scene = await stash_client.get_scene(raw_id)
-    
+
     if not scene:
+        logger.debug(f"Similar/pool: scene {raw_id} not found in Stash — empty pool")
         return []
-        
+
     performer_ids = [p["id"] for p in scene.get("performers", []) if p.get("id")]
     studio_id = scene.get("studio", {}).get("id") if scene.get("studio") else None
     tag_ids = [t["id"] for t in scene.get("tags", []) if t.get("id")]
-    
+
+    logger.debug(
+        f"Similar/pool: scene {raw_id} vertical={vertical} target_limit={target_limit} — "
+        f"affinity seeds: performers={performer_ids or '[]'} studio={studio_id or 'None'} "
+        f"tags={tag_ids or '[]'} "
+        f"(raw tags on scene={[t.get('name') for t in scene.get('tags', [])][:8]})"
+    )
+
     # Randomly select up to 3 tags to prevent firing 50 queries for heavily-tagged scenes
     sample_tags = random.sample(tag_ids, min(len(tag_ids), 10))
     
@@ -689,8 +703,18 @@ async def _build_similar_pool(scene_id: str, target_limit: int = 12, vertical: b
     # 5. Restrict to vertical-only when the target came from the Triptych library, so
     # every similar tile is itself a valid triptych center (plays compositor-style).
     pool = list(candidates.values())
+    deduped = len(pool)
     if vertical:
         pool = filter_vertical_scenes(pool)
+        logger.debug(
+            f"Similar/pool: scene {raw_id} vertical filter {deduped} → {len(pool)} scene(s) "
+            f"(dropped {deduped - len(pool)} non-vertical from the deduped affinity pool)"
+        )
+
+    logger.debug(
+        f"Similar/pool: scene {raw_id} final pool — {sum(len(r) for r in results)} raw hit(s), "
+        f"{deduped} after dedup, {len(pool)} after vertical filter → returning {min(len(pool), target_limit)}"
+    )
 
     # 6. Shuffle and return
     random.shuffle(pool)
@@ -705,16 +729,18 @@ async def endpoint_similar_items(request: Request):
     except ValueError:
         limit = 12
         
-    logger.debug(f"Router -> Similar Items Requested for {item_id} (Limit: {limit})")
-
     # Detect the Triptych namespace BEFORE decoding — decode_id() strips the leading 'v'.
     # A vertical target returns vertical-only similars, minted with vscene- ids so a click
     # plays compositor-style (Feature 1 decision 9); a normal target is unchanged.
     vertical = jellyfin_mapper.is_vertical_id(item_id)
     decoded_id = decode_id(item_id)
+    logger.debug(
+        f"Similar: request item={item_id} decoded={decoded_id} vertical={vertical} limit={limit}"
+    )
 
     # In our ecosystem, "Similar" only applies to scenes, not folders or individual performers
     if not decoded_id.startswith("scene-"):
+        logger.debug(f"Similar: {decoded_id} is not a scene id — returning empty")
         return JSONResponse({"Items": [], "TotalRecordCount": 0, "StartIndex": 0})
 
     scenes = await _build_similar_pool(decoded_id, target_limit=limit, vertical=vertical)
