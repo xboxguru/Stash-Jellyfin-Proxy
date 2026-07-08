@@ -195,8 +195,18 @@ async def vertical_playback_info(scene: dict, raw_id: str, request: Request) -> 
         ok = await _vertical_manager.ensure(session_id, scene, None)
     else:
         session_id = _new_session_id(raw_id)
-        vdebug(logger, f"Vertical: PlaybackInfo pre-warming session {session_id!r} for scene {raw_id}")
-        ok = await _vertical_manager.ensure(session_id, scene, 0.0)
+        # Pre-warm at the resume position so a resumed play doesn't force the encoder
+        # to crawl from 0 up to the resume segment — that overran Wholphin's timeout
+        # (the resume segment sat inside the forward-wait window, so ensure_segment
+        # waited ~45s instead of relaunching).  Honor an explicit StartTimeTicks if the
+        # client sent one, else the scene's saved resume_time; default 0.  A client that
+        # then plays from the start requests seg0 (behind the run start) and
+        # ensure_segment relaunches at 0.
+        start_at = _seek_seconds(request, default=None)
+        if start_at is None:
+            start_at = float(scene.get("resume_time") or 0.0)
+        vdebug(logger, f"Vertical: PlaybackInfo pre-warming session {session_id!r} for scene {raw_id} at {start_at:.1f}s")
+        ok = await _vertical_manager.ensure(session_id, scene, start_at)
     if not ok:
         logger.info(
             f"Vertical: PlaybackInfo for scene {raw_id} — compositor unavailable "
