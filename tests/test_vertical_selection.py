@@ -66,32 +66,32 @@ class TestSharedStudioPool:
 class TestSharedTagsPool:
     def test_no_tags_on_center_is_empty(self):
         center = _vscene("1", tags=[])
-        candidates = [_vscene("2", tags=[{"name": "solo"}])]
+        candidates = [_vscene("2", tags=[{"id": "solo", "name": "solo"}])]
         assert vsel._shared_tags_pool(center, candidates, window=30) == []
 
     def test_weight_is_shared_tag_count(self):
-        center = _vscene("1", tags=[{"name": "a"}, {"name": "b"}, {"name": "c"}])
-        two_shared = _vscene("2", tags=[{"name": "a"}, {"name": "b"}])
-        one_shared = _vscene("3", tags=[{"name": "a"}])
+        center = _vscene("1", tags=[{"id": "a", "name": "a"}, {"id": "b", "name": "b"}, {"id": "c", "name": "c"}])
+        two_shared = _vscene("2", tags=[{"id": "a", "name": "a"}, {"id": "b", "name": "b"}])
+        one_shared = _vscene("3", tags=[{"id": "a", "name": "a"}])
         pool = dict((s["id"], w) for s, w in vsel._shared_tags_pool(center, [two_shared, one_shared], window=30))
         assert pool["2"] == 2.0
         assert pool["3"] == 1.0
 
     def test_ranked_descending_by_overlap(self):
-        center = _vscene("1", tags=[{"name": "a"}, {"name": "b"}, {"name": "c"}])
-        low = _vscene("2", tags=[{"name": "a"}])
-        high = _vscene("3", tags=[{"name": "a"}, {"name": "b"}, {"name": "c"}])
+        center = _vscene("1", tags=[{"id": "a", "name": "a"}, {"id": "b", "name": "b"}, {"id": "c", "name": "c"}])
+        low = _vscene("2", tags=[{"id": "a", "name": "a"}])
+        high = _vscene("3", tags=[{"id": "a", "name": "a"}, {"id": "b", "name": "b"}, {"id": "c", "name": "c"}])
         pool = vsel._shared_tags_pool(center, [low, high], window=30)
         assert [s["id"] for s, _ in pool] == ["3", "2"]
 
     def test_zero_overlap_excluded(self):
-        center = _vscene("1", tags=[{"name": "a"}])
-        no_overlap = _vscene("2", tags=[{"name": "z"}])
+        center = _vscene("1", tags=[{"id": "a", "name": "a"}])
+        no_overlap = _vscene("2", tags=[{"id": "z", "name": "z"}])
         assert vsel._shared_tags_pool(center, [no_overlap], window=30) == []
 
     def test_window_truncates_to_top_n(self):
-        center = _vscene("1", tags=[{"name": "a"}])
-        candidates = [_vscene(str(i), tags=[{"name": "a"}]) for i in range(2, 40)]
+        center = _vscene("1", tags=[{"id": "a", "name": "a"}])
+        candidates = [_vscene(str(i), tags=[{"id": "a", "name": "a"}]) for i in range(2, 40)]
         pool = vsel._shared_tags_pool(center, candidates, window=5)
         assert len(pool) == 5
 
@@ -140,14 +140,14 @@ class TestBuildCategoryPools:
         center = _vscene(
             "1",
             performers=[{"id": "10", "name": "Jane"}],
-            tags=[{"name": "solo"}],
+            tags=[{"id": "solo", "name": "solo"}],
             studio={"id": "5", "name": "Studio"},
             date="2024-01-01",
         )
         match = _vscene(
             "2",
             performers=[{"id": "10", "name": "Jane"}],
-            tags=[{"name": "solo"}],
+            tags=[{"id": "solo", "name": "solo"}],
             studio={"id": "5", "name": "Studio"},
             date="2024-01-02",
         )
@@ -226,8 +226,8 @@ class TestPickSide:
     def test_next_slot_recomputes_pools_after_exclusion(self):
         # Only one scene shares a tag with center; once it's excluded (already
         # picked as a side), the tags pool must come back empty for the next pick.
-        center = _vscene("1", tags=[{"name": "solo"}], performers=[], studio=None, date=None, created_at=None)
-        only_tag_match = _vscene("2", tags=[{"name": "solo"}])
+        center = _vscene("1", tags=[{"id": "solo", "name": "solo"}], performers=[], studio=None, date=None, created_at=None)
+        only_tag_match = _vscene("2", tags=[{"id": "solo", "name": "solo"}])
         other = _vscene("3", tags=[])
 
         chosen1, path1 = vsel._pick_side(center, [only_tag_match, other], excluded_ids={"1"})
@@ -237,6 +237,81 @@ class TestPickSide:
         chosen2, path2 = vsel._pick_side(center, [only_tag_match, other], excluded_ids={"1", "2"})
         assert chosen2["id"] == "3"
         assert path2 == "uniform_random_all_categories_empty"
+
+
+# ── affinity injection (rarity-weighted per-candidate within a facet category) ──
+
+class TestAffinityInjection:
+    def test_facet_frequencies_counts_by_id(self):
+        cands = [
+            _vscene("1", performers=[{"id": "P1"}], studio={"id": "S1"}, tags=[{"id": "T1"}, {"id": "T2"}]),
+            _vscene("2", performers=[{"id": "P1"}], studio={"id": "S1"}, tags=[{"id": "T1"}]),
+        ]
+        freqs = vsel._facet_frequencies(cands)
+        assert freqs[("performer", "P1")] == 2
+        assert freqs[("studio", "S1")] == 2
+        assert freqs[("tag", "T1")] == 2
+        assert freqs[("tag", "T2")] == 1
+
+    def test_center_facets_extraction(self):
+        center = _vscene("1", performers=[{"id": "P1"}], studio={"id": "S1"}, tags=[{"id": "T1"}])
+        assert vsel._center_facets(center) == {"performers": {"P1"}, "tags": {"T1"}, "studios": {"S1"}}
+
+    def test_multi_facet_side_outweighs_single_facet_within_category(self, monkeypatch):
+        # Force the performer category; both candidates share the performer, but B also
+        # shares a tag → higher affinity → heavier weight in the clip draw.
+        monkeypatch.setattr(config, "VERTICAL_WEIGHT_PERFORMER", 50)
+        monkeypatch.setattr(config, "VERTICAL_WEIGHT_TAGS", 0)
+        monkeypatch.setattr(config, "VERTICAL_WEIGHT_STUDIO", 0)
+        monkeypatch.setattr(config, "VERTICAL_WEIGHT_DATE", 0)
+        center = _vscene("1", performers=[{"id": "P1"}], tags=[{"id": "T1"}], studio=None, date=None, created_at=None)
+        A = _vscene("2", performers=[{"id": "P1"}])
+        B = _vscene("3", performers=[{"id": "P1"}], tags=[{"id": "T1"}])
+
+        captured = {}
+        real = vsel.random.choices
+
+        def spy(population, weights=None, k=1):
+            if population and isinstance(population[0], dict):  # clip-level draw (scenes)
+                captured.update({s["id"]: w for s, w in zip(population, weights)})
+            return real(population, weights=weights, k=k)
+
+        monkeypatch.setattr(vsel.random, "choices", spy)
+        vsel._pick_side(center, [center, A, B], excluded_ids={"1"})
+        assert captured["3"] > captured["2"]
+
+    def test_rarer_shared_facet_outweighs_common_one(self, monkeypatch):
+        # Two candidates each share exactly one performer with the center, but P_rare
+        # occurs in fewer candidates than P_common → rarer draws a heavier weight.
+        monkeypatch.setattr(config, "VERTICAL_WEIGHT_PERFORMER", 50)
+        monkeypatch.setattr(config, "VERTICAL_WEIGHT_TAGS", 0)
+        monkeypatch.setattr(config, "VERTICAL_WEIGHT_STUDIO", 0)
+        monkeypatch.setattr(config, "VERTICAL_WEIGHT_DATE", 0)
+        center = _vscene("1", performers=[{"id": "P_rare"}, {"id": "P_common"}])
+        rare = _vscene("2", performers=[{"id": "P_rare"}])
+        common = _vscene("3", performers=[{"id": "P_common"}])
+        # Pad the candidate set so P_common is far more frequent than P_rare.
+        common_padding = [_vscene(str(i), performers=[{"id": "P_common"}]) for i in range(4, 14)]
+
+        captured = {}
+        real = vsel.random.choices
+
+        def spy(population, weights=None, k=1):
+            if population and isinstance(population[0], dict):
+                captured.update({s["id"]: w for s, w in zip(population, weights)})
+            return real(population, weights=weights, k=k)
+
+        monkeypatch.setattr(vsel.random, "choices", spy)
+        vsel._pick_side(center, [center, rare, common, *common_padding], excluded_ids={"1"})
+        assert captured["2"] > captured["3"]
+
+    def test_seeded_selection_stays_deterministic(self):
+        import random as _random
+        cands = [_vscene(str(i), performers=[{"id": "P1"}], tags=[{"id": f"T{i % 3}"}]) for i in range(1, 8)]
+        center = cands[0]
+        first = vsel.select_side_clips_seeded(center, cands, _random.Random(42))
+        second = vsel.select_side_clips_seeded(center, cands, _random.Random(42))
+        assert first == second and len(first) == 2
 
 
 # ── select_side_clips ────────────────────────────────────────────────────────

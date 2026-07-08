@@ -13,7 +13,7 @@ import logging
 import random
 import datetime
 import config
-from core import stash_client
+from core import stash_client, affinity
 from core.vertical import filter_vertical_scenes, vdebug
 
 logger = logging.getLogger(__name__)
@@ -28,6 +28,37 @@ _CATEGORY_WEIGHT_ATTRS = {
 }
 
 _SIDE_SLOTS = 2
+
+
+def _facet_frequencies(candidates: list) -> dict:
+    """``(facet_type, id) -> occurrence count`` within the candidate set.
+
+    This is the "corpus" behind rarity weighting for Triptych: a performer/tag/studio
+    that appears in few vertical scenes is a stronger affinity signal than a generic
+    one. Computed purely from the candidate list (no Stash I/O), so the seeded channel
+    path stays deterministic.
+    """
+    freqs: dict = {}
+    for s in candidates:
+        for p in (s.get("performers") or []):
+            if p.get("id"):
+                freqs[("performer", p["id"])] = freqs.get(("performer", p["id"]), 0) + 1
+        sid = (s.get("studio") or {}).get("id")
+        if sid:
+            freqs[("studio", sid)] = freqs.get(("studio", sid), 0) + 1
+        for t in (s.get("tags") or []):
+            if t.get("id"):
+                freqs[("tag", t["id"])] = freqs.get(("tag", t["id"]), 0) + 1
+    return freqs
+
+
+def _center_facets(center: dict) -> dict:
+    """Center's facet id sets, shaped for affinity.score_candidate."""
+    return {
+        "performers": {p["id"] for p in (center.get("performers") or []) if p.get("id")},
+        "tags": {t["id"] for t in (center.get("tags") or []) if t.get("id")},
+        "studios": {sid for sid in [(center.get("studio") or {}).get("id")] if sid},
+    }
 
 
 def _weighted_choice(pairs: list, rng: random.Random | None = None) -> object:
@@ -76,16 +107,17 @@ def _shared_studio_pool(center: dict, candidates: list) -> list:
 def _shared_tags_pool(center: dict, candidates: list, window: int) -> list:
     """Ranked-window pool: candidates sharing >=1 tag, weight = shared-tag count.
 
-    Stash's BASE_SCENE_FIELDS only carries tag *names* (no ids), so overlap is
-    computed by name. Keeps the top `window` by overlap — no minimum overlap,
-    low-overlap clips just fall off naturally (§1.2.2).
+    Overlap is computed by tag **id** (BASE_SCENE_FIELDS carries `tags { id name }`),
+    matching the id-based affinity scoring that re-weights this pool in `_pick_side`.
+    Keeps the top `window` by overlap — no minimum overlap, low-overlap clips just
+    fall off naturally (§1.2.2).
     """
-    center_tags = {t.get("name") for t in (center.get("tags") or []) if t.get("name")}
+    center_tags = {t.get("id") for t in (center.get("tags") or []) if t.get("id")}
     if not center_tags:
         return []
     scored = []
     for s in candidates:
-        overlap = len(center_tags & {t.get("name") for t in (s.get("tags") or []) if t.get("name")})
+        overlap = len(center_tags & {t.get("id") for t in (s.get("tags") or []) if t.get("id")})
         if overlap > 0:
             scored.append((s, float(overlap)))
     scored.sort(key=lambda pair: pair[1], reverse=True)
@@ -149,7 +181,19 @@ def _pick_side(center: dict, candidates: list, excluded_ids: set, rng: random.Ra
         return chosen, "uniform_random_all_categories_empty"
 
     category = _weighted_choice(weighted_categories, rng=rng)
-    chosen = _weighted_choice(pools[category], rng=rng)
+    pool = pools[category]
+    # Within a chosen facet category, prefer the clip most related to the center:
+    # replace the pool's flat/overlap weight with a rarity-weighted per-candidate
+    # affinity (shared performers/tags/studio, rarer facets weigh more). Date stays
+    # proximity-weighted — it isn't a facet-overlap signal. Frequencies come from the
+    # candidate set, so the seeded channel path stays deterministic.
+    if category != "date":
+        cfacets = _center_facets(center)
+        freqs = _facet_frequencies(candidates)
+        reweighted = [(s, affinity.score_candidate(s, cfacets, freqs)) for s, _w in pool]
+        if any(w > 0 for _s, w in reweighted):
+            pool = reweighted
+    chosen = _weighted_choice(pool, rng=rng)
     return chosen, category
 
 
