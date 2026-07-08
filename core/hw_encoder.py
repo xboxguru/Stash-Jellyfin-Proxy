@@ -166,6 +166,16 @@ def _resolve(mode: str, ffmpeg_bin: str) -> EncoderConfig:
     return CPU
 
 
+def cached_encoder(mode: str, ffmpeg_bin: str = "ffmpeg") -> EncoderConfig | None:
+    """The already-probed encoder for ``(mode, ffmpeg_bin)``, or None if not probed.
+
+    A read-only view of the cache — it never triggers a (blocking) probe.  The UI
+    status light uses it to show the *runtime-active* encoder without side effects:
+    a selection changed but not yet restarted reads as ``None`` ("pending restart").
+    """
+    return _CACHE.get((str(mode).lower(), ffmpeg_bin))
+
+
 def clear_probe_cache() -> None:
     """Drop cached probe results (e.g. after a config/hardware change, or in tests)."""
     _CACHE.clear()

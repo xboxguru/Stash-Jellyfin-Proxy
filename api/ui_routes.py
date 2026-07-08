@@ -181,6 +181,24 @@ async def api_clear_logs(request: Request):
     state.log_clear_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return JSONResponse({"status": "cleared"})
 
+async def api_encoder_status(request: Request):
+    """Runtime-active H.264 encoder for the vertical compositor (drives the UI light).
+
+    Reflects what actually probed at startup — not the current dropdown value — so a
+    selection changed but not yet restarted reads as `probed: false` ("pending restart").
+    """
+    from core.hw_encoder import cached_encoder
+    mode = str(getattr(config, "VERTICAL_HWACCEL", "auto")).lower()
+    ffmpeg_bin = getattr(config, "FFMPEG_PATH", "ffmpeg")
+    enc = cached_encoder(mode, ffmpeg_bin)
+    return JSONResponse({
+        "enabled": bool(getattr(config, "ENABLE_VERTICAL_MULTI", False)),
+        "mode": mode,
+        "probed": enc is not None,
+        "codec": enc.codec if enc else None,
+        "is_hardware": bool(enc.is_hardware) if enc else False,
+    })
+
 async def api_get_status(request: Request):
     stash_ok = await stash_client.test_stash_connection()
     return JSONResponse({

@@ -69,6 +69,7 @@ routes = [
 
     Route("/api/config", ui_routes.api_get_config, methods=["GET"]),
     Route("/api/config", ui_routes.api_post_config, methods=["POST"]),
+    Route("/api/encoder/status", ui_routes.api_encoder_status, methods=["GET"]),
     Route("/api/logs", ui_routes.api_get_logs, methods=["GET"]),
     Route("/api/logs/clear", ui_routes.api_clear_logs, methods=["POST"]),
     Route("/api/status", ui_routes.api_get_status, methods=["GET"]),
