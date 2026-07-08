@@ -546,9 +546,12 @@ async def endpoint_latest(request: Request):
     filter_args, scene_filter, _, _ = await builder.build()
     
     stash_data = await stash_client.fetch_scenes({"sort": "created_at", "direction": "DESC"}, page=1, per_page=16, scene_filter=scene_filter)
-    safe_root = encode_id("root", "scenes")
-    
-    return JSONResponse([jellyfin_mapper.format_jellyfin_item(scene, parent_id=parent_id or safe_root) for scene in stash_data.get("scenes", [])])
+    # In the Triptych library, mint vscene- ids so a click composites (mirrors the
+    # browse path); otherwise these Latest tiles would play solo.
+    is_vertical = decoded_parent_id == "root-vertical"
+    safe_root = encode_id("root", "vertical") if is_vertical else encode_id("root", "scenes")
+
+    return JSONResponse([jellyfin_mapper.format_jellyfin_item(scene, parent_id=parent_id or safe_root, vertical=is_vertical) for scene in stash_data.get("scenes", [])])
 
 async def endpoint_resume(request: Request):
     parent_id = _get_query_param(request, "ParentId")
@@ -567,7 +570,10 @@ async def endpoint_resume(request: Request):
         scene_filter=scene_filter
     )
 
-    safe_root = encode_id("root", "scenes")
+    # In the Triptych library, mint vscene- ids so a resumed tile composites (mirrors
+    # the browse path); otherwise Continue Watching would play solo.
+    is_vertical = decoded_parent_id == "root-vertical"
+    safe_root = encode_id("root", "vertical") if is_vertical else encode_id("root", "scenes")
     items = []
     for scene in stash_data.get("scenes", []):
         resume_time = scene.get("resume_time") or 0
@@ -579,7 +585,7 @@ async def endpoint_resume(request: Request):
             if duration > 0 and (resume_time / duration) >= 0.90:
                 continue
         try:
-            items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=parent_id or safe_root))
+            items.append(jellyfin_mapper.format_jellyfin_item(scene, parent_id=parent_id or safe_root, vertical=is_vertical))
         except Exception as e:
             logger.error(f"Failed to map resume scene {scene.get('id')}: {e}")
         if len(items) >= limit:
