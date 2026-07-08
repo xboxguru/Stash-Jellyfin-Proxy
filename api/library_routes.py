@@ -727,17 +727,24 @@ async def endpoint_next_up(request: Request):
         limit = int(_get_query_param(request, "Limit", "24"))
     except ValueError:
         limit = 24
-        
-    logger.debug(f"Router -> Next Up Discovery Requested (Limit: {limit})")
-    
-    scenes = await similar.build_next_up_pool(limit=limit)
-    
+
+    # When the client renders this row under the Triptych library it passes that
+    # ParentId — scope the pool to vertical and mint vscene- ids so the tiles
+    # composite on click (mirrors resume/latest); otherwise it's a global,
+    # single-video discovery row.
+    parent_id = _get_query_param(request, "ParentId")
+    decoded_parent_id = decode_id(parent_id) if parent_id else None
+    is_vertical = decoded_parent_id == "root-vertical"
+    logger.debug(f"Router -> Next Up Discovery Requested (Limit: {limit}, ParentId={parent_id!r} → {decoded_parent_id!r}, vertical={is_vertical})")
+
+    scenes = await similar.build_next_up_pool(limit=limit, vertical=is_vertical)
+
     jellyfin_items = []
-    safe_root = encode_id("root", "scenes")
-    
+    safe_root = encode_id("root", "vertical") if is_vertical else encode_id("root", "scenes")
+
     for scene in scenes:
         try:
-            item = jellyfin_mapper.format_jellyfin_item(scene, parent_id=safe_root)
+            item = jellyfin_mapper.format_jellyfin_item(scene, parent_id=safe_root, vertical=is_vertical)
             
             # MAP OVERRIDE: Force strict clients to render this in the Next Up row
             item["Type"] = "Episode"

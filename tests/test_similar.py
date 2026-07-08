@@ -281,3 +281,25 @@ class TestBuildNextUpPool:
         with patch.object(similar, "stash_client", self._mock([], fetch)):
             out = await similar.build_next_up_pool(limit=5)
         assert len(out) == 5
+
+    async def test_vertical_scopes_facet_and_backfill_queries_to_portrait(self):
+        # Under the Triptych library: every facet query AND the backfill must carry
+        # orientation PORTRAIT so the discovery row is vertical-only.
+        watched = make_scene(scene_id="W1", performers=[{"id": "P1"}])
+        A = make_scene(scene_id="A", performers=[{"id": "P1"}], width=1080, height=1920)
+        backfill = [make_scene(scene_id=f"B{i}", width=1080, height=1920) for i in range(10)]
+        seen_filters = []
+
+        def fetch(**kw):
+            sf = kw["scene_filter"]
+            seen_filters.append(sf)
+            if "performers" in sf:
+                return {"count": 30, "scenes": [A]}
+            if "play_count" in sf and "performers" not in sf:  # backfill
+                return {"count": 100, "scenes": backfill}
+            return {"count": 0, "scenes": []}
+
+        with patch.object(similar, "stash_client", self._mock([watched], fetch)):
+            out = await similar.build_next_up_pool(limit=5, vertical=True)
+        assert len(out) == 5
+        assert seen_filters and all(sf.get("orientation") == {"value": ["PORTRAIT"]} for sf in seen_filters)

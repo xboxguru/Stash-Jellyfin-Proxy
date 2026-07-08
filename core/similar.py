@@ -182,12 +182,15 @@ def _top_facets(counter: Counter, cap: int) -> list:
     return [fid for fid, _n in counter.most_common(cap)]
 
 
-async def build_next_up_pool(limit: int = 25) -> list:
+async def build_next_up_pool(limit: int = 25, vertical: bool = False) -> list:
     """Discovery rail: scenes similar to what you've recently watched, best-match first.
 
     Aggregates performer/studio/tag facets across recent watch history (kept by
     frequency, capped), scores unwatched candidates with the shared facet model, then
     backfills with random unwatched scenes so the rail always fills to ``limit``.
+
+    ``vertical`` (the row is under the Triptych library) constrains both the facet
+    queries and the backfill to PORTRAIT, so every tile is a valid triptych center.
     """
     history = await stash_client.fetch_recent_watch_history(limit=50)
     watched_ids = {s["id"] for s in history if s.get("id")}
@@ -213,7 +216,7 @@ async def build_next_up_pool(limit: int = 25) -> list:
     candidates: list = []
     scored_pool = 0  # unique unwatched candidates the facet queries surfaced (pre-truncation)
     if seeds:
-        corpus, by_id, ps_hits, pt_hits = await _collect(seeds, vertical=False, unwatched_only=True)
+        corpus, by_id, ps_hits, pt_hits = await _collect(seeds, vertical=vertical, unwatched_only=True)
         scored_pool = len(by_id)
         target_ids = {"performers": set(perf_ids), "tags": set(tag_ids), "studios": set(studio_ids)}
         candidates = _rank(by_id, target_ids, corpus, ps_hits, pt_hits,
@@ -224,10 +227,13 @@ async def build_next_up_pool(limit: int = 25) -> list:
     if len(candidates) < limit:
         have = {c["id"] for c in candidates} | watched_ids
         shortfall = limit - len(candidates)
+        backfill_filter = {"play_count": {"value": 0, "modifier": "EQUALS"}}
+        if vertical:
+            backfill_filter["orientation"] = {"value": ["PORTRAIT"]}
         backfill = await stash_client.fetch_scenes(
             filter_args={"sort": "date", "direction": "DESC"},
             page=1, per_page=shortfall + 10,
-            scene_filter={"play_count": {"value": 0, "modifier": "EQUALS"}},
+            scene_filter=backfill_filter,
         )
         for s in (backfill or {}).get("scenes", []):
             if len(candidates) >= limit:
