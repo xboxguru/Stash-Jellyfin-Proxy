@@ -113,6 +113,67 @@ class TestPlaybackInfo:
         assert ms["SupportsDirectPlay"] is False
 
 
+# ── Feature 2 — Client-Forced Transcoding (dual-advertise) ────────────────────
+
+class TestForcedTranscodeAdvertise:
+    """PlaybackInfo advertises the Stash HLS TranscodingUrl on compatible files ONLY when the
+    client explicitly forces transcode (EnableDirectPlay=false).  A normal play stays DirectPlay
+    with no TranscodingUrl, so clients like Firefox Web don't deadlock (§2.10, 2026-07-15)."""
+
+    def test_compatible_file_normal_play_no_transcode_url(self, client, monkeypatch):
+        monkeypatch.setattr("config.ENABLE_FORCED_TRANSCODE", True)
+        scene = make_scene(scene_id="123", video_codec="h264", fmt="mp4")
+        encoded = encode_id("scene", "123")
+        with patch("core.stash_client.get_scene", new=AsyncMock(return_value=scene)):
+            data = client.post(f"/items/{encoded}/playbackinfo").json()
+        ms = data["MediaSources"][0]
+        # Direct play only; NO TranscodingUrl advertised on a normal play.
+        assert ms["SupportsDirectPlay"] is True
+        assert ms["SupportsDirectStream"] is True
+        assert ms["DirectStreamUrl"] == f"/Videos/{encoded}/stream"
+        assert ms["TranscodingSubProtocol"] == "http"
+        assert "TranscodingUrl" not in ms
+
+    def test_compatible_file_forced_transcode_advertises_hls(self, client, monkeypatch):
+        # Client picked "Play with → Transcoding": PlaybackInfo body sends EnableDirectPlay=false
+        # + EnableTranscoding=true → transcode-only with the HLS TranscodingUrl (Wholphin/Fladder).
+        monkeypatch.setattr("config.ENABLE_FORCED_TRANSCODE", True)
+        scene = make_scene(scene_id="123", video_codec="h264", fmt="mp4")
+        encoded = encode_id("scene", "123")
+        body = {"EnableDirectPlay": False, "EnableDirectStream": False, "EnableTranscoding": True}
+        with patch("core.stash_client.get_scene", new=AsyncMock(return_value=scene)):
+            data = client.post(f"/items/{encoded}/playbackinfo", json=body).json()
+        ms = data["MediaSources"][0]
+        assert ms["SupportsDirectPlay"] is False
+        assert ms["SupportsDirectStream"] is False
+        assert ms["TranscodingSubProtocol"] == "hls"
+        assert ms["TranscodingUrl"] == f"/Videos/{encoded}/master.m3u8"
+
+    def test_compatible_file_no_transcode_url_when_flag_off(self, client, monkeypatch):
+        monkeypatch.setattr("config.ENABLE_FORCED_TRANSCODE", False)
+        scene = make_scene(scene_id="123", video_codec="h264", fmt="mp4")
+        encoded = encode_id("scene", "123")
+        with patch("core.stash_client.get_scene", new=AsyncMock(return_value=scene)):
+            data = client.post(f"/items/{encoded}/playbackinfo").json()
+        ms = data["MediaSources"][0]
+        # Reverts to today's behavior: direct play only, no transcode URL.
+        assert ms["SupportsDirectPlay"] is True
+        assert ms["TranscodingSubProtocol"] == "http"
+        assert "TranscodingUrl" not in ms
+
+    def test_incompatible_file_transcode_only_regardless_of_flag(self, client, monkeypatch):
+        # Auto-transcode for genuinely incompatible files must never regress (§2.10).
+        monkeypatch.setattr("config.ENABLE_FORCED_TRANSCODE", False)
+        scene = make_scene(scene_id="123", video_codec="mpeg4", fmt="avi")
+        encoded = encode_id("scene", "123")
+        with patch("core.stash_client.get_scene", new=AsyncMock(return_value=scene)):
+            data = client.post(f"/items/{encoded}/playbackinfo").json()
+        ms = data["MediaSources"][0]
+        assert ms["SupportsDirectPlay"] is False
+        assert ms["TranscodingSubProtocol"] == "hls"
+        assert ms["TranscodingUrl"] == f"/Videos/{encoded}/master.m3u8"
+
+
 # ── Vertical Multi-View ("Triptych") compositor wiring ────────────────────────
 
 class TestVerticalPlaybackInfo:
@@ -223,6 +284,48 @@ class TestStreamEndpoint:
             r = client.get(f"/videos/{encoded}/stream", follow_redirects=False)
         assert r.status_code == 302
         assert "master.m3u8" in r.headers.get("location", "")
+
+    def _make_m3u8_response(self):
+        """Fake Stash HLS playlist response for _rewrite_hls_playlist."""
+        mock_r = MagicMock()
+        mock_r.status_code = 200
+        mock_r.text = "#EXTM3U\n#EXTINF:6.0,\n0.ts?apikey=secret\n#EXT-X-ENDLIST\n"
+        return mock_r
+
+    def test_m3u8_on_compatible_file_returns_rewritten_hls(self, client, monkeypatch):
+        # Feature 2: a forced .m3u8 request on a compatible file serves rewritten Stash HLS,
+        # not raw mp4 passthrough (the pre-feature bug).
+        monkeypatch.setattr("config.ENABLE_FORCED_TRANSCODE", True)
+        scene = make_scene(scene_id="123", video_codec="h264", fmt="mp4")
+        encoded = encode_id("scene", "123")
+        with patch("core.stash_client.get_scene", new=AsyncMock(return_value=scene)), \
+             patch("api.stream_routes.stream_client.get",
+                   new=AsyncMock(return_value=self._make_m3u8_response())):
+            r = client.get(f"/videos/{encoded}/master.m3u8")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("application/x-mpegURL")
+        # Segment line rewritten to our proxy /hls/ path, upstream query stripped.
+        assert "/hls/0.ts" in r.text
+        assert "apikey" not in r.text
+        assert "#EXTM3U" in r.text
+
+    def test_m3u8_on_compatible_file_passthrough_when_flag_off(self, client, monkeypatch):
+        # Kill-switch off → a .m3u8 on a compatible file reverts to old behavior
+        # (falls through to raw passthrough; no HLS rewrite).
+        monkeypatch.setattr("config.ENABLE_FORCED_TRANSCODE", False)
+        scene = make_scene(scene_id="123", video_codec="h264", fmt="mp4")
+        encoded = encode_id("scene", "123")
+        mock_resp = self._make_mock_response(body=b"raw mp4 bytes")
+        hls_get = AsyncMock(return_value=self._make_m3u8_response())
+        with patch("core.stash_client.get_scene", new=AsyncMock(return_value=scene)), \
+             patch("api.stream_routes.stream_client.get", new=hls_get), \
+             patch("api.stream_routes.stream_client.build_request", return_value=MagicMock()), \
+             patch("api.stream_routes.stream_client.send", new=AsyncMock(return_value=mock_resp)):
+            r = client.get(f"/videos/{encoded}/master.m3u8")
+        assert r.status_code == 200
+        # Old behavior = passthrough: HLS playlist rewrite was never invoked.
+        hls_get.assert_not_awaited()
+        assert r.content == b"raw mp4 bytes"
 
 
 # ── GET /videos/{id}/subtitles/{index}/stream.srt ────────────────────────────

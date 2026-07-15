@@ -179,6 +179,18 @@ class TestVerticalConfigRoundTrip:
         assert config.VERTICAL_SESSION_TTL == 2400
         assert config.VERTICAL_READY_SEGMENTS == 3
 
+    def test_forced_transcode_is_bool_and_round_trips(self, tmp_path, monkeypatch):
+        # Feature 2 kill-switch — bool, default True, wired through all four config places.
+        assert config._coerce_config_value("ENABLE_FORCED_TRANSCODE", "true") is True
+        assert config._coerce_config_value("ENABLE_FORCED_TRANSCODE", "false") is False
+        assert "ENABLE_FORCED_TRANSCODE" in config._supported_keys
+        monkeypatch.setattr(config, "CONFIG_FILE", str(tmp_path / "forced.conf"))
+        monkeypatch.setattr(config, "ENABLE_FORCED_TRANSCODE", False)
+        config.save_config()
+        config.ENABLE_FORCED_TRANSCODE = True
+        config.load_config_file()
+        assert config.ENABLE_FORCED_TRANSCODE is False
+
     def test_vertical_debug_is_bool_and_round_trips(self, tmp_path, monkeypatch):
         assert config._coerce_config_value("VERTICAL_DEBUG", "true") is True
         assert config._coerce_config_value("VERTICAL_DEBUG", "false") is False

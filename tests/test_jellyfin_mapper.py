@@ -354,6 +354,56 @@ class TestFormatJellyfinItem:
         assert ms["SupportsDirectPlay"] is True
         assert ms["SupportsDirectStream"] is True
 
+    def test_compatible_file_no_transcode_url_on_normal_play(self, monkeypatch):
+        # Feature 2 (revised 2026-07-15): a compatible file on a NORMAL play advertises
+        # DirectPlay only and NO TranscodingUrl — even with the kill-switch on.  Advertising a
+        # TranscodingUrl alongside DirectPlay deadlocked Firefox Jellyfin Web (§2.10).  Forced
+        # transcode is still reachable on demand via EnableDirectPlay=false (force_transcode_only).
+        monkeypatch.setattr("config.ENABLE_FORCED_TRANSCODE", True)
+        scene = make_scene(video_codec="h264", fmt="mp4")
+        item = format_jellyfin_item(scene)
+        ms = item["MediaSources"][0]
+        assert ms["SupportsDirectPlay"] is True
+        assert ms["DirectStreamUrl"].endswith("/stream")
+        assert "TranscodingUrl" not in ms
+        assert ms["TranscodingSubProtocol"] == "http"
+        # SupportsTranscoding stays advertised so clients still offer "Play with → Transcoding".
+        assert ms["SupportsTranscoding"] is True
+
+    def test_compatible_file_no_transcode_url_when_flag_off(self, monkeypatch):
+        # Kill-switch off → today's behavior: DirectPlay only, no transcode URL, http protocol.
+        monkeypatch.setattr("config.ENABLE_FORCED_TRANSCODE", False)
+        scene = make_scene(video_codec="h264", fmt="mp4")
+        item = format_jellyfin_item(scene)
+        ms = item["MediaSources"][0]
+        assert ms["SupportsDirectPlay"] is True
+        assert ms["TranscodingSubProtocol"] == "http"
+        assert "TranscodingUrl" not in ms
+
+    def test_compatible_file_forced_transcode_only_disables_direct_play(self, monkeypatch):
+        # Feature 2 §2.3.1: when the client picks 'Play with → Transcoding' it sends
+        # EnableDirectPlay=false; honor it by advertising HLS-only so the client actually
+        # fetches the TranscodingUrl instead of direct-playing the compatible file.
+        monkeypatch.setattr("config.ENABLE_FORCED_TRANSCODE", True)
+        scene = make_scene(video_codec="h264", fmt="mp4")
+        item = format_jellyfin_item(scene, force_transcode_only=True)
+        ms = item["MediaSources"][0]
+        assert ms["SupportsDirectPlay"] is False
+        assert ms["SupportsDirectStream"] is False
+        assert ms["TranscodingSubProtocol"] == "hls"
+        assert ms["TranscodingUrl"].endswith("/master.m3u8")
+        assert "DirectStreamUrl" not in ms
+
+    def test_forced_transcode_only_still_dual_when_flag_off(self, monkeypatch):
+        # Kill-switch off → the whole forced-transcode feature is disabled, so even an explicit
+        # client transcode request falls back to today's DirectPlay-only behavior.
+        monkeypatch.setattr("config.ENABLE_FORCED_TRANSCODE", False)
+        scene = make_scene(video_codec="h264", fmt="mp4")
+        item = format_jellyfin_item(scene, force_transcode_only=True)
+        ms = item["MediaSources"][0]
+        assert ms["SupportsDirectPlay"] is True
+        assert "TranscodingUrl" not in ms
+
     def test_subtitles_included_when_captions_present(self):
         captions = [{"language_code": "eng", "caption_type": "srt"}]
         scene = make_scene(captions=captions)

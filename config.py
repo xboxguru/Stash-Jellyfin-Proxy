@@ -103,6 +103,8 @@ VERTICAL_DEBUG = False            # verbose vertical diagnostics at INFO (select
 VERTICAL_READRATE = 0.0           # input read-rate cap for the vertical subs; 0 = unlimited (full-speed encode)
 VERTICAL_SESSION_TTL = 1800       # seconds with no fetch before stage-2 session destroy (stage 1 = VERTICAL_IDLE_TIMEOUT)
 VERTICAL_READY_SEGMENTS = 2       # segments required on disk before PlaybackInfo returns
+# Client-Forced Transcoding via Stash — Feature 2
+ENABLE_FORCED_TRANSCODE = True    # advertise a Stash HLS TranscodingUrl on every item so "Play with -> Transcoding" is offered everywhere; off = revert to codec-gated auto-transcode only
 
 config_defined_keys = set()
 env_overrides = []
@@ -146,6 +148,7 @@ def save_config():
         "VERTICAL_TAG_WINDOW", "VERTICAL_DATE_WINDOW_DAYS",
         "VERTICAL_IDLE_TIMEOUT", "VERTICAL_MAX_SESSIONS", "VERTICAL_HWACCEL", "VERTICAL_DEBUG",
         "VERTICAL_READRATE", "VERTICAL_SESSION_TTL", "VERTICAL_READY_SEGMENTS",
+        "ENABLE_FORCED_TRANSCODE",
     ]
 
     try:
@@ -187,7 +190,8 @@ def _coerce_config_value(key, val):
     elif key in ["ENABLE_FILTERS", "ENABLE_TAG_FILTERS", "ENABLE_ALL_TAGS", "REQUIRE_AUTH_FOR_CONFIG",
                  "STASH_VERIFY_TLS", "TRUST_PROXY_HEADERS", "UI_PUBLIC_STATUS_ENDPOINT",
                  "UI_CSRF_PROTECTION", "ENABLE_LIVE_TV", "ENABLE_TUNARR", "ENABLE_STASH_CHANNELS",
-                 "ENABLE_HANDY_SYNC", "ENABLE_VERTICAL_MULTI", "VERTICAL_DEBUG"]:
+                 "ENABLE_HANDY_SYNC", "ENABLE_VERTICAL_MULTI", "VERTICAL_DEBUG",
+                 "ENABLE_FORCED_TRANSCODE"]:
         return str(val).lower() in ['true', '1', 'yes', 'on']
     elif key in ["TAG_GROUPS", "LATEST_GROUPS", "TRUSTED_PROXY_IPS", "CORS_ALLOWED_ORIGINS", "UI_ALLOWED_IPS"]:
         return [x.strip() for x in str(val).split(",") if x.strip()]
@@ -253,6 +257,7 @@ _supported_keys = [
     "VERTICAL_TAG_WINDOW", "VERTICAL_DATE_WINDOW_DAYS",
     "VERTICAL_IDLE_TIMEOUT", "VERTICAL_MAX_SESSIONS", "VERTICAL_HWACCEL", "VERTICAL_DEBUG",
     "VERTICAL_READRATE", "VERTICAL_SESSION_TTL", "VERTICAL_READY_SEGMENTS",
+    "ENABLE_FORCED_TRANSCODE",
 ]
 
 for k in _supported_keys:

@@ -1,3 +1,4 @@
+import json
 import logging
 import httpx
 from starlette.responses import JSONResponse, Response, StreamingResponse, RedirectResponse
@@ -14,6 +15,43 @@ stream_client = httpx.AsyncClient(verify=getattr(config, "STASH_VERIFY_TLS", Fal
 async def endpoint_playback_info(request: Request):
     raw_item_id = request.path_params.get("item_id", "")
     logger.info(f"PlaybackInfo: {request.method} item={raw_item_id!r}")
+
+    # §2.3.1 investigation — capture the FULL raw request so we can see exactly what Wholphin
+    # sends when the user picks "Play with -> Transcoding".  The transcode choice most likely
+    # shows up as EnableDirectPlay/EnableDirectStream=false + EnableTranscoding=true in the
+    # PlaybackInfo POST body (stock Jellyfin protocol) — flags our response currently ignores.
+    # Log the query, the exact flag VALUES, the raw JSON body, and the full DeviceProfile.
+    _ua = request.headers.get("user-agent", "")
+    _client = next((c for c in ["Infuse", "Wholphin", "Findroid", "Fladder", "ErsatzTV", "VLC", "Jellyfin"] if c in _ua), (_ua.split("/")[0][:24] or "Unknown"))
+    logger.info(f"F2 PlaybackInfo request: client={_client!r} {request.method} {request.url.path}"
+                f"{('?' + request.url.query) if request.url.query else ''}")
+    logger.debug(f"F2 PlaybackInfo user-agent: {_ua!r}")
+    # When the client picks "Play with -> Transcoding" it sends EnableDirectPlay=false +
+    # EnableTranscoding=true.  Honor it (stock Jellyfin protocol): advertise HLS-only so the
+    # client actually reaches the transcode path.  Otherwise it keeps our dual-advertised
+    # DirectPlay support and direct-plays, never fetching the TranscodingUrl (§2.3.1 finding).
+    force_transcode_only = False
+    if request.method == "POST":
+        try:
+            _raw = await request.body()
+            _body = json.loads(_raw) if _raw else {}
+            _dp = _body.get("DeviceProfile") or {}
+            force_transcode_only = (_body.get("EnableDirectPlay") is False
+                                    and _body.get("EnableTranscoding") is not False)
+            logger.info(
+                f"F2 PlaybackInfo flags: item={raw_item_id!r} "
+                f"EnableDirectPlay={_body.get('EnableDirectPlay')} "
+                f"EnableDirectStream={_body.get('EnableDirectStream')} "
+                f"EnableTranscoding={_body.get('EnableTranscoding')} "
+                f"AllowVideoStreamCopy={_body.get('AllowVideoStreamCopy')} "
+                f"MaxStreamingBitrate={_body.get('MaxStreamingBitrate')} "
+                f"DeviceProfile.MaxStreamingBitrate={_dp.get('MaxStreamingBitrate')} "
+                f"AudioStreamIndex={_body.get('AudioStreamIndex')}"
+            )
+            logger.debug(f"F2 PlaybackInfo RAW body: {_raw.decode('utf-8', 'replace')}")
+            logger.debug(f"F2 PlaybackInfo DeviceProfile: {json.dumps(_dp)[:4000]}")
+        except Exception as e:
+            logger.warning(f"F2 PlaybackInfo body parse failed: {e}")
 
     # Live TV channels have their own playback path
     from api import live_tv_routes, live_tv_data as _ltd
@@ -48,7 +86,11 @@ async def endpoint_playback_info(request: Request):
     from api import handy_controller
     handy_controller.prewarm(scene)
 
-    jellyfin_item = jellyfin_mapper.format_jellyfin_item(scene)
+    # Confirmed safe (2026-07-15): normal play sends EnableDirectPlay=true, only "Play with ->
+    # Transcoding" sends false — so honoring the flag disables DirectPlay solely on explicit
+    # client request, leaving normal playback untouched.
+    logger.info(f"F2 decision: item={raw_item_id!r} force_transcode_only={force_transcode_only}")
+    jellyfin_item = jellyfin_mapper.format_jellyfin_item(scene, force_transcode_only=force_transcode_only)
     return JSONResponse({
         "MediaSources": jellyfin_item.get("MediaSources", []),
         "PlaySessionId": f"stash_{raw_id}"
@@ -68,10 +110,11 @@ def _requires_transcode(scene: dict) -> bool:
     return (v_codec and v_codec not in safe_codecs) or (container and container not in safe_containers)
 
 async def _rewrite_hls_playlist(stash_base: str, raw_id: str, item_id: str, apikey: str) -> Response:
-    logger.debug(f"Serving rewritten HLS Playlist for scene {raw_id}")
     stash_m3u8_url = f"{stash_base}/scene/{raw_id}/stream.m3u8"
-    if apikey: 
+    if apikey:
         stash_m3u8_url += f"?apikey={apikey}"
+    # §2.8 — record the resolved Stash transcode URL we proxy to (apikey redacted).
+    logger.info(f"HLS: proxying Stash transcode scene={raw_id} -> {stash_base}/scene/{raw_id}/stream.m3u8")
     
     try:
         m3u8_resp = await stream_client.get(stash_m3u8_url, timeout=10.0)
@@ -211,15 +254,40 @@ async def endpoint_stream(request: Request):
         logger.info(f"Redirecting client download to raw file: {raw_id}")
         return RedirectResponse(url=dl_url, status_code=302)
         
-    if _requires_transcode(scene):
-        if not request.url.path.lower().endswith(".m3u8"):
-            logger.debug(f"Redirecting strict client to explicit .m3u8 URL for scene {raw_id}")
-            new_url = f"/Videos/{item_id}/master.m3u8"
-            if request.url.query: 
-                new_url += f"?{request.url.query}"
-            return RedirectResponse(url=new_url, status_code=302)
-        
+    # Feature 2 — Client-Forced Transcoding.  Route by URL intent, not codec: any request
+    # whose path ends in .m3u8 is served as Stash HLS.  A genuinely incompatible file always
+    # takes this path; a compatible file only does so when the forced-transcode kill-switch is
+    # on (client picked "Play with -> Transcoding").  Seek is client-native — the full VOD
+    # playlist is served unchanged, no start= threading here (§2.2).
+    path_is_m3u8 = request.url.path.lower().endswith(".m3u8")
+    forced_enabled = getattr(config, "ENABLE_FORCED_TRANSCODE", True)
+    needs_transcode = _requires_transcode(scene)
+
+    if path_is_m3u8:
+        # §2.3.1 investigation — dump EVERY query param the client appended to the bare
+        # TranscodingUrl, so we can see whether MaxStreamingBitrate/maxWidth/maxHeight/
+        # videoBitRate ever arrive here (vs. only in the PlaybackInfo POST body above).
+        logger.info(
+            f"F2 transcode request: scene={raw_id} path={request.url.path} "
+            f"query_params={dict(request.query_params)}"
+        )
+
+    if path_is_m3u8 and (needs_transcode or forced_enabled):
+        logger.info(
+            f"Stream: HLS transcode scene={raw_id} client_url={request.url.path}"
+            f"{('?' + request.url.query) if request.url.query else ''} "
+            f"needs_transcode={needs_transcode} forced_enabled={forced_enabled}"
+        )
         return await _rewrite_hls_playlist(stash_base, raw_id, item_id, apikey)
+
+    if needs_transcode:
+        # Incompatible file requested without an .m3u8 extension — redirect the strict client
+        # to the explicit master.m3u8 so it fetches HLS instead of raw (broken) passthrough.
+        logger.debug(f"Redirecting strict client to explicit .m3u8 URL for scene {raw_id}")
+        new_url = f"/Videos/{item_id}/master.m3u8"
+        if request.url.query:
+            new_url += f"?{request.url.query}"
+        return RedirectResponse(url=new_url, status_code=302)
 
     start_ticks = next((v for k, v in request.query_params.items() if k.lower() == "starttimeticks"), None)
     if start_ticks:

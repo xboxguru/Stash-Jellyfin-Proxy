@@ -165,7 +165,7 @@ def _build_subtitle_streams(item_id: str, captions: list) -> list:
         })
     return streams
 
-def _build_media_sources(item_id: str, path: str, files: list, runtime_ticks: int, title: str, captions: list = None, vertical: bool = False) -> list:
+def _build_media_sources(item_id: str, path: str, files: list, runtime_ticks: int, title: str, captions: list = None, vertical: bool = False, force_transcode_only: bool = False) -> list:
     if not path or not files: return []
     file_data = files[0]
     v_codec = str(file_data.get("video_codec") or "h264").lower()
@@ -187,17 +187,44 @@ def _build_media_sources(item_id: str, path: str, files: list, runtime_ticks: in
         "IgnoreDts": False, "IgnoreIndex": False, "GenPtsInput": False, "IsInfiniteStream": False, "RequiresOpening": False, "RequiresClosing": False, "RequiresLooping": False, "HasSegments": False
     }
 
+    forced_transcode = getattr(config, "ENABLE_FORCED_TRANSCODE", True)
+    transcode_url = f"/Videos/{item_id}/master.m3u8"
+
     if vertical:
         # Vertical Multi-View: always drive the triptych compositor.  Advertise an
         # HLS transcode and disable direct play so the client fetches our composite
         # manifest instead of the raw file (mirrors the Live TV channel wiring).
         # endpoint_stream detects the vscene- id and redirects to a fresh session;
         # PlaybackInfo overrides this with a session-scoped URL when it runs first.
-        media_source.update({"SupportsDirectPlay": False, "SupportsDirectStream": False, "TranscodingUrl": f"/Videos/{item_id}/master.m3u8", "TranscodingSubProtocol": "hls", "TranscodingContainer": "ts"})
+        media_source.update({"SupportsDirectPlay": False, "SupportsDirectStream": False, "TranscodingUrl": transcode_url, "TranscodingSubProtocol": "hls", "TranscodingContainer": "ts"})
+        play_path = "forced-hls (vertical)"
     elif needs_transcode:
-        media_source.update({"SupportsDirectPlay": False, "SupportsDirectStream": False, "TranscodingUrl": f"/Videos/{item_id}/master.m3u8", "TranscodingSubProtocol": "hls", "TranscodingContainer": "ts"})
+        # Incompatible codec/container — direct play disabled, HLS transcode only (unchanged).
+        media_source.update({"SupportsDirectPlay": False, "SupportsDirectStream": False, "TranscodingUrl": transcode_url, "TranscodingSubProtocol": "hls", "TranscodingContainer": "ts"})
+        play_path = "forced-hls (incompatible)"
+    elif forced_transcode and force_transcode_only:
+        # Feature 2 — the client explicitly requested transcode-only for this play
+        # (PlaybackInfo sent EnableDirectPlay=false + EnableTranscoding=true, i.e. the user
+        # picked "Play with -> Transcoding").  Honor it: disable direct play and advertise the
+        # Stash HLS TranscodingUrl only, so the client actually fetches master.m3u8 instead of
+        # direct-playing the compatible file (§2.3.1 finding — clients ignore a TranscodingUrl
+        # while DirectPlay is still advertised).
+        media_source.update({"SupportsDirectPlay": False, "SupportsDirectStream": False, "TranscodingUrl": transcode_url, "TranscodingSubProtocol": "hls", "TranscodingContainer": "ts"})
+        play_path = "forced-hls (client-requested)"
     else:
+        # Compatible file, no explicit transcode request → DirectPlay only, and crucially NO
+        # TranscodingUrl.  Advertising a TranscodingUrl *alongside* DirectPlay (the old
+        # dual-advertise) made some clients — notably Firefox Jellyfin Web — load hls.js and
+        # then deadlock against the direct .mp4 fetch (§2.10 risk, confirmed 2026-07-15).
+        # Forced transcode stays fully available on demand: Wholphin/Fladder re-request
+        # PlaybackInfo with EnableDirectPlay=false (handled by the branch above), and
+        # SupportsTranscoding=true is still advertised so the client offers the option.  This
+        # is identical whether the kill-switch is on or off — the flag now only gates whether
+        # an explicit client transcode request (force_transcode_only) is honored.
         media_source.update({"SupportsDirectPlay": True, "SupportsDirectStream": True, "DirectStreamUrl": f"/Videos/{item_id}/stream", "TranscodingSubProtocol": "http"})
+        play_path = "directplay (forced-transcode on demand)" if forced_transcode else "directplay-only"
+
+    logger.info(f"PlaybackInfo MediaSource: item={item_id} play_path={play_path} codec={v_codec}/{container} forced_transcode={forced_transcode} force_transcode_only={force_transcode_only}")
     return [media_source]
 
 def _build_people(performers: list, cache_version: int, fake_blurhash: str) -> list:
@@ -254,7 +281,7 @@ def _build_studios(studio_obj: dict, cache_version: int, fake_blurhash: str) -> 
         studio_item.update({"PrimaryImageTag": s_tag, "ImageTags": {"Primary": s_tag}, "ImageBlurHashes": {"Primary": {s_tag: fake_blurhash}}})
     return [studio_item]
 
-def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None, vertical: bool = False) -> Dict[str, Any]:
+def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None, vertical: bool = False, force_transcode_only: bool = False) -> Dict[str, Any]:
     raw_id = str(scene.get("id"))
     # Vertical-library items get a 'vscene-' id so playback triggers the compositor;
     # decode_id() normalizes it back to 'scene-' everywhere else (see is_vertical_id).
@@ -290,7 +317,7 @@ def format_jellyfin_item(scene: Dict[str, Any], parent_id: str = None, vertical:
         "ImageBlurHashes": {"Primary": {primary_tag: fake_blurhash}, "Thumb": {primary_tag: fake_blurhash}, "Backdrop": {backdrop_tag: fake_blurhash}},
         "RunTimeTicks": runtime_ticks, "Width": (files[0].get("width") or 0) if files else 0, "Height": (files[0].get("height") or 0) if files else 0,
         "Trickplay": _build_trickplay_dict(item_id, runtime_ticks, files),
-        "MediaSources": _build_media_sources(item_id, path, files, runtime_ticks, title, scene.get("captions"), vertical=vertical),
+        "MediaSources": _build_media_sources(item_id, path, files, runtime_ticks, title, scene.get("captions"), vertical=vertical, force_transcode_only=force_transcode_only),
         "People": _build_people(scene.get("performers") or [], cache_version, fake_blurhash),
         "Studios": _build_studios(scene.get("studio"), cache_version, fake_blurhash),
         "UserData": {

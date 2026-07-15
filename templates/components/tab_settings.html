@@ -175,6 +175,16 @@
                         <input type="number" class="form-input" name="MAX_PAGE_SIZE" placeholder="200">
                     </div>
                 </div>
+                <div class="toggle-row" style="margin-top: 16px;">
+                    <label class="toggle-switch">
+                        <input type="checkbox" name="ENABLE_FORCED_TRANSCODE">
+                        <span class="toggle-slider"></span>
+                    </label>
+                    <div>
+                        <div class="toggle-label">Offer Forced Transcoding</div>
+                        <div class="toggle-hint">Advertise Stash's HLS transcode on every scene so "Play with → Transcoding" is always available (compatible files still default to Direct Play). Off = only auto-transcode incompatible codecs, as before.</div>
+                    </div>
+                </div>
             </div>
 
             <div class="card">
